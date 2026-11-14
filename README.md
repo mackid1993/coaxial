@@ -3001,7 +3001,12 @@ same everywhere; what differs is where they live and how you start them.
   channel's session was reused (`HIT`), opened (`MISS`) or replaced
   (`BYPASS`). `uh=` is the server the answer came from. `uct=` is how long
   it took to connect to that server, in seconds; `0.000` means an open
-  connection was reused.
+  connection was reused. One exception: on requests whose `uh=` is
+  `127.0.0.1:8197`, the playlists handed to the relay, `uct=` is a hop
+  inside the stack and says nothing about reuse (see "Playlist rewriting"
+  below). Reuse of the connections to the provider shows on video pieces
+  and on the relay's own playlist fetches, which are logged from
+  `127.0.0.2`.
 - **Reading the relay log.** Every line starts with `RELAY:`. It says when a
   channel was opened and closed and how many are open, how long the provider
   took to send the first video, when a reader joined or left and why, when a
@@ -3029,7 +3034,13 @@ each with comments. Where this page and the file disagree, the file is right.
   firewall and loopback. Anything they fetch leaves through the tunnel, and if
   the tunnel is down they have no other way out.
 - Because the loopback is shared, the pieces talk to each other on
-  `127.0.0.1` with no Docker network between them. nginx reaches the relay on
+  `127.0.0.1` with no Docker network between them. Those connections never
+  reach a network card or the tunnel, so opening one costs a few
+  microseconds. That is why nginx opens a new one to the relay for every
+  playlist and the relay closes it after answering: it keeps the relay
+  simple, and keeping them open would save nothing measurable. (A Unix
+  socket was ruled out for the same reason, and because socket files in a
+  shared folder do not work on every Docker setup.) nginx reaches the relay on
   `127.0.0.1:8197`, the relay reaches nginx on a provider's own port, and
   nginx keeps its HLS session memory on `127.0.0.1:8195`. gluetun's control
   server is held to `127.0.0.1:8000`. None of these is published.
