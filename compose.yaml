@@ -1308,7 +1308,7 @@ configs:
                   self.marks.append((now, self.total))
                   while now - self.marks[0][0] > 60:
                       self.marks.popleft()
-              if self.ring and now - self.ring[-1][0] > 4:
+              if self.ring and now - self.ring[-1][0] > 4 and not getattr(self, 'paced', False):   # (a bridged channel notes this itself)
                   say('a provider sent nothing for %.0f s, then carried on' % (now - self.ring[-1][0]))
               if now - self.born < BURST_SECONDS:
                   self.burst += len(data)
@@ -1493,10 +1493,13 @@ configs:
       def read_playlist(text):
           if '#EXTM3U' not in text:
               raise NotHls()
-          seq, target, pieces, variants, rate, ended = 0, 4.0, [], [], None, False
+          seq, target, pieces, variants, rate, ended, length, newest = 0, 4.0, [], [], None, False, 0.0, 0.0
           for line in text.splitlines():
               line = line.strip()
-              if line.startswith('#EXT-X-MEDIA-SEQUENCE:'):
+              if line.startswith('#EXTINF:'):           # a piece's playing time, in seconds (0 if it cannot be read)
+                  m = re.match(r'#EXTINF:\s*(\d+(?:\.\d*)?)', line)
+                  length = float(m.group(1)) if m else 0.0
+              elif line.startswith('#EXT-X-MEDIA-SEQUENCE:'):
                   seq = int(re.sub(r'\D', '', line[22:]) or 0)
               elif line.startswith('#EXT-X-TARGETDURATION:'):
                   target = float(re.sub(r'[^0-9.]', '', line[22:]) or 4)
@@ -1513,8 +1516,9 @@ configs:
                       rate = None
                   else:
                       pieces.append(line)
+                      newest, length = length, 0.0
           best = max(variants, key=lambda v: v[0])[1] if variants else None   # the best quality on offer
-          return seq, target, pieces, best, ended
+          return seq, target, pieces, best, ended, newest
 
       def hls_source(start, agent):
           home = urlsplit(start).netloc
@@ -1533,65 +1537,162 @@ configs:
                   status, data = await get(url, agent, 2 * 1024 * 1024)
                   if status != 200:
                       raise Refused(status)
-                  seq, target, pieces, variant, ended = read_playlist(data.decode('utf-8', 'replace'))
+                  seq, target, pieces, variant, ended, newest = read_playlist(data.decode('utf-8', 'replace'))
                   if not variant:
-                      return url, seq, target, pieces, ended
+                      return url, seq, target, pieces, ended, newest
                   url = inside(urljoin(url, variant))
               raise NotHls()
 
+          def before_minute():
+              # Seconds until just before the next whole minute on the wall clock, and 0 from 1 s before the minute
+              # until 0.3 s after it (time for what was waiting to reach a recorder on a slower link, and for a
+              # recorder whose clock is a little ahead of this one, or a little behind).
+              # Recorders stop at guide times, which are whole minutes, and cut the connection at once, so around
+              # then nothing is held back: a stop loses nothing. Holding on until then (not stopping early) keeps
+              # the newest video coming for as much of every minute as can be.
+              second = time.time() % 60
+              return 0.0 if second >= 59.0 or second < 0.3 else 59.0 - second
+
           async def source(ch):
               last, misses, lost, sent, fresh = None, 0, 0, deque(maxlen=60), time.monotonic()
-              while True:
-                  try:
-                      url, seq, target, pieces, ended = await look()
-                      misses = 0
-                  except (NotHls, Refused, OSError, ValueError, asyncio.TimeoutError) as e:
-                      # no playlist this time (a refusal, an error page, a playlist that cannot be joined
-                      # end to end): ask again, as a player would
-                      misses += 1
-                      refused = e.status if isinstance(e, Refused) else 0
-                      if misses > (8 if last is not None else 3):   # the playlist could not be had: 4 tries at the start, 9 once playing
-                          raise Refused(refused or 502)
-                      await asyncio.sleep(2 if last is not None else 1)
-                      continue
-                  top = seq + len(pieces) - 1
-                  afresh = last is not None and (top < last or seq > last + 1)
-                  if last is None or afresh:
-                      last = max(seq - 1, top - 3)      # joining, or the numbering started afresh: start near the newest video
-                  new = [(seq + i, p) for i, p in enumerate(pieces) if seq + i > last]
-                  for number, piece in new:
-                      last = number
+              # Video waiting to be handed on, as (when it is due, bytes), oldest first. Each piece goes out over its
+              # own playing time, after the one before it, so the stream grows at playing speed instead of in jumps,
+              # and a piece the provider publishes a little late is covered by the one still going out. Everything
+              # waiting goes out at once before each whole minute (see before_minute) and when this feed ends, so a
+              # recording that stops loses nothing.
+              queue = deque()
+
+              def due():                                # what may go out now
+                  now, flush = time.monotonic(), not before_minute()
+                  while queue and (flush or queue[0][0] <= now):
+                      yield queue.popleft()[1]
+
+              async def pause(until):                   # wait until then, handing on what falls due meanwhile
+                  while True:
+                      for part in due():
+                          yield part
+                      now = time.monotonic()
+                      if now >= until:
+                          return
+                      nap = min(until, queue[0][0] if queue else until) - now
+                      if queue:
+                          nap = min(nap, before_minute())
+                      await asyncio.sleep(max(0.0, nap))
+
+              async def during(job):                    # while a request is under way, hand on what falls due
+                  # A playlist or a piece can take seconds to come. Without this, nothing waiting went out for as
+                  # long as it took, and a whole minute that passed meanwhile passed with video still held back.
+                  job.add_done_callback(lambda j: j.cancelled() or j.exception())   # (its outcome is read below)
+                  while True:
+                      for part in due():
+                          yield part
+                      if job.done():
+                          return
+                      nap = None
+                      if queue:
+                          nap = max(0.0, min(queue[0][0] - time.monotonic(), before_minute()))
+                      await asyncio.wait({job}, timeout=nap)
+
+              job, got = None, None
+              ch.paced = True                           # its stream is paced here, so its own pauses are not the provider's
+              try:
+                  while True:
+                      began = time.monotonic()
                       try:
-                          address = inside(urljoin(url, piece))
-                      except NotHls:                    # a line that does not lead back to this proxy: not fetched
-                          lost += 1
+                          job = asyncio.ensure_future(look())
+                          async for part in during(job):
+                              yield part
+                          url, seq, target, pieces, ended, newest = job.result()
+                          misses = 0
+                      except (NotHls, Refused, OSError, ValueError, asyncio.TimeoutError) as e:
+                          # no playlist this time (a refusal, an error page, a playlist that cannot be joined
+                          # end to end): ask again, as a player would
+                          misses += 1
+                          refused = e.status if isinstance(e, Refused) else 0
+                          if misses > (8 if last is not None else 3):   # the playlist could not be had: 4 tries at the start, 9 once playing
+                              raise Refused(refused or 502)
+                          async for part in pause(time.monotonic() + (2 if last is not None else 1)):
+                              yield part
                           continue
-                      if afresh and name(address) in sent:   # already passed on, under its old number
-                          continue
-                      data = None
-                      for _ in range(2):
+                      top = seq + len(pieces) - 1
+                      afresh = last is not None and (top < last or seq > last + 1)
+                      opening = last is None or afresh
+                      if opening:
+                          last = max(seq - 1, top - 3)  # joining, or the numbering started afresh: start near the newest video
+                      new = [(seq + i, p) for i, p in enumerate(pieces) if seq + i > last]
+                      length = newest if 0 < newest <= 2 * target else target   # a piece's playing time, as the playlist gives it
+                      for number, piece in new:
+                          last = number
                           try:
-                              status, data = await get(address, agent)
-                              if status == 200 and data:
-                                  break
-                              data = None
-                          except (OSError, ValueError, asyncio.TimeoutError):
-                              data = None
-                      if data is None:
-                          lost += 1
-                          say('a piece of video could not be fetched and is missing from a stream')
-                          if lost >= 3:
-                              raise Refused(502)
-                          continue
-                      lost = 0
-                      sent.append(name(address))
-                      fresh = time.monotonic()
-                      for i in range(0, len(data), 65536):
-                          yield data[i:i + 65536]
-                  if not new and (ended or time.monotonic() - fresh > max(30, 6 * target)):
-                      return                            # the channel's playlist has finished, or stopped moving
-                  # ask again at the pace a player would
-                  await asyncio.sleep(max(0.5, target if new else target / 2))
+                              address = inside(urljoin(url, piece))
+                          except NotHls:                # a line that does not lead back to this proxy: not fetched
+                              lost += 1
+                              continue
+                          if afresh and name(address) in sent:   # already passed on, under its old number
+                              continue
+                          data = None
+                          for _ in range(2):
+                              try:
+                                  job = asyncio.ensure_future(get(address, agent))
+                                  async for part in during(job):
+                                      yield part
+                                  status, data = job.result()
+                                  if status == 200 and data:
+                                      break
+                                  data = None
+                              except (OSError, ValueError, asyncio.TimeoutError):
+                                  data = None
+                          if data is None:
+                              lost += 1
+                              say('a piece of video could not be fetched and is missing from a stream')
+                              if lost >= 3:
+                                  raise Refused(502)
+                              continue
+                          lost = 0
+                          sent.append(name(address))
+                          fresh = now = time.monotonic()
+                          if got is not None and now - got > max(4.0, 1.5 * length):   # a piece well later than its length
+                              say('a provider sent nothing for %.0f s, then carried on' % (now - got))
+                          got = now
+                          parts = [data[i:i + 65424] for i in range(0, len(data), 65424)]   # (whole 188-byte packets)
+                          # A channel's start goes at once, after anything waiting, except its newest piece: that one
+                          # goes out over its playing time like any other, so the stream has video in hand from its
+                          # first second instead of standing still until the provider's next piece.
+                          if opening:
+                              while queue:
+                                  yield queue.popleft()[1]
+                              if number != new[-1][0]:
+                                  for part in parts:
+                                      yield part
+                                  continue
+                          start = max(now, queue[-1][0] if queue else now)
+                          if start - now > 2 * target:  # never more than two target durations waiting: the rest goes now
+                              shift = start - now - 2 * target
+                              for _ in range(len(queue)):
+                                  t, part = queue.popleft()
+                                  queue.append((t - shift, part))
+                              start -= shift
+                          queue.extend((start + length * k / len(parts), part) for k, part in enumerate(parts))
+                          for part in due():
+                              yield part
+                      if not new and (ended or time.monotonic() - fresh > max(30, 6 * target)):
+                          while queue:
+                              yield queue.popleft()[1]
+                          return                        # the channel's playlist has finished, or stopped moving
+                      # Ask again at the pace the HLS spec sets and players keep (RFC 8216bis, 6.3.4): after a playlist
+                      # that changed, the playing time of its newest piece, counted from when this look began; after
+                      # one that did not, half the target duration. Waiting a whole target duration after the fetches
+                      # instead made this stream fall behind a player and collect pieces in bunches.
+                      wait = (newest if 0 < newest < target else target) if new else target / 2
+                      async for part in pause(began + max(0.5, wait)):
+                          yield part
+              except Exception:                         # the feed is ending: what is waiting is handed on first
+                  while queue:
+                      yield queue.popleft()[1]
+                  raise
+              finally:
+                  if job is not None and not job.done():
+                      job.cancel()                      # the reader left in the middle of a request: it is dropped
           return source
 
       # ---------------------------------------------------------------------------
