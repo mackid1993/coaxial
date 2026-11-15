@@ -1,4 +1,3 @@
-b248590 README: describe the paced HLS-to-MPEG-TS bridge, changelog for Nov 15
 # iptv-vpn-proxy
 
 Put all of your IPTV behind one VPN, on every device, without installing a VPN
@@ -3333,9 +3332,8 @@ serves at most 100 readers at once, all channels together.
   from its first byte. A reader that joins later starts with the newest 10
   seconds of video, handed on at playing speed after the first 2 seconds (kept
   in the relay, not dumped on the player), so it starts about 10 seconds
-  behind live and has
-  something in hand when the provider pauses, as a player on its own
-  connection has from the provider's opening burst. The amount is counted in
+  behind live and has something in hand when the provider pauses, as a player
+  on its own connection has from the provider's opening burst. The amount is counted in
   seconds, not bytes: the relay measures each channel's real rate over the
   last minute and over the last 15 seconds, takes the larger, and multiplies.
   It never hands over more than the last 20 seconds of arrivals. In a channel's first 8 seconds there is no rate
