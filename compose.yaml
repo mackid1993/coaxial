@@ -444,6 +444,44 @@ configs:
       proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
       proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$pscheme/$$1$$2;   # "//server/path": same http or https as the provider
 
+      # ---- An http:// address with no port is sent with :80 written out. nginx
+      # ---- hands an address with no port to a learned video server's entry of the
+      # ---- same name (see "Video servers" above), whatever its http or https, and
+      # ---- such an entry connects to port 443; so a plain http:// request to a name
+      # ---- also learned from https:// would go to 443 and fail. With :80 written
+      # ---- out, no entry matches it and it goes where it says. https:// is not
+      # ---- changed, so it still uses the learned entries.
+      map $$provider $$provider_to {
+        volatile;
+        "~*^(?<p80h>http://[^/:?]+)$$"                 $$p80h:80;
+        default                                        $$provider;
+      }
+      map $$http_x_hls_provider $$hls_provider_to {
+        volatile;
+        "~*^(?<h80h>http://[^/:?]+)$$"                 $$h80h:80;
+        default                                        $$http_x_hls_provider;
+      }
+      map $$next $$next_to {
+        volatile;
+        "~*^(?<n80h>http://[^/:?]+)(?<n80r>[/?].*)?$$" $$n80h:80$$n80r;
+        default                                        $$next;
+      }
+      map $$pbase $$pbase_to {
+        volatile;
+        "~*^(?<b80h>http://[^/:?]+)$$"                 $$b80h:80;
+        default                                        $$pbase;
+      }
+      map $$cdn_target $$cdn_to {
+        volatile;
+        "~*^(?<c80h>http://[^/:?]+)(?<c80r>[/?].*)?$$" $$c80h:80$$c80r;
+        default                                        $$cdn_target;
+      }
+      map $$cdu_to $$cdu_go {
+        volatile;
+        "~*^(?<u80h>http://[^/:?]+)(?<u80r>[/?].*)?$$" $$u80h:80$$u80r;
+        default                                        $$cdu_to;
+      }
+
       # ---- 2. Where a /__cdn/ request really goes, and what it may not reach.
       map $$request_uri $$cdn_target {
         default "";
@@ -611,7 +649,7 @@ configs:
           proxy_cache_bypass $$http_x_hls_renew; # asked to replace a session that is gone
           proxy_ignore_headers Cache-Control Expires Set-Cookie Vary X-Accel-Expires;
           add_header X-Hls-Sess $$upstream_cache_status always;
-          proxy_pass $$http_x_hls_provider;
+          proxy_pass $$hls_provider_to;
         }
       }
 
@@ -693,7 +731,7 @@ configs:
         proxy_pass http://127.0.0.1:$$server_port$$request_uri;
       }
       location = /healthz { access_log off; return 200; }
-      location / { proxy_pass $$provider$$up_uri; }
+      location / { proxy_pass $$provider_to$$up_uri; }
 
       # The guide and the API are text, often large. Let the provider compress
       # them if the app asks (as it would directly), and keep the framing that
@@ -705,7 +743,7 @@ configs:
         proxy_set_header Accept-Encoding $$http_accept_encoding;
         proxy_set_header X-Hls-Provider "";
         proxy_set_header X-Hls-Renew "";
-        proxy_pass $$provider$$up_uri;
+        proxy_pass $$provider_to$$up_uri;
       }
       # The provider's lists (channels, movies, series). They give logos and
       # posters as full addresses, usually on other sites. Those addresses are
@@ -729,7 +767,7 @@ configs:
         sub_filter '"http:\/\/'  '"http://$$http_host/__cdn/http/';
         sub_filter '"https://'   '"http://$$http_host/__cdn/https/';
         sub_filter '"http://'    '"http://$$http_host/__cdn/http/';
-        proxy_pass $$provider$$up_uri;
+        proxy_pass $$provider_to$$up_uri;
       }
 
       # ---- The status page: what is set up, what is wrong, where the VPN comes out.
@@ -812,7 +850,7 @@ configs:
         error_page 502 = @ts_plain;                      # the relay is not running: the provider directly
         proxy_pass http://127.0.0.1:8197/$$live_tv;
       }
-      location @ts_plain { proxy_pass $$provider$$up_uri; }
+      location @ts_plain { proxy_pass $$provider_to$$up_uri; }
 
       # A provider's ready-made M3U playlist lists every stream at the
       # provider's own address with the real login, so a player using it would
@@ -853,7 +891,7 @@ configs:
         if ($$next ~* "^(https?)://([^/]+)") { set $$cdn "/__cdn/$$1/$$2"; }
         if ($$next ~* "^(?<us>https?)://(?<uh>[^/?]+)(?<ud>/([^?]*/)?)") { set $$cdn_up "/__cdu/$$us/$$uh/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__top$$ud../"; }   # the playlist's real folder, for "../" lines
         error_page 400 401 403 404 410 429 500 502 503 504 509 520 521 522 523 524 = @hls_renew;   # the remembered session is gone
-        proxy_pass $$next;
+        proxy_pass $$next_to;
       }
       location @hls_renew {                   # open the channel again, once, and remember the new session
         chunked_transfer_encoding on;         # a playlist keeps the connection open, as the provider's own server does
@@ -879,7 +917,7 @@ configs:
         if ($$next ~* "^https?://(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$$)|\[|[^/]*[@%])") { return 403; }
         if ($$next ~* "^(https?)://([^/]+)") { set $$cdn "/__cdn/$$1/$$2"; }
         if ($$next ~* "^(?<us>https?)://(?<uh>[^/?]+)(?<ud>/([^?]*/)?)") { set $$cdn_up "/__cdu/$$us/$$uh/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__top$$ud../"; }   # the playlist's real folder, for "../" lines
-        proxy_pass $$next;
+        proxy_pass $$next_to;
       }
 
       # ---- Live HLS, the pieces: anything else asked inside a channel's folder is a
@@ -917,7 +955,7 @@ configs:
         proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
         proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$ns/$$1$$2;
         proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;
-        proxy_pass $$pbase$$pdir$$cn$$cq;
+        proxy_pass $$pbase_to$$pdir$$cn$$cq;
       }
 
       # ---- Live HLS, the start: the channel is opened. Ask the memory where this
@@ -955,7 +993,7 @@ configs:
         proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
         proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$cdn_s/$$1$$2;
         proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;   # "go to /some/path" on the same server
-        proxy_pass $$cdn_target;
+        proxy_pass $$cdn_to;
 
         # A playlist fetched from the other server: rewritten whatever type it is labelled.
         location ~ \.m3u8$$ {
@@ -966,7 +1004,7 @@ configs:
           if ($$cdn_forbidden) { return 403; }
           if ($$cdn_target = "") { return 404; }
           limit_except GET HEAD { deny all; }
-          proxy_pass $$cdn_target;
+          proxy_pass $$cdn_to;
         }
       }
 
@@ -984,7 +1022,7 @@ configs:
         proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;
         if ($$cdu_fix = lost) { return 404; }
         if ($$cdu_fix = over) { set $$cdu_to $$cdu_server; rewrite "(?i)^/__cdu/https?/[^/]+(/__up)*(?<dn>/.*)$$" $$dn break; }   # ".." as written, climbing too high: nginx's worked-out path, counted from the top folder
-        proxy_pass $$cdu_to;
+        proxy_pass $$cdu_go;
 
         location ~ \.m3u8$$ {
           chunked_transfer_encoding on;
@@ -997,7 +1035,7 @@ configs:
           limit_except GET HEAD { deny all; }
           if ($$cdu_fix = lost) { return 404; }
           if ($$cdu_fix = over) { set $$cdu_to $$cdu_server; rewrite "(?i)^/__cdu/https?/[^/]+(/__up)*(?<dn>/.*)$$" $$dn break; }
-          proxy_pass $$cdu_to;
+          proxy_pass $$cdu_go;
         }
       }
 
@@ -1652,7 +1690,7 @@ configs:
                                   if status == 200 and data:
                                       break
                                   data = None
-                              except (OSError, ValueError, asyncio.TimeoutError):
+                              except (OSError, ValueError, asyncio.TimeoutError, Refused):
                                   data = None
                           if data is None:
                               lost += 1
@@ -2118,6 +2156,15 @@ configs:
                           q = orig.find('?')
                           plain, query = (orig, '') if q < 0 else (orig[:q], orig[q:])
                           plain = plain[:-3] if plain.endswith('.ts') else plain
+                          # The same channel has one HLS address, whichever form the reader used
+                          # (/user/pass/1, /user/pass/1.ts, /live/user/pass/1.ts), as in channel_key: a
+                          # player on HLS asks for /live/user/pass/1.m3u8, and a second form would be a
+                          # second session at the provider, which ends the first.
+                          parts = [p for p in plain.split('/') if p]
+                          if parts and parts[0] == 'live':
+                              parts = parts[1:]
+                          if len(parts) == 3:
+                              plain = '/live/' + '/'.join(parts)
                           source = hls_source('http://127.0.0.1:%s/__ch%s.m3u8/__index.m3u8%s' % (port, plain, query), agent)
                       ch = CHANNELS[key] = Channel(key, source, provider)
               if sum(len(c.readers) for c in CHANNELS.values()) >= READERS_MAX:
@@ -2151,10 +2198,16 @@ configs:
                           else:
                               # a little faster when more than the cushion is waiting, a little slower when less
                               rate = speed * min(1.5, max(0.8, 1 + 0.5 * (rd.n - rd.pace[0]) / max(rd.pace[0], 1)))
-                              rd.pace[1] = min(rd.pace[1] + (now - rd.pace[2]) * rate, speed * JOIN_START)
+                              most = speed * JOIN_START
+                              rd.pace[1] = min(rd.pace[1] + (now - rd.pace[2]) * rate, most)
                               rd.pace[2] = now
-                              if rd.pace[1] < len(rd.q[0]):
-                                  await asyncio.wait({gone}, timeout=(len(rd.q[0]) - rd.pace[1]) / rate)
+                              # An item can hold more than JOIN_START seconds of video (the 256 KB start of the cushion
+                              # on a low-rate channel, or one piece of a very low-rate one). It goes once the allowance
+                              # is full, and the allowance then goes below zero, so the time it plays is waited for
+                              # after it instead.
+                              need = min(len(rd.q[0]), most)
+                              if rd.pace[1] < need:
+                                  await asyncio.wait({gone}, timeout=(need - rd.pace[1]) / rate)
                                   if gone.done():
                                       return
                                   continue
