@@ -762,10 +762,11 @@ configs:
       # ----                readers there are, one leaving does not disturb the
       # ----                rest, and the connection is dropped the moment the
       # ----                last one leaves. The one who opens a channel gets the
-      # ----                stream from its first byte; one who joins is handed the
-      # ----                newest 10 seconds of video at once (worked out from how
-      # ----                fast that channel's video comes), on a whole packet, so
-      # ----                it has something in hand. Opening a channel as
+      # ----                stream from its first byte; one who joins starts 10
+      # ----                seconds behind (worked out from how fast that
+      # ----                channel's video comes), on a whole packet, and is
+      # ----                handed that cushion at playing speed, so it has
+      # ----                something in hand. Opening a channel as
       # ----                HLS while it is being read as MPEG-TS still ends one
       # ----                of the two: that is the provider's rule, and turning
       # ----                MPEG-TS into HLS is beyond this proxy.
@@ -1034,13 +1035,15 @@ configs:
           raise SystemExit('RELAY: needs Python 3.12 or newer')
 
       PORT = 8197
-      # A reader that joins a channel already open starts JOIN_SECONDS behind live: it is handed that
-      # much of the newest video at once, so it has something in hand when the provider pauses, as a
-      # player on a connection of its own has from the provider's opening burst. It is counted in
+      # A reader that joins a channel already open starts JOIN_SECONDS behind live: that much of the
+      # newest video is its cushion, kept here and handed on at playing speed (see join), so it has
+      # something in hand when the provider pauses, as a player on a connection of its own has from
+      # the provider's opening burst. It is counted in
       # seconds, not megabytes, so it is the same for a small channel and a 4K one: the relay measures
       # how fast each channel's video really comes (over the last minute) and works the amount out
       # from that.
       JOIN_SECONDS = 10
+      JOIN_START = 2                # seconds of a joiner's cushion handed on at once, so its player can start (the rest at playing speed)
       # What is kept of each open channel, for readers that join: KEEP_SECONDS of it, and never less
       # than RING or more than RING_MAX.
       KEEP_SECONDS = 15
@@ -1233,6 +1236,7 @@ configs:
           def __init__(self):
               self.q, self.n, self.wake, self.over, self.behind, self.w = deque(), 0, asyncio.Event(), False, None, None
               self.given = 0                             # what it was handed at once when it joined
+              self.pace = None                           # for a joiner: [the bytes it keeps in hand here, credit, when credit was counted]
           def push(self, data):
               self.q.append(data)
               self.n += len(data)
@@ -1378,6 +1382,14 @@ configs:
                   for data in take[n:]:
                       rd.push(data)
                   rd.given = rd.n
+                  # Its cushion is kept here and handed on at playing speed, not all at once: a player sent
+                  # seconds of video in a moment may jump ahead through it and then stop at the provider's next
+                  # pause. Kept here, the cushion covers those pauses and the player sees a steady stream from
+                  # its first second. It starts with JOIN_START seconds at once, so it can begin playing.
+                  # (a channel opened moments ago has no measured speed yet: it is taken as JOIN_SECONDS of video)
+                  guess = speed or rd.n / JOIN_SECONDS
+                  if guess > 0:
+                      rd.pace = [rd.n, guess * JOIN_START, time.monotonic(), guess]
                   say('a reader joined a channel and was given %d KB to start%s' % (rd.n // 1024, '' if speed is None else ' (%d s at %d KB a second)' % (JOIN_SECONDS, speed // 1024)))
               self.readers.add(rd)
               return rd
@@ -2131,10 +2143,27 @@ configs:
                       return answer(w, 504 if ch.status is None else ch.status if 400 <= ch.status < 600 else 502)
                   w.write(HEAD_OK)
                   while True:
+                      if rd.q and rd.pace:                  # a joiner: at playing speed, holding its cushion here (see join)
+                          now = time.monotonic()
+                          speed = ch.speed(now) or rd.pace[3]
+                          if speed <= 0:
+                              rd.pace = None                # (no measure of the channel's speed: as before, at once)
+                          else:
+                              # a little faster when more than the cushion is waiting, a little slower when less
+                              rate = speed * min(1.5, max(0.8, 1 + 0.5 * (rd.n - rd.pace[0]) / max(rd.pace[0], 1)))
+                              rd.pace[1] = min(rd.pace[1] + (now - rd.pace[2]) * rate, speed * JOIN_START)
+                              rd.pace[2] = now
+                              if rd.pace[1] < len(rd.q[0]):
+                                  await asyncio.wait({gone}, timeout=(len(rd.q[0]) - rd.pace[1]) / rate)
+                                  if gone.done():
+                                      return
+                                  continue
+                              rd.pace[1] -= len(rd.q[0])
                       if rd.q:
                           data = rd.q.popleft()
                           rd.n -= len(data)
-                          rd.given = max(0, rd.given - len(data))   # (the join's allowance is used up as the join is sent)
+                          if not rd.pace:
+                              rd.given = max(0, rd.given - len(data))   # (the join's allowance is used up as the join is sent)
                           w.write(data)
                           drain = asyncio.ensure_future(w.drain())
                           await asyncio.wait({drain, gone}, return_when=asyncio.FIRST_COMPLETED)
