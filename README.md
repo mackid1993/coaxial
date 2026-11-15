@@ -11,6 +11,19 @@ on any of them.
 
 ### November 15, 2026
 
+- **Fixes from a review of the code:**
+  - A device joining a low-bitrate channel (radio, audio-only, very low
+    bitrate SD) that was already playing elsewhere got nothing. It now plays.
+  - With a provider whose address is `http://` and which also sends video
+    over `https://` from the same server name, the proxy's requests to that
+    provider could stop working after it had played video. They now go to
+    the right place.
+  - On the HLS setting, a device asking for MPEG-TS with the short form of
+    a channel's address (without `/live/`) opened a second session at the
+    provider for a channel already being watched, so the two ended each
+    other. It now shares the one session.
+  - On the HLS setting, a single piece of video the relay was not allowed to
+    fetch ended the channel. It is now skipped like any other missing piece.
 - **Smoother joining.** A device that joins a channel already playing on
   another one now gets its 10-second cushion at playing speed instead of all
   at once, so it starts after a short buffer and plays smoothly instead of
@@ -940,6 +953,44 @@ configs:
       proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
       proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$pscheme/$$1$$2;   # "//server/path": same http or https as the provider
 
+      # ---- An http:// address with no port is sent with :80 written out. nginx
+      # ---- hands an address with no port to a learned video server's entry of the
+      # ---- same name (see "Video servers" above), whatever its http or https, and
+      # ---- such an entry connects to port 443; so a plain http:// request to a name
+      # ---- also learned from https:// would go to 443 and fail. With :80 written
+      # ---- out, no entry matches it and it goes where it says. https:// is not
+      # ---- changed, so it still uses the learned entries.
+      map $$provider $$provider_to {
+        volatile;
+        "~*^(?<p80h>http://[^/:?]+)$$"                 $$p80h:80;
+        default                                        $$provider;
+      }
+      map $$http_x_hls_provider $$hls_provider_to {
+        volatile;
+        "~*^(?<h80h>http://[^/:?]+)$$"                 $$h80h:80;
+        default                                        $$http_x_hls_provider;
+      }
+      map $$next $$next_to {
+        volatile;
+        "~*^(?<n80h>http://[^/:?]+)(?<n80r>[/?].*)?$$" $$n80h:80$$n80r;
+        default                                        $$next;
+      }
+      map $$pbase $$pbase_to {
+        volatile;
+        "~*^(?<b80h>http://[^/:?]+)$$"                 $$b80h:80;
+        default                                        $$pbase;
+      }
+      map $$cdn_target $$cdn_to {
+        volatile;
+        "~*^(?<c80h>http://[^/:?]+)(?<c80r>[/?].*)?$$" $$c80h:80$$c80r;
+        default                                        $$cdn_target;
+      }
+      map $$cdu_to $$cdu_go {
+        volatile;
+        "~*^(?<u80h>http://[^/:?]+)(?<u80r>[/?].*)?$$" $$u80h:80$$u80r;
+        default                                        $$cdu_to;
+      }
+
       # ---- 2. Where a /__cdn/ request really goes, and what it may not reach.
       map $$request_uri $$cdn_target {
         default "";
@@ -1107,7 +1158,7 @@ configs:
           proxy_cache_bypass $$http_x_hls_renew; # asked to replace a session that is gone
           proxy_ignore_headers Cache-Control Expires Set-Cookie Vary X-Accel-Expires;
           add_header X-Hls-Sess $$upstream_cache_status always;
-          proxy_pass $$http_x_hls_provider;
+          proxy_pass $$hls_provider_to;
         }
       }
 
@@ -1189,7 +1240,7 @@ configs:
         proxy_pass http://127.0.0.1:$$server_port$$request_uri;
       }
       location = /healthz { access_log off; return 200; }
-      location / { proxy_pass $$provider$$up_uri; }
+      location / { proxy_pass $$provider_to$$up_uri; }
 
       # The guide and the API are text, often large. Let the provider compress
       # them if the app asks (as it would directly), and keep the framing that
@@ -1201,7 +1252,7 @@ configs:
         proxy_set_header Accept-Encoding $$http_accept_encoding;
         proxy_set_header X-Hls-Provider "";
         proxy_set_header X-Hls-Renew "";
-        proxy_pass $$provider$$up_uri;
+        proxy_pass $$provider_to$$up_uri;
       }
       # The provider's lists (channels, movies, series). They give logos and
       # posters as full addresses, usually on other sites. Those addresses are
@@ -1225,7 +1276,7 @@ configs:
         sub_filter '"http:\/\/'  '"http://$$http_host/__cdn/http/';
         sub_filter '"https://'   '"http://$$http_host/__cdn/https/';
         sub_filter '"http://'    '"http://$$http_host/__cdn/http/';
-        proxy_pass $$provider$$up_uri;
+        proxy_pass $$provider_to$$up_uri;
       }
 
       # ---- The status page: what is set up, what is wrong, where the VPN comes out.
@@ -1308,7 +1359,7 @@ configs:
         error_page 502 = @ts_plain;                      # the relay is not running: the provider directly
         proxy_pass http://127.0.0.1:8197/$$live_tv;
       }
-      location @ts_plain { proxy_pass $$provider$$up_uri; }
+      location @ts_plain { proxy_pass $$provider_to$$up_uri; }
 
       # A provider's ready-made M3U playlist lists every stream at the
       # provider's own address with the real login, so a player using it would
@@ -1349,7 +1400,7 @@ configs:
         if ($$next ~* "^(https?)://([^/]+)") { set $$cdn "/__cdn/$$1/$$2"; }
         if ($$next ~* "^(?<us>https?)://(?<uh>[^/?]+)(?<ud>/([^?]*/)?)") { set $$cdn_up "/__cdu/$$us/$$uh/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__top$$ud../"; }   # the playlist's real folder, for "../" lines
         error_page 400 401 403 404 410 429 500 502 503 504 509 520 521 522 523 524 = @hls_renew;   # the remembered session is gone
-        proxy_pass $$next;
+        proxy_pass $$next_to;
       }
       location @hls_renew {                   # open the channel again, once, and remember the new session
         chunked_transfer_encoding on;         # a playlist keeps the connection open, as the provider's own server does
@@ -1375,7 +1426,7 @@ configs:
         if ($$next ~* "^https?://(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$$)|\[|[^/]*[@%])") { return 403; }
         if ($$next ~* "^(https?)://([^/]+)") { set $$cdn "/__cdn/$$1/$$2"; }
         if ($$next ~* "^(?<us>https?)://(?<uh>[^/?]+)(?<ud>/([^?]*/)?)") { set $$cdn_up "/__cdu/$$us/$$uh/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__top$$ud../"; }   # the playlist's real folder, for "../" lines
-        proxy_pass $$next;
+        proxy_pass $$next_to;
       }
 
       # ---- Live HLS, the pieces: anything else asked inside a channel's folder is a
@@ -1413,7 +1464,7 @@ configs:
         proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
         proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$ns/$$1$$2;
         proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;
-        proxy_pass $$pbase$$pdir$$cn$$cq;
+        proxy_pass $$pbase_to$$pdir$$cn$$cq;
       }
 
       # ---- Live HLS, the start: the channel is opened. Ask the memory where this
@@ -1451,7 +1502,7 @@ configs:
         proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
         proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$cdn_s/$$1$$2;
         proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;   # "go to /some/path" on the same server
-        proxy_pass $$cdn_target;
+        proxy_pass $$cdn_to;
 
         # A playlist fetched from the other server: rewritten whatever type it is labelled.
         location ~ \.m3u8$$ {
@@ -1462,7 +1513,7 @@ configs:
           if ($$cdn_forbidden) { return 403; }
           if ($$cdn_target = "") { return 404; }
           limit_except GET HEAD { deny all; }
-          proxy_pass $$cdn_target;
+          proxy_pass $$cdn_to;
         }
       }
 
@@ -1480,7 +1531,7 @@ configs:
         proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;
         if ($$cdu_fix = lost) { return 404; }
         if ($$cdu_fix = over) { set $$cdu_to $$cdu_server; rewrite "(?i)^/__cdu/https?/[^/]+(/__up)*(?<dn>/.*)$$" $$dn break; }   # ".." as written, climbing too high: nginx's worked-out path, counted from the top folder
-        proxy_pass $$cdu_to;
+        proxy_pass $$cdu_go;
 
         location ~ \.m3u8$$ {
           chunked_transfer_encoding on;
@@ -1493,7 +1544,7 @@ configs:
           limit_except GET HEAD { deny all; }
           if ($$cdu_fix = lost) { return 404; }
           if ($$cdu_fix = over) { set $$cdu_to $$cdu_server; rewrite "(?i)^/__cdu/https?/[^/]+(/__up)*(?<dn>/.*)$$" $$dn break; }
-          proxy_pass $$cdu_to;
+          proxy_pass $$cdu_go;
         }
       }
 
@@ -2148,7 +2199,7 @@ configs:
                                   if status == 200 and data:
                                       break
                                   data = None
-                              except (OSError, ValueError, asyncio.TimeoutError):
+                              except (OSError, ValueError, asyncio.TimeoutError, Refused):
                                   data = None
                           if data is None:
                               lost += 1
@@ -2614,6 +2665,15 @@ configs:
                           q = orig.find('?')
                           plain, query = (orig, '') if q < 0 else (orig[:q], orig[q:])
                           plain = plain[:-3] if plain.endswith('.ts') else plain
+                          # The same channel has one HLS address, whichever form the reader used
+                          # (/user/pass/1, /user/pass/1.ts, /live/user/pass/1.ts), as in channel_key: a
+                          # player on HLS asks for /live/user/pass/1.m3u8, and a second form would be a
+                          # second session at the provider, which ends the first.
+                          parts = [p for p in plain.split('/') if p]
+                          if parts and parts[0] == 'live':
+                              parts = parts[1:]
+                          if len(parts) == 3:
+                              plain = '/live/' + '/'.join(parts)
                           source = hls_source('http://127.0.0.1:%s/__ch%s.m3u8/__index.m3u8%s' % (port, plain, query), agent)
                       ch = CHANNELS[key] = Channel(key, source, provider)
               if sum(len(c.readers) for c in CHANNELS.values()) >= READERS_MAX:
@@ -2647,10 +2707,16 @@ configs:
                           else:
                               # a little faster when more than the cushion is waiting, a little slower when less
                               rate = speed * min(1.5, max(0.8, 1 + 0.5 * (rd.n - rd.pace[0]) / max(rd.pace[0], 1)))
-                              rd.pace[1] = min(rd.pace[1] + (now - rd.pace[2]) * rate, speed * JOIN_START)
+                              most = speed * JOIN_START
+                              rd.pace[1] = min(rd.pace[1] + (now - rd.pace[2]) * rate, most)
                               rd.pace[2] = now
-                              if rd.pace[1] < len(rd.q[0]):
-                                  await asyncio.wait({gone}, timeout=(len(rd.q[0]) - rd.pace[1]) / rate)
+                              # An item can hold more than JOIN_START seconds of video (the 256 KB start of the cushion
+                              # on a low-rate channel, or one piece of a very low-rate one). It goes once the allowance
+                              # is full, and the allowance then goes below zero, so the time it plays is waited for
+                              # after it instead.
+                              need = min(len(rd.q[0]), most)
+                              if rd.pace[1] < need:
+                                  await asyncio.wait({gone}, timeout=(need - rd.pace[1]) / rate)
                                   if gone.done():
                                       return
                                   continue
@@ -2883,6 +2949,9 @@ move to other servers at any time. The proxy learns them instead:
 - Only video servers reached by name over HTTPS on the standard port are
   learned. Any other server, and one that only hands out pictures, works the
   plain way.
+- A plain `http://` request to a server with no port is sent with `:80`
+  written out, so it never uses a learned server's entry, which connects to
+  port 443. A provider can use the same name for both.
 
 nginx runs as a single worker, so every stream shares the same set of open
 connections.
@@ -3271,7 +3340,11 @@ channel changes to settle, writes one `upstream` block per new server (8 idle
 connections, each let go after 20 seconds without use, `max_fails=0` so a server is never set
 aside), tests the configuration and reloads nginx once. The list is saved to
 a second Docker volume, read back at start through a strict pattern, and
-capped at 200 entries.
+capped at 200 entries. nginx picks an `upstream` block for a variable
+`proxy_pass` by name alone when the address has no port, whatever its scheme,
+so every variable `proxy_pass` target that is `http://` with no port gets
+`:80` written out first (one `map` per target); `https://` targets are left
+alone and still use the learned blocks.
 
 **One worker.** The entrypoint sets `worker_processes 1`. The image default is
 one worker per CPU thread, and each worker has its own pool of upstream
@@ -3333,7 +3406,10 @@ serves at most 100 readers at once, all channels together.
   seconds of video, handed on at playing speed after the first 2 seconds (kept
   in the relay, not dumped on the player), so it starts about 10 seconds
   behind live and has something in hand when the provider pauses, as a player
-  on its own connection has from the provider's opening burst. The amount is counted in
+  on its own connection has from the provider's opening burst. On a channel
+  slow enough that the first part of the cushion holds more than 2 seconds of
+  video, that part goes at once and the pace makes up for it after. The
+  amount is counted in
   seconds, not bytes: the relay measures each channel's real rate over the
   last minute and over the last 15 seconds, takes the larger, and multiplies.
   It never hands over more than the last 20 seconds of arrivals. In a channel's first 8 seconds there is no rate
@@ -3381,7 +3457,8 @@ serves at most 100 readers at once, all channels together.
 
 With `NAME_LIVE_TV=hls`, a live `.ts` request does not go to the provider as
 MPEG-TS. The relay builds the address of the same channel as HLS on this
-proxy, `/__ch/<channel>.m3u8/__index.m3u8` on the provider's port, and reads
+proxy, `/__ch/<channel>.m3u8/__index.m3u8` on the provider's port, always in
+the `/live/user/pass/<id>` form whichever form the reader used, and reads
 it from nginx on loopback, exactly as a player would. That puts the reader on
 the session memory described above, so it shares the one provider session
 with every HLS player on the channel.
@@ -3412,8 +3489,8 @@ with every HLS player on the channel.
   well after its own playing time; the queue's own pauses are not counted.
 - Readers of the same bridged channel share one such feed, with the same ring
   and joiner rules as `/ts`.
-- A piece that cannot be fetched after two tries is skipped and noted in the
-  log; three in a row end the stream. A playlist that cannot be had is asked
+- A piece that cannot be fetched after two tries, or that the relay may not
+  fetch, is skipped and noted in the log; three in a row end the stream. A playlist that cannot be had is asked
   for again (4 tries at the start, 9 once playing).
 - It only joins playlists made of whole, unencrypted MPEG-TS files. A
   playlist with `EXT-X-MAP`, `EXT-X-BYTERANGE` or an `EXT-X-KEY` other than
