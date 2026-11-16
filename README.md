@@ -4,10 +4,17 @@ Put all of your IPTV behind one VPN, on every device, without installing a VPN
 on any of them.
 
 > [!NOTE]
-> **Changelog** · Last updated: November 15, 2026
+> **Changelog** · Last updated: November 16, 2026
 
 <details>
 <summary>Changelog</summary>
+
+### November 16, 2026
+
+- **The status page shows the ping to your VPN server.** A new line under
+  "Your VPN" gives the round trip from this machine to the VPN server, so a
+  far-away or slow server shows at a glance. It is measured each time the page
+  loads and is left out if the VPN server does not answer.
 
 ### November 15, 2026
 
@@ -2408,6 +2415,34 @@ configs:
                   shut(w)
           return await kept('where', 300, ask)
 
+      def vpn_ping(tries=3):                            # round trip to the VPN server itself, in milliseconds
+          # A packet allowed only one hop dies at the VPN server, which answers "time exceeded". Linux hands
+          # that answer to this socket's error queue (IP_RECVERR), so no raw socket or extra permission is
+          # needed. A VPN server that does not answer gives None, and the page leaves the line out.
+          times = []
+          for n in range(tries):
+              s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+              try:
+                  s.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 1)
+                  s.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_RECVERR', 11), 1)
+                  s.setblocking(False)
+                  start = time.monotonic()
+                  s.sendto(b'\0', ('1.1.1.1', 33434 + n))
+                  while time.monotonic() - start < 1:
+                      try:
+                          _, notes, _, _ = s.recvmsg(64, 512, getattr(socket, 'MSG_ERRQUEUE', 0x2000))
+                      except BlockingIOError:
+                          time.sleep(0.002)
+                          continue
+                      if any(len(d) > 5 and d[4] == 2 and d[5] == 11 for _, _, d in notes):   # ICMP, time exceeded
+                          times.append((time.monotonic() - start) * 1000)
+                      break
+              except OSError:
+                  pass
+              finally:
+                  s.close()
+          return sorted(times)[len(times) // 2] if times else None
+
       async def account(port, user, password):          # the provider's own account page, asked through nginx with the easy login
           async def ask():
               url = 'http://127.0.0.1:%s/player_api.php?username=%s&password=%s' % (port, quote(user, safe=''), quote(password, safe=''))
@@ -2503,7 +2538,8 @@ configs:
           skipped = [p for p in info.get('providers') or [] if not p.get('ok')]
           working = not problems and bool(good)
           user, password = h.get('x-relay-user', ''), h.get('x-relay-pass', '')
-          where, accounts = await asyncio.gather(where_am_i(), asyncio.gather(*[account(str(p.get('port')), user, password) for p in good]))
+          where, accounts, ping = await asyncio.gather(where_am_i(), asyncio.gather(*[account(str(p.get('port')), user, password) for p in good]),
+                                                       asyncio.get_running_loop().run_in_executor(None, vpn_ping))
 
           o = ['<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
                '<meta name="color-scheme" content="light dark"><meta http-equiv="refresh" content="30"><title>IPTV proxy status</title><style>', STYLE, '</style></head><body><main>',
@@ -2525,8 +2561,9 @@ configs:
           o.append('<div class="card"><h2>Your VPN</h2>')
           if where and where.get('ip'):
               place = ', '.join(str(where[k]) for k in ('city', 'region', 'country') if where.get(k))
-              o.append('<dl class="pair"><dt>The internet sees you as</dt><dd>%s</dd><dt>Location</dt><dd>%s</dd>%s</dl>'
-                       % (esc(where['ip']), esc(place), '<dt>Network</dt><dd>%s</dd>' % esc(where['org']) if where.get('org') else ''))
+              o.append('<dl class="pair"><dt>The internet sees you as</dt><dd>%s</dd><dt>Location</dt><dd>%s</dd>%s%s</dl>'
+                       % (esc(where['ip']), esc(place), '<dt>Network</dt><dd>%s</dd>' % esc(where['org']) if where.get('org') else '',
+                          '<dt>Ping to the VPN server</dt><dd>%.0f ms</dd>' % ping if ping is not None else ''))
               o.append('<p class="note">This should be your VPN, not your home. If you see your own town and your own internet company here, stop and check your VPN settings.</p>')
           else:
               o.append('The proxy could not look up its public address just now. Reload this page in a minute.'
@@ -3559,6 +3596,11 @@ the easy login in headers. The relay then:
   30 seconds. If the provider is slow, the last good answer is shown with its
   age, for up to 15 minutes. After a failure the provider is asked less and
   less often (up to 15 minutes apart).
+- measures the round trip to the VPN server: three small packets that are
+  allowed only one hop, so the VPN server itself answers each with "time
+  exceeded", and the middle time is shown. Linux delivers that answer to the
+  sending socket's error queue, so this needs no extra permission. A VPN
+  server that does not answer leaves the line off the page.
 - counts live channels: HLS channels whose playlist was asked for in the last
   30 seconds (by a player, or by the relay for a recorder), MPEG-TS channels and their readers, and MPEG-TS readers
   being fed from HLS. Movies, series and catch-up are not counted.
