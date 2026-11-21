@@ -37,6 +37,12 @@ on any of them.
   On an account with one connection, an HLS device changing channel no
   longer finds the new channel refused, and another device watching the old
   channel as HLS is not cut off by it.
+- **HLS built from MPEG-TS lets go of connections it no longer needs.** A
+  device on HLS that moves onto a channel someone else already has, or that
+  stops asking, no longer keeps its old channel open at the provider for up to
+  30 seconds, so the next channel change on a full account is not refused. A
+  late request for a piece of the old channel no longer opens that channel
+  again, and a stream whose stream numbers change keeps playing as HLS.
 - **Live MPEG-TS reaches players the way the provider sends it**: not cut
   into chunks, and ended by closing the connection, as nginx did. Replies no
   longer carry a `Via: 1.1 Caddy` line.
@@ -5257,10 +5263,19 @@ neither cuts the other off.
   marked as a discontinuity, so a player that paused or reconnected carries
   on instead of freezing. `#EXT-X-TARGETDURATION` never goes down.
 - **Letting go.** The builder leaves the channel 30 seconds after the last
-  playlist or piece request. When a device opens another channel of the same
-  provider, a builder only that device was using lets go at once, so an
-  account with one connection can change channel. A device that is still
-  asking keeps its builder.
+  playlist or piece request. When a device opens or joins another channel of
+  the same provider, as HLS or as MPEG-TS, a builder only that device was
+  using lets go at once, so an account with one connection can change
+  channel. A builder every device has stopped asking for (nothing for three
+  target durations) also lets go as soon as any device opens another channel.
+  A device that is still asking, or still waiting for its first playlist,
+  keeps its builder.
+- **Pieces never open a channel.** A request for a piece whose builder is
+  gone (a late request after a channel change) is answered 404; it does not
+  open the old channel at the provider again.
+- **New program tables are followed.** The video stream is read again from
+  every program table, so a stream the provider sends again with different
+  stream numbers keeps being cut into pieces.
 - **Refusals.** If the provider refuses the channel, its status code and
   answer reach the HLS player, as for MPEG-TS.
 - **The status page** shows a device on such a channel as HLS, with its data
