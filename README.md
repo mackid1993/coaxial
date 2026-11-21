@@ -4,7 +4,7 @@ Put all of your IPTV behind one VPN, on every device, without installing a VPN
 on any of them.
 
 > [!NOTE]
-> **Changelog** · Last updated: November 20, 2026
+> **Changelog** · Last updated: November 21, 2026
 
 <details>
 <summary>Changelog</summary>
@@ -41,9 +41,6 @@ on any of them.
   an HLS player with the provider's own status. The relay keeps its memory
   under its 512 MB ceiling, and the containers notice a restarted tunnel
   within about 25 seconds.
-
-### November 20, 2026
-
 - **nginx is replaced by Caddy.** The proxy container is now `iptv-caddy`. It
   runs the stock Caddy image with settings only: no plugins and no custom
   build.
@@ -4590,7 +4587,7 @@ The goal is parity with direct credentials, and no gap has been seen so far
 on the real setup it was run on. Some of that was confirmed against real
 providers and some only against simulated ones, so here is which is which.
 
-**Real providers (November 20, 2026).** Run on one real setup, against
+**Real providers (November 21, 2026).** Run on one real setup, against
 two real providers through the VPN, and against a simulated provider. Caddy
 was at version 2.11.9 at the time.
 Against the real providers:
