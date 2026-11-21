@@ -9,6 +9,39 @@ on any of them.
 <details>
 <summary>Changelog</summary>
 
+### November 21, 2026
+
+- **The relay is now written in Go.** It does the same jobs as the Python
+  relay, with the same settings and the same status page, using only Go's
+  standard library. Its source is still text inside the compose file: the
+  stock `golang:alpine` image builds it each time the container starts
+  (about 6 seconds, no network needed), and it then runs on its own. The
+  status page also lists what is playing right now: the device, the channel's
+  name, the provider, the format, how long it has been on and how much was
+  sent.
+- **HLS and MPEG-TS can share a channel with `NAME_LIVE_TV=ts`.** A device
+  that asks for a channel as HLS while another device (or a recorder) has
+  it as MPEG-TS is given HLS built from the same stream, in pieces of about
+  4 seconds. The provider still sees one connection, so neither device is
+  cut off. The other way round already worked: with `NAME_LIVE_TV=hls`, a
+  device that asks for MPEG-TS shares the HLS session.
+- **A device joining a channel already playing starts on a whole picture.**
+  Its first video begins at the program table just before a keyframe, so its
+  player does not throw away up to a second of video it cannot decode.
+- **Changing channel frees the provider connection at once for HLS too.**
+  On an account with one connection, an HLS device changing channel no
+  longer finds the new channel refused, and another device watching the old
+  channel as HLS is not cut off by it.
+- **Live MPEG-TS reaches players the way the provider sends it**: not cut
+  into chunks, and ended by closing the connection, as nginx did. Replies no
+  longer carry a `Via: 1.1 Caddy` line.
+- **Smaller fixes.** Channels whose program table lists the network table
+  first work as HLS. An HLS player's piece numbers keep growing after a
+  pause instead of starting again at 0. A refusal from the provider reaches
+  an HLS player with the provider's own status. The relay keeps its memory
+  under its 512 MB ceiling, and the containers notice a restarted tunnel
+  within about 25 seconds.
+
 ### November 20, 2026
 
 - **nginx is replaced by Caddy.** The proxy container is now `iptv-caddy`. It
@@ -199,7 +232,7 @@ details. That is the whole setup on the device.
 
 - **gluetun** holds the VPN tunnel.
 - **Caddy** sits inside that tunnel and passes your players' requests on to the provider.
-- **the relay**, a small Python helper, sits inside the tunnel too. It keeps
+- **the relay**, a small Go helper, sits inside the tunnel too. It keeps
   one provider session per live channel, so several devices can watch or
   record the same channel. It points the addresses inside playlists and the
   provider's lists back at the proxy, so those come through the VPN too. It
@@ -243,11 +276,11 @@ Use it only with services you are entitled to use.
 4. **Works with any player and any Xtream provider.** Nothing in it is written
    for one provider or one app.
 5. **Nothing to build or install.** It is stock gluetun, stock Caddy and the
-   stock Python image, with nothing added to any of them. Everything that
+   stock Go image, with nothing added to any of them. Everything that
    makes them a proxy is text inside the compose file, where you can read it:
    the Caddy settings, a few lines of shell that read your settings at start
-   and write one Caddy block per provider, and one Python program (the relay)
-   that uses only what Python ships with.
+   and write one Caddy block per provider, and one Go program (the relay)
+   that uses only Go's standard library and is built when it starts.
 
 ## Why this exists
 
@@ -507,9 +540,9 @@ PROXY_PORTS=8095-8096
 #           record a channel at once.
 #     ts    Your players use MPEG-TS. Everyone on a channel shares one
 #           connection to the provider and gets the provider's own stream,
-#           so you can watch and record a channel at once. Do not open a
-#           channel as HLS while it is playing or recording as MPEG-TS:
-#           most providers allow one kind at a time per channel.
+#           so you can watch and record a channel at once. A device that
+#           asks for HLS instead is given HLS built from that same stream,
+#           so it shares the connection too.
 # Use the format chosen in your players, and in your playlist manager if you
 # have one. They all have to agree. If a provider offers only one of the
 # two, use that one.
@@ -574,8 +607,8 @@ is for:
 - Caddy's settings, and the block written once for each provider
 - the short shell script that reads your settings when Caddy starts and
   writes those blocks
-- the relay, a Python program of about 1,400 lines that uses only what Python
-  ships with
+- the relay, a Go program of about 3,100 lines in four files that uses only
+  Go's standard library
 
 Nothing is downloaded or installed when the stack starts except the three
 stock images.
@@ -597,8 +630,9 @@ stock images.
 #                and MPEG-TS alike), so several of your devices can watch or
 #                record the same channel; it points the addresses inside
 #                playlists and the provider's lists back at the proxy; and it
-#                draws the status page. It is plain Python in the stock Python
-#                image; its whole text is at the bottom of this file.
+#                draws the status page. It is a small Go program, standard
+#                library only, built at every start in the stock Go image; its
+#                whole text is at the bottom of this file.
 #
 # Your players and playlist managers connect to this machine instead of to
 # the provider:
@@ -750,24 +784,23 @@ services:
     # the tunnel's new network.
     healthcheck:
       test: ["CMD-SHELL", "ip -o addr show scope global | grep -q . || { sleep 12; kill 1; exit 1; }; [ ! -s /run/iptv-proxy/problem ] || exit 1; wget -q -T 5 -O /dev/null http://127.0.0.1:$${HEALTH_PORT:-8195}/healthz || exit 1"]
-      interval: 30s
+      interval: 10s
       timeout: 20s
       start_period: 20s
       retries: 3
 
   # ---------------------------------------------------------------------------
-  # The relay. Plain Python (the text under "relay" at the bottom of this file)
-  # in the stock Python image, with nothing installed. It shares the tunnel's
-  # network like Caddy does, so it has no other way out. Caddy hands it live
-  # MPEG-TS (part 6), HLS playlists (parts 3 and 4), the provider's lists
-  # (player_api.php) and the status page, and asks it where a server's name
-  # really leads before fetching from a server the provider sent a player to
-  # (part 2). The top of the script says what it does with each. Movies,
-  # series, catch-up, the guide and every video piece go from Caddy to the
-  # provider directly.
+  # The relay. Go, standard library only (the files under "relay-*" at the bottom
+  # of this file), built at every start in the stock Go image, with nothing to
+  # download. It shares the tunnel's network like Caddy does, so it has no other
+  # way out. Caddy hands it live MPEG-TS (part 6), HLS playlists (parts 3 and 4),
+  # the provider's lists (player_api.php) and the status page, and asks it where a
+  # server's name really leads before fetching from a server the provider sent a
+  # player to (part 2). Movies, series, catch-up, the guide and every video piece
+  # go from Caddy to the provider directly.
   # ---------------------------------------------------------------------------
   relay:
-    image: python:3-alpine
+    image: golang:alpine
     container_name: iptv-relay
     restart: unless-stopped
     network_mode: "service:vpn"
@@ -776,18 +809,27 @@ services:
       vpn:
         condition: service_healthy
         restart: true
-    mem_limit: 512m                     # a ceiling: it uses about 30 MB at rest and some tens of MB for each channel being watched
+    mem_limit: 512m                     # a ceiling for the build at start and the channels being watched (GOMEMLIMIT keeps the heap under it)
     env_file:
       - path: .env
         required: false
       - path: stack.env
         required: false
     configs:
-      - source: relay
-        target: /relay.py
+      - source: relay-main
+        target: /src/main.go
+      - source: relay-hls
+        target: /src/hls.go
+      - source: relay-status
+        target: /src/status.go
+      - source: relay-tshls
+        target: /src/tshls.go
+      - source: relay-gomod
+        target: /src/go.mod
     # Of everything in .env, the relay is given only the addresses of the
     # providers that are set up (checked the way Caddy's start checks them). No login,
-    # no password and no VPN key is kept in its environment.
+    # no password and no VPN key is kept in its environment. It is built once at
+    # start (no network needed: standard library only) and then runs on its own.
     command:
       - sh
       - -c
@@ -801,15 +843,17 @@ services:
           [ -n "$$(printenv "$${n}_PORT")" ] && [ -n "$$(printenv "$${n}_USER")" ] && [ -n "$$(printenv "$${n}_PASSWORD")" ] || continue
           list="$$list $$(printenv "$${n}_URL")"
         done
-        exec env -i PATH="$$PATH" RELAY_PROVIDERS="$$list" RELAY_PORT="$${RELAY_PORT:-8197}" python -u /relay.py
+        cd /src && CGO_ENABLED=0 GOCACHE=/tmp/gocache GOFLAGS=-trimpath GOTOOLCHAIN=local go build -p 4 -o /tmp/relay . || exit 1
+        exec env -i PATH="$$PATH" GOMEMLIMIT=384MiB RELAY_PROVIDERS="$$list" RELAY_PORT="$${RELAY_PORT:-8197}" /tmp/relay
     # Healthy = still inside the tunnel container's network AND answering. As
     # with Caddy: if the tunnel was restarted underneath it, it stops so that
-    # Docker starts it again inside the tunnel's new network.
+    # Docker starts it again inside the tunnel's new network. (start_period
+    # covers the build at start.)
     healthcheck:
       test: ["CMD-SHELL", "ip -o addr show scope global | grep -q . || { sleep 12; kill 1; exit 1; }; wget -q -T 5 -O /dev/null http://127.0.0.1:$${RELAY_PORT:-8197}/healthz || exit 1"]
-      interval: 30s
+      interval: 10s
       timeout: 20s
-      start_period: 20s
+      start_period: 90s
       retries: 3
 
 
@@ -914,6 +958,7 @@ configs:
       		}
       	}
       	log_append provider @NAME@
+      	header -Via # players see what the provider sends, without a note that a proxy passed it on
 
       	route {
       		respond /healthz 200
@@ -972,9 +1017,12 @@ configs:
       				header_up X-Relay-Uri {vars.up}
       				header_up X-Relay-Orig {http.request.orig_uri}
       				header_up X-Relay-Port {http.request.local.port}
+      				header_up X-Relay-Client {http.request.remote.host}
       				header_up -Range
       				import relay_headers
       				flush_interval -1
+      				# Sent as the provider sends it: not chunked, ended by closing the connection (as nginx did).
+      				header_down Transfer-Encoding identity
       				transport http {
       					read_timeout 100s
       				}
@@ -1001,6 +1049,8 @@ configs:
       				header_up X-Relay-Uri {vars.up}
       				header_up X-Relay-Orig {http.request.orig_uri}
       				header_up X-Relay-Port {http.request.local.port}
+      				header_up X-Relay-Client {http.request.remote.host}
+      				header_up X-Relay-Mode @MODE@
       				import relay_headers
       				transport http {
       					read_timeout 60s
@@ -1221,1183 +1271,2875 @@ configs:
       done
       exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 
-  # The relay (see the "relay" service above). Plain Python, standard library only.
-  relay:
+  # The relay (see the "relay" service above). Go, standard library only, in four files.
+  relay-main:
     content: |
-      # The relay. One small program that does the jobs a plain reverse proxy cannot:
-      #
-      #   /ts      Share one provider MPEG-TS stream between every reader of a channel.
-      #            The first reader of a channel makes the relay open it at the
-      #            provider; everyone else on that channel is given the same bytes. The
-      #            provider sees one connection however many readers there are. It is
-      #            dropped when the last reader leaves (in a channel's first seconds,
-      #            a moment later: see LINGER).
-      #   /hls     Give a reader that asks for MPEG-TS (many recorders do) the channel's
-      #            HLS video instead, joined end to end, so that it shares the one HLS
-      #            session your players are on and does not open a second one.
-      #   /hl      HLS playlists: keep ONE provider session per live channel, and point
-      #            every address inside a playlist back at this proxy, so the player
-      #            fetches every piece through the VPN.
-      #   /api     The provider's lists (player_api.php): point the logos and posters in
-      #            them back at this proxy, so pictures come through the VPN too.
-      #   /check   Before Caddy connects to a server named in a /__cdn/ address, say
-      #            whether that name leads to this machine or a home network.
-      #   /status  Draw the status page: what is set up, what is wrong, and where the
-      #            VPN comes out.
-      #
-      # Caddy is the only thing that sends it requests (it listens on 127.0.0.1). It
-      # connects to the providers named in .env and the servers they redirect to, to
-      # Caddy in this stack, and, for the status page only, to ipinfo.io to learn
-      # where the VPN comes out. It keeps the newest 15 seconds or so of each open channel in memory
-      # (never less than 12 MB of it, never more than 64 MB).
-      import asyncio, html, http, ipaddress, json, os, re, signal, socket, ssl, sys, time, zlib
-      from collections import deque
-      from urllib.parse import quote, urlsplit, urljoin
-
-      if sys.version_info < (3, 12):   # older asyncio can lose a cancel inside wait_for and leave a provider connection open
-          raise SystemExit('RELAY: needs Python 3.12 or newer')
-
-      PORT = int(os.environ.get('RELAY_PORT', '8197'))
-      # A reader that joins a channel already open starts JOIN_SECONDS behind live: that much of the
-      # newest video is its cushion, kept here and handed on at playing speed (see join), so it has
-      # something in hand when the provider pauses, as a player on a connection of its own has from
-      # the provider's opening burst. It is counted in
-      # seconds, not megabytes, so it is the same for a small channel and a 4K one: the relay measures
-      # how fast each channel's video really comes (over the last minute) and works the amount out
-      # from that.
-      JOIN_SECONDS = 10
-      JOIN_START = 2                # seconds of a joiner's cushion handed on at once, so its player can start (the rest at playing speed)
-      # What is kept of each open channel, for readers that join: KEEP_SECONDS of it, and never less
-      # than RING or more than RING_MAX.
-      KEEP_SECONDS = 15
-      RING = 12 * 1024 * 1024
-      RING_MAX = 64 * 1024 * 1024
-      BURST_SECONDS = 2.5           # (the provider's opening burst is measured and noted in the log)
-      # A provider that ends a live stream while people are watching is asked for it again, at once, so
-      # that every player does not have to notice and ask by itself. Only a stream that had been running
-      # for REOPEN_AFTER seconds is asked for again.
-      REOPEN_AFTER = 30
-      REOPEN_WAIT = 5               # seconds a provider has to answer when asked again (and twice that to send video)
-      DROP_GAP = 0.1                # seconds a provider is given to see a hang-up before another channel is asked for
-      # A player that is tuning opens a channel, hangs up and asks again within a moment. So a channel is
-      # kept for LINGER after its last reader leaves, in its first seconds only; a request for any OTHER
-      # channel of that provider drops it at once.
-      LINGER = 0.4
-      READERS_MAX = 100             # readers the relay serves at once, all channels together
-      # A reader that cannot keep up is disconnected, so that what is held for it stays small: when it
-      # has been more than BEHIND bytes behind its channel for BEHIND_SECONDS, or FAR_BEHIND at any moment.
-      # (This is also about how long a paused player is waited for. A reader that has just joined is
-      # allowed what it was handed on top, until it has taken it.)
-      BEHIND = 16 * 1024 * 1024
-      BEHIND_SECONDS = 15
-      FAR_BEHIND = 64 * 1024 * 1024
-      CONNECT_WAIT = 10             # seconds for a server to accept a connection
-      HEADER_WAIT = 20              # seconds for a server to send each line of its answer's heading
-      PLAYLIST_WAIT = 30            # the same for a playlist
-      START_WAIT = 60               # seconds a reader waits for a channel's first video
-      QUIET_WAIT = 60               # seconds a stream may send nothing before it is given up on
-      HEADER_LINES = 100            # an answer's heading may not be longer than this
-      # Where a provider's redirect may not lead: this machine, and home and private networks.
-      PRIVATE = [ipaddress.ip_network(n) for n in (
-          '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12',
-          '192.168.0.0/16', '::/127', 'fc00::/7', 'fe80::/10')]
-
-      def say(msg):                 # the relay's log lines never hold an address or a login
-          print('RELAY: ' + msg, flush=True)
-
-      # The providers this relay may connect to: the addresses Caddy was given (see the service's
-      # "command" in the compose file, which passes on those and nothing else from .env).
-      PROVIDERS = set(u.rstrip('/') for u in os.environ.get('RELAY_PROVIDERS', '').split() if u.lower().startswith(('http://', 'https://')))
-
-      TLS = ssl.create_default_context()
-      TLS.check_hostname = False    # certificates are not checked, the same as in Caddy (see the notes there)
-      TLS.verify_mode = ssl.CERT_NONE
-      CHECKED = ssl.create_default_context()   # for the status page's one lookup outside (where the VPN comes out)
-
-      # ---------------------------------------------------------------------------
-      # A plain HTTP request, with the answer's body given back piece by piece.
-      # ---------------------------------------------------------------------------
-      class Heading(dict):
-          """An answer's heading: by name (lower case, last one wins) and, in .all, every line as it came."""
-          def __init__(self):
-              super().__init__()
-              self.all = []
-
-      class Refused(Exception):
-          """The other side said no (or did not answer properly). Carries what to tell the reader."""
-          def __init__(self, status, kind='', text=b''):
-              self.status, self.kind, self.text = status, kind, text
-
-      def private(address):
-          ip = ipaddress.ip_address(address.split('%')[0])
-          if ip.version == 6 and ip.ipv4_mapped:
-              ip = ip.ipv4_mapped
-          return any(ip in net for net in PRIVATE if net.version == ip.version)
-
-      async def fetch(url, agent, hops=0, guard=True, tls=None, source=None, follow=True, stay=False, wait=HEADER_WAIT):
-          """Open url. Returns (status, headers, reader, writer); follows redirects."""
-          u = urlsplit(url)
-          secure = u.scheme == 'https'
-          host, port = u.hostname or '', u.port or (443 if secure else 80)
-          if u.scheme not in ('http', 'https') or not host or '@' in u.netloc:
-              raise Refused(502)
-          # The name is looked up here, and the connection goes to the very address that was checked.
-          # (An address written as numbers needs no looking up.)
-          try:
-              address = str(ipaddress.ip_address(host))
-          except ValueError:
-              found = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM), CONNECT_WAIT)
-              address = found[0][4][0]
-          if guard and hops and private(address):
-              raise Refused(403)    # a redirect may not lead to this machine or to a home network
-          r, w = await asyncio.wait_for(asyncio.open_connection(
-              address, port, ssl=(tls or TLS) if secure else None, server_hostname=host if secure else None, limit=65536,
-              local_addr=(source, 0) if source else None), CONNECT_WAIT)
-          try:
-              path = (u.path or '/') + ('?' + u.query if u.query else '')
-              if isinstance(agent, str):                # the relay's own fetches: just a name. A channel carries the player's own headers.
-                  agent = ([('User-Agent', agent)] if agent else []) + [('Accept', '*/*')]
-              lines = ['GET %s HTTP/1.1' % path, 'Host: %s' % u.netloc] + ['%s: %s' % nv for nv in agent] + ['Connection: close', '', '']
-              w.write('\r\n'.join(lines).encode('latin-1', 'replace'))
-              await w.drain()
-              line = (await asyncio.wait_for(r.readline(), wait)).decode('latin-1').split()
-              status = int(line[1]) if len(line) > 1 and line[1].isdigit() else 502
-              headers = Heading()
-              for _ in range(HEADER_LINES + 1):
-                  h = (await asyncio.wait_for(r.readline(), wait)).decode('latin-1')
-                  if h in ('\r\n', '\n', ''):
-                      break
-                  name, _, value = h.partition(':')
-                  headers[name.strip().lower()] = value.strip()
-                  headers.all.append((name.strip(), value.strip()))
-              else:
-                  raise Refused(502)
-              if follow and status in (301, 302, 303, 307, 308) and headers.get('location') and hops < 10:
-                  shut(w)
-                  onward = urljoin(url, headers['location'])
-                  if stay and urlsplit(onward).netloc != u.netloc:
-                      raise Refused(502)                # (a fetch from the proxy in this stack is never sent elsewhere)
-                  return await fetch(onward, agent, hops + 1, guard, tls, None, True, stay, wait)
-              return status, headers, r, w
-          except ValueError:        # a line far too long to be an answer's heading
-              shut(w)
-              raise Refused(502)
-          except BaseException:
-              shut(w)
-              raise
-
-      def shut(w):
-          try:
-              w.transport.abort()   # at once: the provider's line must be free before the next channel is asked for
-          except Exception:
-              pass
-
-      async def body(r, headers, wait=QUIET_WAIT):
-          """The pieces of an answer's body, whichever way the server marks its end.
-          A body that stops short of its stated length is an error, not an ending."""
-          if 'chunked' in headers.get('transfer-encoding', '').lower():
-              while True:
-                  size = int((await asyncio.wait_for(r.readline(), wait)).split(b';')[0].strip() or b'-1', 16)
-                  if size == 0:
-                      return
-                  if size < 0:
-                      raise OSError('not a chunk size')
-                  while size:
-                      data = await asyncio.wait_for(r.read(min(size, 65536)), wait)
-                      if not data:
-                          raise OSError('the answer stopped short')
-                      size -= len(data)
-                      yield data
-                  await asyncio.wait_for(r.readline(), wait)
-          left = int(headers['content-length']) if headers.get('content-length', '').isdigit() else None
-          while left is None or left > 0:
-              data = await asyncio.wait_for(r.read(65536 if left is None else min(left, 65536)), wait)
-              if not data:
-                  if left:
-                      raise OSError('the answer stopped short')
-                  return
-              if left is not None:
-                  left -= len(data)
-              yield data
-
-      async def get(url, agent, limit=64 * 1024 * 1024):
-          """A whole small answer (a playlist, one video piece). Returns (status, bytes)."""
-          status, headers, r, w = await fetch(url, agent, guard=False, stay=True)
-          try:
-              out, n = [], 0
-              async for data in body(r, headers, HEADER_WAIT):
-                  out.append(data)
-                  n += len(data)
-                  if n > limit:
-                      raise OSError('too large')
-              return status, b''.join(out)
-          finally:
-              shut(w)
-
-      # ---------------------------------------------------------------------------
-      # A channel: one source of video, any number of readers.
-      # ---------------------------------------------------------------------------
-      def clean_start(buf):
-          """Where a new reader can start cleanly in MPEG-TS: at a program table (PAT) if one is near,
-          or else at the first whole packet. 0 if it does not look like MPEG-TS."""
-          end = len(buf) - 376
-          i = buf.find(b'\x47')
-          tries = 0
-          while 0 <= i < end and tries < 2000:
-              if buf[i + 188] == 0x47 and buf[i + 376] == 0x47:
-                  for k in range(i, min(end, i + 188 * 3000), 188):
-                      if buf[k] != 0x47:
-                          break
-                      if (buf[k + 1] & 0x1f) == 0 and buf[k + 2] == 0:
-                          return k
-                  return i
-              i = buf.find(b'\x47', i + 1)
-              tries += 1
-          return 0
-
-      class Reader:
-          def __init__(self):
-              self.q, self.n, self.wake, self.over, self.behind, self.w = deque(), 0, asyncio.Event(), False, None, None
-              self.given = 0                             # what it was handed at once when it joined
-              self.pace = None                           # for a joiner: [the bytes it keeps in hand here, credit, when credit was counted]
-          def push(self, data):
-              self.q.append(data)
-              self.n += len(data)
-              self.wake.set()
-          def end(self, drop=False):
-              if drop:              # nothing more is sent to it, not even what was waiting, and its connection is closed
-                  self.q.clear()
-                  self.n = 0
-                  if self.w is not None:
-                      shut(self.w)
-              self.over = True
-              self.wake.set()
-
-      class Channel:
-          def __init__(self, key, source, provider):
-              self.key, self.provider, self.readers = key, provider, set()
-              self.timer = None                          # the linger, when one is running
-              self.ring, self.kept = deque(), 0          # (time, bytes) of the newest video
-              self.status, self.ready = None, asyncio.Event()   # 200 once video flows, or the refusal
-              self.refusal, self.done = None, False
-              self.total, self.marks = 0, deque()        # every byte the provider has sent, and (time, total) once a second for a minute
-              self.born, self.burst = None, 0        # when the first video came, and how much the provider sent at once then
-              self.asked = time.monotonic()
-              self.task = asyncio.ensure_future(self.run(source))
-              say('a channel was opened (%d open now)' % (len(CHANNELS) + 1))
-
-          async def run(self, source):
-              gen = source(self)
-              try:
-                  async for data in gen:
-                      if self.done:
-                          break
-                      self.feed(data)
-                  if self.status is None:
-                      self.status = 502
-              except Refused as e:
-                  if self.status is None:
-                      self.status, self.refusal = e.status, e
-              except asyncio.CancelledError:
-                  raise
-              except asyncio.TimeoutError:
-                  if self.status is None:
-                      self.status = 504
-                  say('a channel sent nothing for too long and was closed')
-              except Exception as e:
-                  if self.status is None:
-                      self.status = 502
-                  say('a channel ended: ' + type(e).__name__)
-              finally:
-                  try:
-                      await gen.aclose()                # the provider's connection is closed here whatever happened
-                  except BaseException:
-                      pass
-                  self.done = True
-                  LAST_DROP[self.provider] = time.monotonic()
-                  if CHANNELS.get(self.key) is self:
-                      del CHANNELS[self.key]
-                  say('a channel was closed (%d open now)' % len(CHANNELS))
-                  self.ready.set()
-                  for rd in self.readers:
-                      rd.end()
-
-          def feed(self, data):
-              if self.status is None:
-                  self.status = 200
-                  self.ready.set()
-              now = time.monotonic()
-              if self.born is None:
-                  self.born = now
-                  say('a channel gave its first video %.1f s after it was asked for' % (now - self.asked))
-              self.total += len(data)
-              if not self.marks or now - self.marks[-1][0] >= 1:
-                  self.marks.append((now, self.total))
-                  while now - self.marks[0][0] > 60:
-                      self.marks.popleft()
-              if self.ring and now - self.ring[-1][0] > 4 and not getattr(self, 'paced', False):   # (a bridged channel notes this itself)
-                  say('a provider sent nothing for %.0f s, then carried on' % (now - self.ring[-1][0]))
-              if now - self.born < BURST_SECONDS:
-                  self.burst += len(data)
-              elif self.burst >= 0:
-                  say('its opening burst was %d KB' % (self.burst // 1024))
-                  self.burst = -self.burst               # (kept as a minus number once it has been measured and noted)
-              self.ring.append((now, data))
-              self.kept += len(data)
-              speed = self.speed(now)
-              keep = RING if speed is None else min(max(RING, int(speed * KEEP_SECONDS)), RING_MAX)
-              while self.kept - len(self.ring[0][1]) >= keep:
-                  self.kept -= len(self.ring.popleft()[1])
-              for rd in list(self.readers):
-                  if rd.n <= BEHIND + rd.given:           # (what a joiner was handed at the start is not "falling behind")
-                      rd.behind = None
-                  elif rd.behind is None:
-                      rd.behind = now
-                  if rd.n > FAR_BEHIND + rd.given or (rd.behind is not None and now - rd.behind > BEHIND_SECONDS):
-                      # it cannot keep up; holding more for it would only use memory
-                      say('a reader was too slow to keep up with its channel and was disconnected')
-                      rd.end(drop=True)
-                      self.readers.discard(rd)
-                      self.drop_if_empty()
-                  else:
-                      rd.push(data)
-
-          def speed(self, now):
-              """Bytes of video a second; None in a channel's first seconds. It is measured over the last
-              minute and over the last 15 seconds, and the larger is used, so that a channel whose bit
-              rate has just gone up is not short-changed. A feed that has stopped is measured up to its
-              last video, not up to now."""
-              if len(self.marks) < 2 or now - self.marks[0][0] < 8:
-                  return None
-              end = now if now - self.ring[-1][0] < 15 else self.ring[-1][0]
-              best = 0.0
-              for at, total in (self.marks[0], next((m for m in reversed(self.marks) if end - m[0] >= 15), self.marks[0])):
-                  if end - at >= 8:
-                      best = max(best, (self.total - total) / (end - at))
-              return best or None
-
-          def join(self, first):
-              """A new reader. The one who opens a channel gets it from its first byte; one who joins
-              starts with the newest JOIN_SECONDS of video (see there), on a whole packet."""
-              if self.timer is not None:                 # somebody is here after all: the linger is off
-                  self.timer.cancel()
-                  self.timer = None
-              rd = Reader()
-              if first:
-                  for _, data in self.ring:
-                      rd.push(data)
-              elif self.ring:
-                  speed = self.speed(time.monotonic())
-                  want = self.kept if speed is None else int(speed * JOIN_SECONDS)   # (a channel just opened: all of it)
-                  take, size, oldest = [], 0, self.ring[-1][0] - 2 * JOIN_SECONDS
-                  for t, data in reversed(self.ring):
-                      if size and (size + len(data) > want or t < oldest):   # (never more than 20 s of arrivals, whatever the speed says)
-                          break
-                      take.append(data)
-                      size += len(data)
-                  take.reverse()
-                  head, n = b'', 0                      # only the beginning is copied, to find a clean place to start
-                  while n < len(take) and len(head) < 262144:
-                      head += take[n]
-                      n += 1
-                  if head:
-                      rd.push(head[clean_start(head):])
-                  for data in take[n:]:
-                      rd.push(data)
-                  rd.given = rd.n
-                  # Its cushion is kept here and handed on at playing speed, not all at once: a player sent
-                  # seconds of video in a moment may jump ahead through it and then stop at the provider's next
-                  # pause. Kept here, the cushion covers those pauses and the player sees a steady stream from
-                  # its first second. It starts with JOIN_START seconds at once, so it can begin playing.
-                  # (a channel opened moments ago has no measured speed yet: it is taken as JOIN_SECONDS of video)
-                  guess = speed or rd.n / JOIN_SECONDS
-                  if guess > 0:
-                      rd.pace = [rd.n, guess * JOIN_START, time.monotonic(), guess]
-                  say('a reader joined a channel and was given %d KB to start%s' % (rd.n // 1024, '' if speed is None else ' (%d s at %d KB a second)' % (JOIN_SECONDS, speed // 1024)))
-              self.readers.add(rd)
-              return rd
-
-          def leave(self, rd):
-              self.readers.discard(rd)
-              if not self.readers and not self.done:   # the last one out
-                  now, opened = time.monotonic(), LAST_OPEN.get(self.provider, (0, ''))
-                  tuning = self.born is None or now - self.born < 5            # a player tunes in a channel's first seconds
-                  moved = now - opened[0] < 1.0 and opened[1] != self.key      # the player has just gone to another channel
-                  if tuning and not moved:
-                      if self.timer is not None:
-                          self.timer.cancel()
-                      self.timer = asyncio.get_running_loop().call_later(LINGER, self.drop_if_empty)   # see LINGER
-                  else:
-                      self.drop()
-
-          def drop_if_empty(self):
-              if not self.readers:
-                  self.drop()
-
-          def drop(self):                              # let go of the provider's stream now
-              if self.timer is not None:
-                  self.timer.cancel()
-                  self.timer = None
-              if not self.done:
-                  self.task.cancel()
-                  self.done = True
-                  LAST_DROP[self.provider] = time.monotonic()
-                  if CHANNELS.get(self.key) is self:
-                      del CHANNELS[self.key]
-
-      CHANNELS = {}
-      LAST_DROP = {}                                   # for each provider: when one of its streams was last let go
-      LAST_OPEN = {}                                   # for each provider: when a channel was last opened, and which
-
-      # ---- where a /ts channel's video comes from: the provider's own MPEG-TS stream
-      def ts_source(target, agent):
-          async def source(ch):
-              again, sent, quiet = 0, 0, 0
-              while True:
-                  began, got, timed = time.monotonic(), False, False
-                  # (asked for again, a provider gets a short while to answer and to send video: readers are waiting)
-                  status, headers, r, w = await fetch(target, agent, wait=REOPEN_WAIT if again else HEADER_WAIT)
-                  try:
-                      if status not in (200, 206):
-                          say('a provider answered %d when asked for a channel' % status)
-                          text = b''
-                          try:      # what the provider said, to pass on to the player
-                              async for data in body(r, headers, 5):
-                                  text += data
-                                  if len(text) > 65536:
-                                      break
-                          except (OSError, asyncio.TimeoutError):
-                              pass
-                          raise Refused(status, headers.get('content-type', ''), text[:65536])
-                      head = b'' if again else None     # a stream opened again is joined on at a whole packet
-                      pieces, started = body(r, headers).__aiter__(), False
-                      while True:
-                          try:
-                              if again and not started:
-                                  data = await asyncio.wait_for(pieces.__anext__(), 2 * REOPEN_WAIT)
-                              else:
-                                  data = await pieces.__anext__()
-                          except StopAsyncIteration:
-                              data = b''
-                          started = True
-                          if head is not None:
-                              head += data
-                              if data and len(head) < 16384:
-                                  continue
-                              data, head = head[clean_start(head):], None
-                              if data and sent % 188:   # the old stream stopped part-way through a packet: fill it out,
-                                  fill = b'\xff' * (188 - sent % 188)   # so the new stream's packets line up with the old
-                                  sent += len(fill)
-                                  yield fill
-                          if not data:
-                              break
-                          got = True
-                          sent += len(data)
-                          yield data
-                  except (OSError, asyncio.TimeoutError) as e:
-                      if not got:
-                          raise
-                      timed = isinstance(e, asyncio.TimeoutError)
-                  finally:
-                      shut(w)
-                  # The provider ended the stream. If anyone is still watching, ask for it again.
-                  # Not for a stream that ended within REOPEN_AFTER seconds (a short clip, a refusal dressed
-                  # up as video), and not when another channel of this provider was opened in the last 15
-                  # seconds: on a one-connection account that is why this one ended, and asking again would
-                  # end the other.
-                  ran, opened = time.monotonic() - began, LAST_OPEN.get(ch.provider, (0, ''))
-                  # A stream that sent under REOPEN_AFTER seconds of video and then went silent, twice in a row:
-                  # the channel is dead, so the readers are let go and the provider is not asked again.
-                  quiet = quiet + 1 if timed and ran < QUIET_WAIT + REOPEN_AFTER else 0
-                  if quiet >= 2:
-                      say('a channel went silent twice in a row; letting its readers go')
-                      return
-                  if not got or not ch.readers or ran < REOPEN_AFTER or (opened[0] > max(began, time.monotonic() - 15) and opened[1] != ch.key):
-                      return
-                  again = 1
-                  say('a provider ended a channel that was being watched; asking for it again')
-                  await asyncio.sleep(DROP_GAP)
-          return source
-
-      # ---- where a /hls channel's video comes from: the channel's HLS pieces, one after another.
-      # Everything is fetched from the proxy in this stack, at the same addresses the players use, so the
-      # reader shares the players' one provider session (see "one provider session per live channel" below).
-      class NotHls(Exception):
-          pass
-
-      def read_playlist(text):
-          if '#EXTM3U' not in text:
-              raise NotHls()
-          seq, target, pieces, variants, rate, ended, length, newest = 0, 4.0, [], [], None, False, 0.0, 0.0
-          for line in text.splitlines():
-              line = line.strip()
-              if line.startswith('#EXTINF:'):           # a piece's playing time, in seconds (0 if it cannot be read)
-                  m = re.match(r'#EXTINF:\s*(\d+(?:\.\d*)?)', line)
-                  length = float(m.group(1)) if m else 0.0
-              elif line.startswith('#EXT-X-MEDIA-SEQUENCE:'):
-                  seq = int(re.sub(r'\D', '', line[22:]) or 0)
-              elif line.startswith('#EXT-X-TARGETDURATION:'):
-                  target = float(re.sub(r'[^0-9.]', '', line[22:]) or 4)
-              elif line.startswith('#EXT-X-STREAM-INF'):
-                  m = re.search(r'[:,]BANDWIDTH=(\d+)', line)
-                  rate = int(m.group(1)) if m else 0
-              elif line.startswith('#EXT-X-ENDLIST'):
-                  ended = True
-              elif line.startswith(('#EXT-X-MAP', '#EXT-X-BYTERANGE')) or (line.startswith('#EXT-X-KEY') and 'METHOD=NONE' not in line):
-                  raise NotHls()                        # locked, or not whole MPEG-TS files: cannot be joined end to end
-              elif line and not line.startswith('#'):
-                  if rate is not None:
-                      variants.append((rate, line))
-                      rate = None
-                  else:
-                      pieces.append(line)
-                      newest, length = length, 0.0
-          best = max(variants, key=lambda v: v[0])[1] if variants else None   # the best quality on offer
-          return seq, target, pieces, best, ended, newest
-
-      def hls_source(start, agent):
-          home = urlsplit(start).netloc
-          def inside(url):                              # the playlist's addresses must all be this proxy's own
-              if urlsplit(url).netloc != home:
-                  raise NotHls()
-              return url
-          def name(url):
-              return urlsplit(url).path
-
-          async def look():
-              # Always from the channel's own address, so the session memory is kept alive. (For a channel
-              # offered as a list of qualities that is two requests a look where a player makes one.)
-              url = start
-              for _ in range(4):
-                  status, data = await get(url, agent, 2 * 1024 * 1024)
-                  if status != 200:
-                      raise Refused(status)
-                  seq, target, pieces, variant, ended, newest = read_playlist(data.decode('utf-8', 'replace'))
-                  if not variant:
-                      return url, seq, target, pieces, ended, newest
-                  url = inside(urljoin(url, variant))
-              raise NotHls()
-
-          def before_minute():
-              # Seconds until just before the next whole minute on the wall clock, and 0 from 1 s before the minute
-              # until 0.3 s after it (time for what was waiting to reach a recorder on a slower link, and for a
-              # recorder whose clock is a little ahead of this one, or a little behind).
-              # Recorders stop at guide times, which are whole minutes, and cut the connection at once, so around
-              # then nothing is held back: a stop loses nothing. Holding on until then (not stopping early) keeps
-              # the newest video coming for as much of every minute as can be.
-              second = time.time() % 60
-              return 0.0 if second >= 59.0 or second < 0.3 else 59.0 - second
-
-          async def source(ch):
-              last, misses, lost, sent, fresh = None, 0, 0, deque(maxlen=60), time.monotonic()
-              # Video waiting to be handed on, as (when it is due, bytes), oldest first. Each piece goes out over its
-              # own playing time, after the one before it, so the stream grows at playing speed instead of in jumps,
-              # and a piece the provider publishes a little late is covered by the one still going out. Everything
-              # waiting goes out at once before each whole minute (see before_minute) and when this feed ends, so a
-              # recording that stops loses nothing.
-              queue = deque()
-
-              def due():                                # what may go out now
-                  now, flush = time.monotonic(), not before_minute()
-                  while queue and (flush or queue[0][0] <= now):
-                      yield queue.popleft()[1]
-
-              async def pause(until):                   # wait until then, handing on what falls due meanwhile
-                  while True:
-                      for part in due():
-                          yield part
-                      now = time.monotonic()
-                      if now >= until:
-                          return
-                      nap = min(until, queue[0][0] if queue else until) - now
-                      if queue:
-                          nap = min(nap, before_minute())
-                      await asyncio.sleep(max(0.0, nap))
-
-              async def during(job):                    # while a request is under way, hand on what falls due
-                  # A playlist or a piece can take seconds to come. Without this, nothing waiting went out for as
-                  # long as it took, and a whole minute that passed meanwhile passed with video still held back.
-                  job.add_done_callback(lambda j: j.cancelled() or j.exception())   # (its outcome is read below)
-                  while True:
-                      for part in due():
-                          yield part
-                      if job.done():
-                          return
-                      nap = None
-                      if queue:
-                          nap = max(0.0, min(queue[0][0] - time.monotonic(), before_minute()))
-                      await asyncio.wait({job}, timeout=nap)
-
-              job, got = None, None
-              ch.paced = True                           # its stream is paced here, so its own pauses are not the provider's
-              try:
-                  while True:
-                      began = time.monotonic()
-                      try:
-                          job = asyncio.ensure_future(look())
-                          async for part in during(job):
-                              yield part
-                          url, seq, target, pieces, ended, newest = job.result()
-                          misses = 0
-                      except (NotHls, Refused, OSError, ValueError, asyncio.TimeoutError) as e:
-                          # no playlist this time (a refusal, an error page, a playlist that cannot be joined
-                          # end to end): ask again, as a player would
-                          misses += 1
-                          refused = e.status if isinstance(e, Refused) else 0
-                          if misses > (8 if last is not None else 3):   # the playlist could not be had: 4 tries at the start, 9 once playing
-                              raise Refused(refused or 502)
-                          async for part in pause(time.monotonic() + (2 if last is not None else 1)):
-                              yield part
-                          continue
-                      top = seq + len(pieces) - 1
-                      afresh = last is not None and (top < last or seq > last + 1)
-                      opening = last is None or afresh
-                      if opening:
-                          last = max(seq - 1, top - 3)  # joining, or the numbering started afresh: start near the newest video
-                      new = [(seq + i, p) for i, p in enumerate(pieces) if seq + i > last]
-                      length = newest if 0 < newest <= 2 * target else target   # a piece's playing time, as the playlist gives it
-                      for number, piece in new:
-                          last = number
-                          try:
-                              address = inside(urljoin(url, piece))
-                          except NotHls:                # a line that does not lead back to this proxy: not fetched
-                              lost += 1
-                              continue
-                          if afresh and name(address) in sent:   # already passed on, under its old number
-                              continue
-                          data = None
-                          for _ in range(2):
-                              try:
-                                  job = asyncio.ensure_future(get(address, agent))
-                                  async for part in during(job):
-                                      yield part
-                                  status, data = job.result()
-                                  if status == 200 and data:
-                                      break
-                                  data = None
-                              except (OSError, ValueError, asyncio.TimeoutError, Refused):
-                                  data = None
-                          if data is None:
-                              lost += 1
-                              say('a piece of video could not be fetched and is missing from a stream')
-                              if lost >= 3:
-                                  raise Refused(502)
-                              continue
-                          lost = 0
-                          sent.append(name(address))
-                          fresh = now = time.monotonic()
-                          if got is not None and now - got > max(4.0, 1.5 * length):   # a piece well later than its length
-                              say('a provider sent nothing for %.0f s, then carried on' % (now - got))
-                          got = now
-                          parts = [data[i:i + 65424] for i in range(0, len(data), 65424)]   # (whole 188-byte packets)
-                          # A channel's start goes at once, after anything waiting, except its newest piece: that one
-                          # goes out over its playing time like any other, so the stream has video in hand from its
-                          # first second instead of standing still until the provider's next piece.
-                          if opening:
-                              while queue:
-                                  yield queue.popleft()[1]
-                              if number != new[-1][0]:
-                                  for part in parts:
-                                      yield part
-                                  continue
-                          start = max(now, queue[-1][0] if queue else now)
-                          if start - now > 2 * target:  # never more than two target durations waiting: the rest goes now
-                              shift = start - now - 2 * target
-                              for _ in range(len(queue)):
-                                  t, part = queue.popleft()
-                                  queue.append((t - shift, part))
-                              start -= shift
-                          queue.extend((start + length * k / len(parts), part) for k, part in enumerate(parts))
-                          for part in due():
-                              yield part
-                      if not new and (ended or time.monotonic() - fresh > max(30, 6 * target)):
-                          while queue:
-                              yield queue.popleft()[1]
-                          return                        # the channel's playlist has finished, or stopped moving
-                      # Ask again at the pace the HLS spec sets and players keep (RFC 8216bis, 6.3.4): after a playlist
-                      # that changed, the playing time of its newest piece, counted from when this look began; after
-                      # one that did not, half the target duration. Waiting a whole target duration after the fetches
-                      # instead made this stream fall behind a player and collect pieces in bunches.
-                      wait = (newest if 0 < newest < target else target) if new else target / 2
-                      async for part in pause(began + max(0.5, wait)):
-                          yield part
-              except Exception:                         # the feed is ending: what is waiting is handed on first
-                  while queue:
-                      yield queue.popleft()[1]
-                  raise
-              finally:
-                  if job is not None and not job.done():
-                      job.cancel()                      # the reader left in the middle of a request: it is dropped
-          return source
-
-      # ---------------------------------------------------------------------------
-      # Requests from Caddy
-      # ---------------------------------------------------------------------------
-      # What a player sent that is not passed on to the provider: what belongs to one connection, and this proxy's own notes.
-      SKIP = re.compile(r'^(host|connection|keep-alive|proxy-.*|te|trailer|transfer-encoding|upgrade|content-length'
-                        r'|range|if-range|accept-encoding|via|x-relay-.*|x-hls-.*|x-real-ip|x-forwarded-.*)$$', re.I)
-      HEAD_OK = b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n'
-      OPEN = set()                                      # every connection from Caddy that is open now
-
-      def answer(w, status, text=b'', kind='text/plain', more=''):
-          try:
-              reason = http.HTTPStatus(status).phrase
-          except ValueError:
-              reason = 'Error'
-          if isinstance(text, str):
-              text = text.encode()
-          w.write(('HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n%sConnection: close\r\n\r\n'
-                   % (status, reason, kind or 'text/plain', len(text), more)).encode('latin-1', 'replace') + text)
-
-      def channel_key(path, provider, uri):
-          """One channel has one name here, whichever form of its address a player uses
-          (/live/user/pass/1.ts, /user/pass/1.ts, /user/pass/1)."""
-          parts = [p for p in uri.split('?')[0].split('/') if p]
-          if parts and parts[0] == 'live':
-              parts = parts[1:]
-          if parts and parts[-1].endswith('.ts'):
-              parts[-1] = parts[-1][:-3]
-          return path + ' ' + provider + ' ' + '/'.join(parts)
-
-      # ---------------------------------------------------------------------------
-      # HLS: playlists, and ONE provider session per live channel
-      # ---------------------------------------------------------------------------
-      # Every address inside a playlist is pointed back at this proxy as /__cdn/<http or https>/<server>/<path>,
-      # worked out the way a player works it out (relative to where the playlist really came from), so the
-      # player fetches every piece through the VPN and Caddy passes those requests on.
-      #
-      # Many providers start a NEW session every time a live channel's address is asked, and a new session ends
-      # the one before it. A player asks again every few seconds, and several players or a recording may be on
-      # one channel. So the first time a channel is opened, the relay remembers where the provider sent it, and
-      # hands the player a folder of its own on this proxy, /__ch/<the channel's address>/__index.m3u8. Every
-      # later look at that playlist goes to the remembered session; the provider is not asked again. If the
-      # remembered session has gone (an error, or no answer), the channel is opened again ONCE and the new session
-      # remembered. A channel nobody has asked about for a minute is forgotten.
-      URI_IN_TAG = re.compile(r'(URI=")([^"]*)(")', re.I)
-      SESSION_IDLE = 60                                 # seconds a remembered session is kept after its last use
-      SESSION_LOCK_WAIT = 20                            # how long later opens of a channel wait for the first one
-      RENEW_ON = {400, 401, 403, 404, 410, 429, 500, 502, 503, 504, 509, 520, 521, 522, 523, 524}
-      SESSIONS = {}                                     # channel -> {'loc': where the provider sent it, 'final': the playlist's real address, 'used': ...}
-      LOCKS = {}
-
-      def cdn_address(url):
-          """This proxy's address for a full http(s) address; None for anything else."""
-          u = urlsplit(url)
-          if u.scheme not in ('http', 'https') or not u.netloc:
-              return None
-          return '/__cdn/%s/%s%s%s' % (u.scheme, u.netloc, u.path or '/', '?' + u.query if u.query else '')
-
-      HOME = 'http://home.invalid'                     # stands for "this proxy, at the address the player asked"
-
-      def rewrite_playlist(text, base, home=None):
-          """Every address in the playlist, made absolute against base, then pointed back at this proxy.
-          With home (the player's own path), a playlist the provider answered directly: an address on the
-          provider's own server is resolved against the player's path instead, so it goes back through this
-          proxy with the easy login (swapped on the way out) and the real login is never written into it."""
-          origin = urlsplit(base)[:2]
-          def move(u):
-              full = urljoin(base, u.strip())
-              if home is not None and urlsplit(full)[:2] == origin and not re.match(r'(?i)^[a-z][a-z0-9+.-]*:', u.strip()):
-                  mine = urlsplit(urljoin(HOME + home, u.strip()))
-                  return (mine.path or '/') + ('?' + mine.query if mine.query else '')
-              full = cdn_address(full)
-              return full if full else u
-          def in_tags(line):
-              return URI_IN_TAG.sub(lambda m: m.group(1) + move(m.group(2)) + m.group(3), line)
-          out = []
-          for number, line in enumerate(text.split('\n')):
-              core = line.strip()
-              if number == 0 or not core:
-                  out.append(line)
-              elif core.startswith('#'):                # a tag: addresses sit in URI="..."
-                  out.append(in_tags(line))
-              else:                                     # a line that is an address
-                  out.append(move(core) + ('\r' if line.endswith('\r') else ''))
-          return '\n'.join(out)
-
-      # What is passed between player and server on a playlist, either way: everything except what belongs to
-      # one connection and this proxy's own notes.
-      PL_SKIP = re.compile(r'^(host|connection|keep-alive|proxy-.*|te|trailer|transfer-encoding|upgrade|content-length|content-encoding'
-                           r'|range|if-range|content-range|accept-ranges|accept-encoding|x-accel-.*|server|date|via'
-                           r'|x-relay-.*|x-hls-.*|x-pl-.*|x-real-ip|x-forwarded-.*)$$', re.I)
-      HLS_SEEN = {}                                     # channels whose playlist a player has just asked for (for the status page)
-
-      def is_private_url(url):
-          host = urlsplit(url).hostname or ''
-          try:
-              return private(host)
-          except ValueError:
-              return host.lower() == 'localhost'
-
-      async def fetch_to_end(url, agent, guard=True, wait=HEADER_WAIT):
-          """fetch(), following redirects here, and saying where the answer really came from."""
-          for hop in range(10):
-              if guard and is_private_url(url):
-                  raise Refused(403)
-              status, headers, r, w = await fetch(url, agent, hops=1, guard=guard, follow=False, wait=wait)
-              if status in (301, 302, 303, 307, 308) and headers.get('location'):
-                  shut(w)
-                  url = urljoin(url, headers['location'])
-                  continue
-              return status, headers, r, w, url
-          raise Refused(502)
-
-      def real_address(local):
-          """The real address behind this proxy's /__cdn/<scheme>/<server>/<path> (None for anything else)."""
-          m = re.match(r'^/__cdn/(https?)/([^/?]+)(/[^?]*)?(\?.*)?$$', urlsplit(local).path + ('?' + urlsplit(local).query if urlsplit(local).query else ''), re.I)
-          return '%s://%s%s%s' % (m.group(1).lower(), m.group(2), m.group(3) or '/', m.group(4) or '') if m else None
-
-      async def fetch_via_proxy(url, agent, port, wait=PLAYLIST_WAIT):
-          """A playlist on a video server, fetched through Caddy at /__cdn/..., so it rides on the connection Caddy
-          keeps open to that server (a new encrypted connection for every look at a live playlist, every few seconds,
-          is what makes players stutter). The address is checked here first, name looked up, exactly as a direct
-          fetch would be. Returns what fetch_to_end returns, with the real address of where the answer came from."""
-          for hop in range(10):
-              u = urlsplit(url)
-              if u.scheme not in ('http', 'https') or not u.hostname or '@' in u.netloc or is_private_url(url):
-                  raise Refused(403)
-              try:
-                  ipaddress.ip_address(u.hostname)
-              except ValueError:                        # a name: where it really leads must not be this machine or a home network
-                  found = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(u.hostname, u.port or (443 if u.scheme == 'https' else 80), type=socket.SOCK_STREAM), CONNECT_WAIT)
-                  if any(private(f[4][0]) for f in found):
-                      raise Refused(403)
-              status, headers, r, w = await fetch('http://127.0.0.1:%s%s' % (port, cdn_address(url)), agent + [('X-Relay-Fetch', '1')],
-                                                  guard=False, follow=False, wait=wait)
-              if status in (301, 302, 303, 307, 308) and headers.get('location'):
-                  shut(w)
-                  nxt = urljoin('http://127.0.0.1:%s%s' % (port, cdn_address(url)), headers['location'])
-                  url = real_address(urlsplit(nxt).path + ('?' + urlsplit(nxt).query if urlsplit(nxt).query else '')) if urlsplit(nxt).netloc == '127.0.0.1:%s' % port else nxt
-                  if not url:
-                      raise Refused(502)
-                  continue
-              return status, headers, r, w, url
-          raise Refused(502)
-
-      async def read_small(r, headers, w, limit=4 * 1024 * 1024, wait=PLAYLIST_WAIT):
-          try:
-              data = b''
-              async for piece in body(r, headers, wait):
-                  data += piece
-                  if len(data) > limit:
-                      raise OSError('too large')
-              return data
-          finally:
-              shut(w)
-
-      def send(w, status, headers, data, kind=None):
-          try:
-              reason = http.HTTPStatus(status).phrase
-          except ValueError:
-              reason = 'Status'
-          lines = ['HTTP/1.1 %d %s' % (status, reason)]
-          lines += ['%s: %s' % nv for nv in (headers.all if headers is not None else []) if not PL_SKIP.match(nv[0])
-                    and not (kind and nv[0].lower() == 'content-type')]
-          if kind:
-              lines.append('Content-Type: ' + kind)
-          lines += ['Content-Length: %d' % len(data), 'Connection: close', '', '']
-          w.write('\r\n'.join(lines).encode('latin-1', 'replace') + data)
-
-      def serve_playlist(w, status, headers, data, base, home=None):
-          """A playlist is rewritten; anything else that came back is passed on as it is."""
-          if b'#EXTM' in data[:1024]:
-              # latin-1 both ways, so every byte outside an address comes out as it went in
-              data = rewrite_playlist(data.decode('latin-1'), base, home).encode('latin-1', 'replace')
-          send(w, status, headers, data)
-
-      def forget_idle():
-          now = time.monotonic()
-          for k in [k for k, s in SESSIONS.items() if now - s['used'] > SESSION_IDLE]:
-              del SESSIONS[k]
-          for k in [k for k, lock in LOCKS.items() if k not in SESSIONS and not lock.locked()]:
-              del LOCKS[k]
-
-      async def open_channel(key, target, agent, renew_from=None):
-          """Ask the provider for the channel once and remember where it was sent. Returns the session, or a
-          tuple (status, headers, data) when the provider answered with something else (passed on as is)."""
-          lock = LOCKS.setdefault(key, asyncio.Lock())
-          try:
-              await asyncio.wait_for(lock.acquire(), SESSION_LOCK_WAIT)
-          except asyncio.TimeoutError:
-              raise Refused(504)
-          try:
-              s = SESSIONS.get(key)
-              if s and (renew_from is None or s['loc'] != renew_from):
-                  s['used'] = time.monotonic()          # opened (or renewed) by someone else meanwhile
-                  return s
-              status, headers, r, w = await fetch(target, agent, follow=False, wait=PLAYLIST_WAIT)
-              if status in (301, 302, 303, 307, 308) and headers.get('location'):
-                  shut(w)
-                  loc = urljoin(target, headers['location'])
-                  if is_private_url(loc) or urlsplit(loc).scheme not in ('http', 'https'):
-                      raise Refused(403)
-                  s = SESSIONS[key] = {'loc': loc, 'final': loc, 'used': time.monotonic()}
-                  say('a live HLS channel was %s at the provider' % ('opened again' if renew_from else 'opened'))
-                  return s
-              return status, headers, await read_small(r, headers, w)
-          finally:
-              lock.release()
-
-      async def hls(w, h, raw):
-          provider, uri, orig = h.get('x-relay-provider', '').rstrip('/'), h.get('x-relay-uri', ''), h.get('x-relay-orig', '')
-          port = h.get('x-relay-port', '')
-          if provider not in PROVIDERS or not uri.startswith('/') or not orig.startswith('/') or not port.isdigit():
-              return answer(w, 403, 'Not a request from the proxy.\n')
-          forget_idle()
-          agent = [nv for nv in raw if not PL_SKIP.match(nv[0])]
-          opath, _, oquery = orig.partition('?')
-
-          # A playlist on a server the provider sent the player to: fetched there and rewritten.
-          m = re.match(r'^/__cdn/(https?)/([^/?]+)(/[^?]*)?$$', opath, re.I)
-          if m:
-              target = '%s://%s%s%s' % (m.group(1).lower(), m.group(2), m.group(3) or '/', '?' + oquery if oquery else '')
-              status, headers, r, up, final = await fetch_via_proxy(target, agent, port)
-              return serve_playlist(w, status, headers, await read_small(r, headers, up), final)
-
-          # A live channel's own folder: /__ch/<the channel's address>/<__index.m3u8 or a piece named next to it>
-          m = re.match(r'^/__ch(/.+?\.m3u8)/(.*)$$', opath)
-          chan_orig = m.group(1) if m else opath
-          key = provider + ' ' + uri.split('?')[0]      # the channel (the provider's address for it, without any query)
-          target = provider + uri + ('?' + oquery if m and oquery and '?' not in uri else '')
-          s = SESSIONS.get(key)
-          if s is None:
-              s = await open_channel(key, target, agent)
-              if isinstance(s, tuple):                  # the provider answered without sending the channel elsewhere
-                  status, headers, data = s
-                  return serve_playlist(w, status, headers, data, target, chan_orig)
-          s['used'] = time.monotonic()
-          if not m:                                     # the player opened the channel: give it the channel's folder
-              return answer(w, 302, '', 'text/plain', 'Location: /__ch%s/__index.m3u8%s\r\n' % (opath, '?' + oquery if oquery else ''))
-          if m.group(2) != '__index.m3u8':              # a piece named next to the playlist: where it really is
-              there = cdn_address(urljoin(s['final'], m.group(2) + ('?' + oquery if oquery else '')))
-              return answer(w, 302 if there else 404, '', 'text/plain', 'Location: %s\r\n' % there if there else '')
-          for attempt in (1, 2):
-              try:
-                  status, headers, r, up, final = await fetch_via_proxy(s['loc'], agent, port, wait=25)
-                  data = await read_small(r, headers, up, wait=25)
-              except (OSError, asyncio.TimeoutError, Refused, ValueError) as e:
-                  if attempt == 2:
-                      raise
-                  status, headers, data, final = (e.status if isinstance(e, Refused) else 502), None, b'', s['loc']
-              if status not in RENEW_ON or attempt == 2:
-                  break
-              s = await open_channel(key, target, agent, renew_from=s['loc'])   # the remembered session is gone
-              if isinstance(s, tuple):
-                  status, headers, data = s
-                  return serve_playlist(w, status, headers, data, target, chan_orig)
-          s['final'] = final
-          if status == 200:
-              HLS_SEEN[port + chan_orig] = time.monotonic()
-              if len(HLS_SEEN) > 300:
-                  for k in [k for k, t in HLS_SEEN.items() if time.monotonic() - t > 30]:
-                      del HLS_SEEN[k]
-          serve_playlist(w, status, headers, data, final)
-
-      # ---------------------------------------------------------------------------
-      # Where a /__cdn/ address really leads (asked by Caddy before it connects)
-      # ---------------------------------------------------------------------------
-      # Caddy refuses /__cdn/ addresses that name this machine or a home network with numbers, but it cannot
-      # look a server's name up before it connects. So for every /__cdn/ request it asks here first: the name is
-      # looked up (through the tunnel's DNS, like everything else) and refused if it leads to this machine, a
-      # home or private network, or a link-local address. Answers are kept for a minute, so a channel's pieces
-      # cost one lookup a minute, not one each. (A name that changes its answer between this lookup and Caddy's
-      # own, inside that moment, is not covered.)
-      CHECKS = {}
-      CHECK_KEEP = 60
-
-      async def where_it_leads(w, h):
-          netloc = h.get('x-relay-check', '')       # the server named in the /__cdn/ address, as Caddy read it
-          try:
-              host = urlsplit('//' + netloc).hostname or ''
-          except ValueError:
-              host = ''
-          if not host:
-              return answer(w, 403, 'No server named.\n')
-          now = time.monotonic()
-          had = CHECKS.get(host)
-          if had and now - had[0] < CHECK_KEEP:
-              ok = had[1]
-          else:
-              try:
-                  ok = not private(host)                # written as numbers
-              except ValueError:
-                  try:
-                      found = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM), CONNECT_WAIT)
-                      ok = bool(found) and not any(private(f[4][0]) for f in found)
-                  except (OSError, asyncio.TimeoutError, ValueError):
-                      ok = True                         # no answer: Caddy's own lookup fails the same way, and nothing is reached
-              if len(CHECKS) > 2000:
-                  CHECKS.clear()
-              CHECKS[host] = (now, ok)
-          answer(w, 200 if ok else 403, 'ok\n' if ok else 'That address leads to this machine or a home network.\n')
-
-      # ---------------------------------------------------------------------------
-      # The provider's lists (player_api.php): logos and posters are pointed back at this proxy
-      # ---------------------------------------------------------------------------
-      # The lists give pictures as full addresses, usually on other sites. Each "http://... or "https://... (also
-      # written with \/ as JSON allows) becomes "http://<this proxy>/__cdn/<http or https>/..., so the player
-      # fetches the pictures through the VPN too. Read and rewritten piece by piece: a movie list can be 150 MB.
-      API_LINK = re.compile(rb'"(https?):(?:\\/\\/|//)')
-      API_WAIT = 300                                    # seconds a provider may take to start a big list, and between its pieces
-
-      async def api(w, h, raw):
-          provider, uri = h.get('x-relay-provider', '').rstrip('/'), h.get('x-relay-uri', '')
-          home = re.sub(r'[^A-Za-z0-9.:\[\]-]', '', h.get('x-relay-host', ''))
-          if provider not in PROVIDERS or not uri.startswith('/') or not home:
-              return answer(w, 403, 'Not a request from the proxy.\n')
-          agent = [nv for nv in raw if not SKIP.match(nv[0])]
-          status, headers, r, up, final = await fetch_to_end(provider + uri, agent, wait=API_WAIT)
-          try:
-              if headers.get('content-encoding', '').strip().lower() not in ('', 'identity'):
-                  raise Refused(502)                    # (asked for plain text; a server that compresses anyway cannot be read)
-              gz = 'gzip' in h.get('accept-encoding', '').lower()
-              z = zlib.compressobj(1, zlib.DEFLATED, 31) if gz else None
-              try:
-                  reason = http.HTTPStatus(status).phrase
-              except ValueError:
-                  reason = 'Status'
-              lines = ['HTTP/1.1 %d %s' % (status, reason)] + ['%s: %s' % nv for nv in headers.all if not PL_SKIP.match(nv[0])]
-              lines += (['Content-Encoding: gzip', 'Vary: Accept-Encoding'] if gz else []) + ['Connection: close', '', '']
-              w.write('\r\n'.join(lines).encode('latin-1', 'replace'))
-              link = b'"http://' + home.encode() + b'/__cdn/'
-              try:
-                  await _api_stream(w, r, headers, link, z)
-              except BaseException:
-                  shut(w)                               # cut off: the app must see a broken answer, not a short complete one
-                  raise
-          finally:
-              shut(up)
-
-      async def _api_stream(w, r, headers, link, z):
-          """The list itself, rewritten piece by piece (see api)."""
-          tail = b''
-          async for data in body(r, headers, API_WAIT):
-              data = tail + data
-              cut = data.rfind(b'"')                # every link starts with a quote: hold back a quote near the end
-              if cut >= 0 and len(data) - cut < 12:
-                  data, tail = data[:cut], data[cut:]
-              else:
-                  tail = b''
-              data = API_LINK.sub(lambda m: link + m.group(1) + b'/', data)
-              out = z.compress(data) if z else data
-              if out:
-                  w.write(out)
-                  await w.drain()
-          data = API_LINK.sub(lambda m: link + m.group(1) + b'/', tail)
-          out = (z.compress(data) + z.flush()) if z else data
-          if out:
-              w.write(out)
-              await w.drain()
-
-      # ---------------------------------------------------------------------------
-      # The status page
-      # ---------------------------------------------------------------------------
-      KEPT = {}                                         # answers from outside, kept for a while so the page is quick
-
-      ASKING = {}                                       # lookups under way, so that many page views share one
-
-      async def kept(name, seconds, make):
-          """make()'s answer, asked for at most once every `seconds`; None if it takes too long or fails."""
-          had = KEPT.get(name)
-          if had and time.monotonic() - had[0] < (seconds if had[1] is not None else 60):
-              return had[1]
-          async def ask():
-              try:
-                  value = await asyncio.wait_for(make(), 6)
-              except Exception:
-                  value = None
-              KEPT[name] = (time.monotonic(), value)
-              return value
-          if name not in ASKING:
-              ASKING[name] = asyncio.ensure_future(ask())
-              ASKING[name].add_done_callback(lambda f: ASKING.pop(name, None))
-          return await asyncio.shield(ASKING[name])
-
-      async def where_am_i():                           # what the internet sees: asked through the VPN
-          async def ask():
-              status, headers, r, w = await fetch('https://ipinfo.io/json', 'curl/8', guard=False, tls=CHECKED)
-              try:
-                  text = b''
-                  async for data in body(r, headers, 6):
-                      text += data
-                  return json.loads(text) if status == 200 else None
-              finally:
-                  shut(w)
-          return await kept('where', 300, ask)
-
-      def vpn_ping(tries=3):                            # round trip to the VPN server itself, in milliseconds
-          # A packet allowed only one hop dies at the VPN server, which answers "time exceeded". Linux hands
-          # that answer to this socket's error queue (IP_RECVERR), so no raw socket or extra permission is
-          # needed. A VPN server that does not answer gives None, and the page leaves the line out.
-          times = []
-          for n in range(tries):
-              s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-              try:
-                  s.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, 1)
-                  s.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_RECVERR', 11), 1)
-                  s.setblocking(False)
-                  start = time.monotonic()
-                  s.sendto(b'\0', ('1.1.1.1', 33434 + n))
-                  while time.monotonic() - start < 1:
-                      try:
-                          _, notes, _, _ = s.recvmsg(64, 512, getattr(socket, 'MSG_ERRQUEUE', 0x2000))
-                      except BlockingIOError:
-                          time.sleep(0.002)
-                          continue
-                      if any(len(d) > 5 and d[4] == 2 and d[5] == 11 for _, _, d in notes):   # ICMP, time exceeded
-                          times.append((time.monotonic() - start) * 1000)
-                      break
-              except OSError:
-                  pass
-              finally:
-                  s.close()
-          return sorted(times)[len(times) // 2] if times else None
-
-      async def account(port, user, password):          # the provider's own account page, asked through the proxy with the easy login
-          async def ask():
-              url = 'http://127.0.0.1:%s/player_api.php?username=%s&password=%s' % (port, quote(user, safe=''), quote(password, safe=''))
-              status, data = await get(url, '', 1 << 20)
-              if status == 502:                         # most often a name lookup that failed for a moment: asked once more
-                  await asyncio.sleep(0.5)
-                  status, data = await get(url, '', 1 << 20)
-              if status != 200:
-                  return {'answer': status}
-              info = json.loads(data).get('user_info') or {}
-              return {'answer': 200, 'status': info.get('status'), 'auth': info.get('auth'), 'exp': info.get('exp_date'),
-                      'used': info.get('active_cons'), 'max': info.get('max_connections')}
-          # The account page is asked for when somebody looks at the status page, at most once every
-          # ACCOUNT_EVERY seconds, and the page waits a few seconds for the answer, so that what it shows
-          # (connections in use, above all) is how things are now. If the provider is slow for a moment the
-          # last good answer is shown instead, with its age beside it, and not "no answer". After a failure
-          # the provider is asked less and less often (2, 4, 8, at most 15 minutes), so that a provider in
-          # trouble is left alone.
-          st = ACCOUNTS.setdefault(port, {'good': None, 'at': 0.0, 'tried': -1e9, 'fails': 0, 'task': None})
-          now = time.monotonic()
-          async def refresh():
-              try:
-                  value = await asyncio.wait_for(ask(), 20)
-              except Exception:
-                  value = None
-              if value and value.get('answer') == 200:
-                  st['good'], st['at'], st['fails'] = value, time.monotonic(), 0
-                  st.pop('last', None)
-              else:
-                  st['fails'] += 1
-                  st['last'] = value
-              st['task'] = None
-          if st['task'] is None and now - st['tried'] >= (ACCOUNT_EVERY if not st['fails'] else min(60 * 2 ** st['fails'], 900)):
-              st['tried'] = now
-              st['task'] = asyncio.ensure_future(refresh())
-          if st['task'] is not None:                         # an answer is on its way: wait a little for it
-              await asyncio.wait({st['task']}, timeout=6)
-          if st['good'] is not None and time.monotonic() - st['at'] < 900:
-              return dict(st['good'], age=time.monotonic() - st['at'])
-          return st.get('last')
-
-      ACCOUNTS = {}
-      ACCOUNT_EVERY = 15
-
-      STYLE = """
+      // The relay: the jobs a plain reverse proxy cannot do, for Caddy (it listens on 127.0.0.1 only).
+      //
+      //	/ts      one provider MPEG-TS stream per channel, shared by every reader
+      //	/hls     MPEG-TS for recorders, made from the channel's HLS (shares the players' one HLS session)
+      //	/hl      HLS playlists: one provider session per live channel, every address pointed back here
+      //	/api     player_api.php lists: logos and posters pointed back here
+      //	/check   whether a /__cdn/ server name leads to this machine or a home network
+      //	/status  the status page
+      //
+      // Go port of relay.py: same endpoints, status codes, timing rules and log lines. Standard library only.
+      // main.go: server, channels and their sources. hls.go: playlists, sessions, lists. status.go: the page.
+      package main
+
+      import (
+      	"bytes"
+      	"context"
+      	"crypto/tls"
+      	"errors"
+      	"fmt"
+      	"io"
+      	"log"
+      	"math"
+      	"net"
+      	"net/http"
+      	"net/netip"
+      	"os"
+      	"os/signal"
+      	"regexp"
+      	"strconv"
+      	"strings"
+      	"sync"
+      	"sync/atomic"
+      	"syscall"
+      	"time"
+      )
+
+      const (
+      	joinSeconds   = 10               // a joiner starts this far behind live: its cushion, handed on at playing speed
+      	joinStart     = 2                // seconds of that cushion handed on at once, so its player can start
+      	keepSeconds   = 15               // what is kept of each channel for joiners...
+      	ringMin       = 12 << 20         // ...never less than this
+      	ringMax       = 64 << 20         // ...nor more than this
+      	burstSeconds  = 2.5              // the provider's opening burst is measured over this and logged
+      	reopenAfter   = 30               // a stream that ran this long and ended while watched is asked for again
+      	reopenWait    = 5                // seconds to answer when asked again (twice that to send video)
+      	dropGap       = 0.1              // time a provider gets to see a hang-up before another channel is asked for
+      	linger        = 0.4              // a channel in its first seconds is kept this long after its last reader (tuning)
+      	readersMax    = 100              // readers served at once, all channels together
+      	behind        = 16 << 20         // a reader this far behind for behindSeconds is disconnected...
+      	behindSeconds = 15               //
+      	farBehind     = 64 << 20         // ...or this far behind at any moment
+      	connectWait   = 10 * time.Second // to accept a connection
+      	headerWait    = 20               // seconds for an answer's heading
+      	playlistWait  = 30               // the same for a playlist
+      	startWait     = 60               // seconds a reader waits for a channel's first video
+      	quietWait     = 60               // seconds a stream may send nothing before it is given up on
+      )
+
+      var mu sync.Mutex // all shared state; held only between waits (the Python ran on one thread)
+
+      var logger = log.New(os.Stdout, "RELAY: ", 0)
+
+      func say(format string, a ...any) { logger.Printf(format, a...) } // never an address or a login
+
+      // The providers this relay may connect to (passed from .env by the compose command).
+      var providers = func() map[string]bool {
+      	m := map[string]bool{}
+      	for _, u := range strings.Fields(os.Getenv("RELAY_PROVIDERS")) {
+      		if l := strings.ToLower(u); strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://") {
+      			m[strings.TrimRight(u, "/")] = true
+      		}
+      	}
+      	return m
+      }()
+
+      var clockStart = time.Now()
+
+      func mono() float64 { return time.Since(clockStart).Seconds() + 1e6 } // starts high so "never" (0) is long ago
+
+      func secs(s float64) time.Duration { return time.Duration(s * float64(time.Second)) }
+
+      func sleep(ctx context.Context, s float64) error {
+      	t := time.NewTimer(secs(math.Max(0, s)))
+      	defer t.Stop()
+      	select {
+      	case <-t.C:
+      		return nil
+      	case <-ctx.Done():
+      		return ctx.Err()
+      	}
+      }
+
+      // ---------------------------------------------------------------------------
+      // Fetching: net/http, one connection per request, certificates not checked (as Caddy)
+      // ---------------------------------------------------------------------------
+
+      type refused struct { // the other side said no; carries what to tell the reader
+      	status int
+      	kind   string
+      	text   []byte
+      }
+
+      func (e *refused) Error() string { return "refused " + strconv.Itoa(e.status) }
+
+      type timeoutError struct{}
+
+      func (timeoutError) Error() string { return "timed out" }
+      func (timeoutError) Timeout() bool { return true }
+
+      var errStop = errors.New("the feed's reader stopped")
+
+      func isTimeout(err error) bool {
+      	var ne net.Error
+      	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) && ne.Timeout()
+      }
+
+      func pyName(err error) string { // the names the Python log used
+      	var dns *net.DNSError
+      	switch {
+      	case isTimeout(err):
+      		return "TimeoutError"
+      	case errors.As(err, &dns):
+      		return "gaierror"
+      	case errors.Is(err, syscall.ECONNREFUSED):
+      		return "ConnectionRefusedError"
+      	case errors.Is(err, syscall.ECONNRESET):
+      		return "ConnectionResetError"
+      	}
+      	return "OSError"
+      }
+
+      var privateNets = func() (out []netip.Prefix) {
+      	for _, n := range strings.Fields("0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 ::/127 fc00::/7 fe80::/10") {
+      		out = append(out, netip.MustParsePrefix(n))
+      	}
+      	return
+      }()
+
+      // isPrivate: this machine, a home or private network (false for anything not written as an address).
+      func isPrivate(host string) bool {
+      	ip, err := netip.ParseAddr(strings.Trim(host, "[]"))
+      	if err != nil {
+      		return false
+      	}
+      	ip = ip.WithZone("").Unmap()
+      	for _, n := range privateNets {
+      		if n.Contains(ip) {
+      			return true
+      		}
+      	}
+      	return false
+      }
+
+      // looseNumbers: 127.1, 2130706433, 0x7f000001: the C library reads these as addresses, DNS never answers them.
+      var looseNumbers = regexp.MustCompile(`(?i)^(0x[0-9a-f]+|[0-9]+)(\.(0x[0-9a-f]+|[0-9]+)){0,3}$$`)
+
+      // leadsHome looks a server name up and says whether any answer is this machine or a home network.
+      func leadsHome(ctx context.Context, host string) (bool, error) {
+      	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+      		return isPrivate(host), nil
+      	}
+      	if strings.EqualFold(host, "localhost") || looseNumbers.MatchString(host) {
+      		return true, nil
+      	}
+      	ctx, cancel := context.WithTimeout(ctx, connectWait)
+      	defer cancel()
+      	found, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+      	for _, f := range found {
+      		if isPrivate(f.IP.String()) {
+      			return true, nil
+      		}
+      	}
+      	return false, err
+      }
+
+      type guardKey struct{}
+
+      // The private-address check happens at connect time, on the address actually dialed.
+      var dialer = &net.Dialer{Timeout: connectWait, ControlContext: func(ctx context.Context, _, addr string, _ syscall.RawConn) error {
+      	if host, _, _ := net.SplitHostPort(addr); ctx.Value(guardKey{}) != nil && isPrivate(host) {
+      		return &refused{status: 403}
+      	}
+      	return nil
+      }}
+
+      func newTransport(verify bool) *http.Transport {
+      	return &http.Transport{DialContext: dialer.DialContext, TLSClientConfig: &tls.Config{InsecureSkipVerify: !verify},
+      		TLSHandshakeTimeout: connectWait, DisableKeepAlives: true, DisableCompression: true,
+      		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{}}
+      }
+
+      var plainTransport, checkedTransport = newTransport(false), newTransport(true)
+
+      type opts struct {
+      	guardAll bool // every connection checked (otherwise only those a redirect leads to)
+      	noFollow bool
+      	stay     bool // redirects may not leave the first server
+      	verify   bool // check the certificate (only ipinfo.io)
+      	wait     float64
+      }
+
+      // idleBody gives up when one read waits longer than wait (a stream that went quiet).
+      type idleBody struct {
+      	io.ReadCloser
+      	cancel context.CancelFunc
+      	wait   atomic.Int64
+      	timed  atomic.Bool
+      }
+
+      func (b *idleBody) Read(p []byte) (int, error) {
+      	t := time.AfterFunc(time.Duration(b.wait.Load()), func() { b.timed.Store(true); b.cancel() })
+      	n, err := b.ReadCloser.Read(p)
+      	t.Stop()
+      	if err != nil && err != io.EOF && b.timed.Load() {
+      		err = timeoutError{}
+      	}
+      	return n, err
+      }
+
+      func (b *idleBody) Close() error { b.cancel(); return b.ReadCloser.Close() }
+
+      func setWait(r *http.Response, s float64) { r.Body.(*idleBody).wait.Store(int64(secs(s))) }
+
+      func isRedirect(s int) bool { return s == 301 || s == 302 || s == 303 || s == 307 || s == 308 }
+
+      // fetch opens url with the given headers (the player's own, or just a name). The caller closes the body.
+      func fetch(ctx context.Context, url string, h http.Header, o opts) (*http.Response, error) {
+      	ctx, cancel := context.WithCancel(ctx)
+      	if o.guardAll {
+      		ctx = context.WithValue(ctx, guardKey{}, true)
+      	}
+      	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+      	if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") || req.URL.Hostname() == "" || req.URL.User != nil {
+      		cancel()
+      		return nil, &refused{status: 502}
+      	}
+      	req.Header = h.Clone()
+      	if req.Header == nil {
+      		req.Header = http.Header{}
+      	}
+      	if req.Header.Get("User-Agent") == "" {
+      		req.Header["User-Agent"] = []string{""} // no Go-http-client name
+      	}
+      	tr := plainTransport
+      	if o.verify {
+      		tr = checkedTransport
+      	}
+      	client := &http.Client{Transport: tr, CheckRedirect: func(r *http.Request, via []*http.Request) error {
+      		if o.noFollow || len(via) >= 10 {
+      			return http.ErrUseLastResponse
+      		}
+      		if o.stay && r.URL.Host != via[0].URL.Host {
+      			return &refused{status: 502}
+      		}
+      		*r = *r.WithContext(context.WithValue(r.Context(), guardKey{}, true)) // a redirect may not lead home
+      		return nil
+      	}}
+      	var timed atomic.Bool
+      	t := time.AfterFunc(connectWait+secs(o.wait), func() { timed.Store(true); cancel() })
+      	resp, err := client.Do(req)
+      	t.Stop()
+      	if err != nil {
+      		cancel()
+      		var r *refused
+      		if errors.As(err, &r) {
+      			return nil, r
+      		}
+      		if timed.Load() {
+      			return nil, timeoutError{}
+      		}
+      		return nil, err
+      	}
+      	b := &idleBody{ReadCloser: resp.Body, cancel: cancel}
+      	b.wait.Store(int64(secs(o.wait)))
+      	resp.Body = b
+      	return resp, nil
+      }
+
+      type tooLarge struct{}
+
+      func (tooLarge) Error() string { return "too large" }
+
+      // readAll reads a whole small answer (a playlist, a piece, a list) and closes it.
+      func readAll(r *http.Response, limit int64, wait float64) ([]byte, error) {
+      	defer r.Body.Close()
+      	setWait(r, wait)
+      	data, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+      	if err == nil && int64(len(data)) > limit {
+      		err = tooLarge{}
+      	}
+      	return data, err
+      }
+
+      // get fetches a whole small answer from the proxy in this stack (never sent elsewhere).
+      func get(ctx context.Context, url string, h http.Header, limit int64) (int, []byte, error) {
+      	r, err := fetch(ctx, url, h, opts{stay: true, wait: headerWait})
+      	if err != nil {
+      		return 0, nil, err
+      	}
+      	data, err := readAll(r, limit, headerWait)
+      	return r.StatusCode, data, err
+      }
+
+      func agentOf(name string) http.Header { // the relay's own fetches: just a name
+      	h := http.Header{"Accept": {"*/*"}}
+      	if name != "" {
+      		h.Set("User-Agent", name)
+      	}
+      	return h
+      }
+
+      // ---------------------------------------------------------------------------
+      // A channel: one source of video, any number of readers
+      // ---------------------------------------------------------------------------
+
+      // cleanStart: where a reader can start in MPEG-TS: a program table nearby, else the first whole packet.
+      func cleanStart(buf []byte) int {
+      	end := len(buf) - 376
+      	for i, tries := bytes.IndexByte(buf, 0x47), 0; 0 <= i && i < end && tries < 2000; tries++ {
+      		if buf[i+188] == 0x47 && buf[i+376] == 0x47 {
+      			for k := i; k < min(end, i+188*3000); k += 188 {
+      				if buf[k] != 0x47 {
+      					break
+      				}
+      				if buf[k+1]&0x1f == 0 && buf[k+2] == 0 {
+      					return k
+      				}
+      			}
+      			return i
+      		}
+      		j := bytes.IndexByte(buf[i+1:], 0x47)
+      		if j < 0 {
+      			break
+      		}
+      		i += 1 + j
+      	}
+      	return 0
+      }
+
+      // keyStart: where a joiner's decoder can start at once: the program table (PAT) just before the first video
+      // keyframe. Started at any PAT, the player was handed up to a whole keyframe interval of video it could not
+      // decode, out of the few seconds it gets at once, and stalled. Streams that mark no keyframes: cleanStart.
+      func keyStart(buf []byte) int {
+      	start := cleanStart(buf)
+      	pmtPID, vid, lastPAT := -1, -1, -1
+      	for i := start; i+188 <= len(buf) && buf[i] == 0x47; i += 188 {
+      		pkt := buf[i : i+188]
+      		pid, afc, off, rai := int(pkt[1]&0x1f)<<8|int(pkt[2]), pkt[3]>>4&3, 4, false
+      		if afc&2 != 0 {
+      			rai, off = pkt[4] > 0 && pkt[5]&0x40 != 0, 5+int(pkt[4])
+      		}
+      		if afc&1 == 0 || off >= 188 || pkt[1]&0x40 == 0 {
+      			continue
+      		}
+      		switch body := pkt[off:]; {
+      		case pid == 0:
+      			lastPAT = i
+      			if pmt := patPMT(tableStart(body)); pmt >= 0 {
+      				pmtPID = pmt
+      			}
+      		case pid == pmtPID && vid < 0:
+      			vid = pickStream(tableStart(body))
+      		case pid == vid && rai && lastPAT >= 0:
+      			return lastPAT
+      		}
+      	}
+      	return start
+      }
+
+      type pace struct{ have, credit, at, guess float64 } // a joiner's cushion, allowance, when counted, speed guessed
+
+      type reader struct {
+      	q                   [][]byte
+      	n, given            int
+      	wake                chan struct{}
+      	over, dropped       bool
+      	behindAt            float64
+      	who, id, port, kind string // for the status page
+      	came                float64
+      	written             atomic.Int64
+      	pace                *pace
+      	cut                 func() // cuts its connection
+      }
+
+      func (rd *reader) signal() {
+      	select {
+      	case rd.wake <- struct{}{}:
+      	default:
+      	}
+      }
+
+      func (rd *reader) push(d []byte) { rd.q = append(rd.q, d); rd.n += len(d); rd.signal() }
+
+      func (rd *reader) end(drop bool) {
+      	if drop { // nothing more is sent, not even what was waiting, and the connection is cut
+      		rd.q, rd.n, rd.dropped = nil, 0, true
+      		if rd.cut != nil {
+      			rd.cut()
+      		}
+      	}
+      	rd.over = true
+      	rd.signal()
+      }
+
+      type item struct {
+      	t    float64
+      	data []byte
+      }
+
+      type source func(ctx context.Context, ch *channel, yield func([]byte) bool) error
+
+      type channel struct {
+      	key, provider      string
+      	readers            map[*reader]bool
+      	timer              *time.Timer
+      	ring               []item
+      	kept               int
+      	status             int // 200 once video flows, or the refusal; 0 not yet
+      	refusal            *refused
+      	ready              chan struct{}
+      	done, paced        bool
+      	total, burst       int64
+      	marks              []mark // (time, total so far) once a second for a minute
+      	born, asked        float64
+      	hasBorn, readySent bool
+      	ctx                context.Context
+      	cancel             context.CancelFunc
+      }
+
+      type mark struct {
+      	t     float64
+      	total int64
+      }
+
+      var (
+      	channels = map[string]*channel{}
+      	lastDrop = map[string]float64{} // per provider: when one of its streams was last let go
+      	lastOpen = map[string]opened{}  // per provider: when a channel was last opened, and which
+      )
+
+      type opened struct {
+      	at  float64
+      	key string
+      }
+
+      func allReaders() (n int) {
+      	for _, c := range channels {
+      		n += len(c.readers)
+      	}
+      	return
+      }
+
+      func newChannel(key string, src source, provider string) *channel { // (mu held)
+      	ch := &channel{key: key, provider: provider, readers: map[*reader]bool{}, ready: make(chan struct{}), asked: mono()}
+      	ch.ctx, ch.cancel = context.WithCancel(context.Background())
+      	say("a channel was opened (%d open now)", len(channels)+1)
+      	go ch.run(src)
+      	return ch
+      }
+
+      func (ch *channel) setReady() {
+      	if !ch.readySent {
+      		ch.readySent = true
+      		close(ch.ready)
+      	}
+      }
+
+      func (ch *channel) run(src source) {
+      	err := src(ch.ctx, ch, ch.yield)
+      	mu.Lock()
+      	defer mu.Unlock()
+      	var r *refused
+      	switch {
+      	case err == nil || errors.Is(err, errStop):
+      		if ch.status == 0 {
+      			ch.status = 502
+      		}
+      	case ch.ctx.Err() != nil: // let go of on purpose
+      	case errors.As(err, &r):
+      		if ch.status == 0 {
+      			ch.status, ch.refusal = r.status, r
+      		}
+      	case isTimeout(err):
+      		if ch.status == 0 {
+      			ch.status = 504
+      		}
+      		say("a channel sent nothing for too long and was closed")
+      	default:
+      		if ch.status == 0 {
+      			ch.status = 502
+      		}
+      		say("a channel ended: %s", pyName(err))
+      	}
+      	ch.done = true
+      	lastDrop[ch.provider] = mono()
+      	if channels[ch.key] == ch {
+      		delete(channels, ch.key)
+      	}
+      	say("a channel was closed (%d open now)", len(channels))
+      	ch.setReady()
+      	for rd := range ch.readers {
+      		rd.end(false)
+      	}
+      }
+
+      func (ch *channel) yield(data []byte) bool {
+      	mu.Lock()
+      	defer mu.Unlock()
+      	if !ch.done {
+      		ch.feed(data)
+      	}
+      	return !ch.done
+      }
+
+      func (ch *channel) feed(data []byte) {
+      	if ch.status == 0 {
+      		ch.status = 200
+      		ch.setReady()
+      	}
+      	now := mono()
+      	if !ch.hasBorn {
+      		ch.born, ch.hasBorn = now, true
+      		say("a channel gave its first video %.1f s after it was asked for", now-ch.asked)
+      	}
+      	ch.total += int64(len(data))
+      	if len(ch.marks) == 0 || now-ch.marks[len(ch.marks)-1].t >= 1 {
+      		ch.marks = append(ch.marks, mark{now, ch.total})
+      		for now-ch.marks[0].t > 60 {
+      			ch.marks = ch.marks[1:]
+      		}
+      	}
+      	if len(ch.ring) > 0 && now-ch.ring[len(ch.ring)-1].t > 4 && !ch.paced { // (a bridged channel notes this itself)
+      		say("a provider sent nothing for %.0f s, then carried on", now-ch.ring[len(ch.ring)-1].t)
+      	}
+      	if now-ch.born < burstSeconds {
+      		ch.burst += int64(len(data))
+      	} else if ch.burst >= 0 {
+      		say("its opening burst was %d KB", ch.burst/1024)
+      		ch.burst = -ch.burst // (noted once)
+      	}
+      	ch.ring = append(ch.ring, item{now, data})
+      	ch.kept += len(data)
+      	keep := ringMin
+      	if speed, ok := ch.speed(now); ok {
+      		keep = min(max(ringMin, int(speed*keepSeconds)), ringMax)
+      	}
+      	for ch.kept-len(ch.ring[0].data) >= keep {
+      		ch.kept -= len(ch.ring[0].data)
+      		ch.ring[0] = item{}
+      		ch.ring = ch.ring[1:]
+      	}
+      	for rd := range ch.readers {
+      		if rd.n <= behind+rd.given { // (what a joiner was handed at the start is not "falling behind")
+      			rd.behindAt = 0
+      		} else if rd.behindAt == 0 {
+      			rd.behindAt = now
+      		}
+      		if rd.n > farBehind+rd.given || (rd.behindAt != 0 && now-rd.behindAt > behindSeconds) {
+      			say("a reader was too slow to keep up with its channel and was disconnected")
+      			rd.end(true)
+      			delete(ch.readers, rd)
+      			ch.dropIfEmpty()
+      		} else {
+      			rd.push(data)
+      		}
+      	}
+      }
+
+      // speed: bytes a second over the last minute or last 15 s, whichever is larger; false in the first seconds.
+      func (ch *channel) speed(now float64) (float64, bool) {
+      	if len(ch.marks) < 2 || now-ch.marks[0].t < 8 {
+      		return 0, false
+      	}
+      	end := now
+      	if last := ch.ring[len(ch.ring)-1].t; now-last >= 15 { // a stopped feed is measured up to its last video
+      		end = last
+      	}
+      	older := ch.marks[0]
+      	for i := len(ch.marks) - 1; i >= 0; i-- {
+      		if end-ch.marks[i].t >= 15 {
+      			older = ch.marks[i]
+      			break
+      		}
+      	}
+      	best := 0.0
+      	for _, m := range []mark{ch.marks[0], older} {
+      		if end-m.t >= 8 {
+      			best = math.Max(best, float64(ch.total-m.total)/(end-m.t))
+      		}
+      	}
+      	return best, best != 0
+      }
+
+      // join: the opener gets everything from the first byte; a joiner the newest joinSeconds, on a whole packet.
+      func (ch *channel) join(first bool) *reader {
+      	if ch.timer != nil { // somebody is here after all
+      		ch.timer.Stop()
+      		ch.timer = nil
+      	}
+      	rd := &reader{wake: make(chan struct{}, 1)}
+      	if first {
+      		for _, it := range ch.ring {
+      			rd.push(it.data)
+      		}
+      	} else if len(ch.ring) > 0 {
+      		speed, measured := ch.speed(mono())
+      		want := ch.kept // (no speed yet: all of it)
+      		if measured {
+      			want = int(speed * joinSeconds)
+      		}
+      		var take [][]byte
+      		size, oldest := 0, ch.ring[len(ch.ring)-1].t-2*joinSeconds
+      		for i := len(ch.ring) - 1; i >= 0; i-- {
+      			if d := ch.ring[i].data; size == 0 || (size+len(d) <= want && ch.ring[i].t >= oldest) {
+      				take, size = append([][]byte{d}, take...), size+len(d)
+      			} else {
+      				break
+      			}
+      		}
+      		var head []byte // only the beginning is copied, to find where a decoder can start
+      		n := 0
+      		for ; n < len(take) && len(head) < 2<<20; n++ {
+      			head = append(head, take[n]...)
+      		}
+      		rd.push(head[keyStart(head):])
+      		for _, d := range take[n:] {
+      			rd.push(d)
+      		}
+      		rd.given = rd.n
+      		// The cushion is handed on at playing speed (a player given seconds at once jumps through it and then
+      		// stalls at the provider's next pause); joinStart seconds go at once so it can begin.
+      		guess := speed
+      		if !measured {
+      			guess = float64(rd.n) / joinSeconds
+      		}
+      		if guess > 0 {
+      			rd.pace = &pace{float64(rd.n), guess * joinStart, mono(), guess}
+      		}
+      		extra := ""
+      		if measured {
+      			extra = fmt.Sprintf(" (%d s at %d KB a second)", joinSeconds, int64(speed/1024))
+      		}
+      		say("a reader joined a channel and was given %d KB to start%s", rd.n/1024, extra)
+      	}
+      	ch.readers[rd] = true
+      	return rd
+      }
+
+      func (ch *channel) leave(rd *reader) { // (mu held)
+      	delete(ch.readers, rd)
+      	if len(ch.readers) > 0 || ch.done {
+      		return
+      	}
+      	now, op := mono(), lastOpen[ch.provider]
+      	tuning := !ch.hasBorn || now-ch.born < 5     // a player tunes in a channel's first seconds
+      	moved := now-op.at < 1.0 && op.key != ch.key // it has just gone to another channel
+      	if !tuning || moved {
+      		ch.drop()
+      		return
+      	}
+      	if ch.timer != nil {
+      		ch.timer.Stop()
+      	}
+      	var t *time.Timer
+      	t = time.AfterFunc(secs(linger), func() {
+      		mu.Lock()
+      		defer mu.Unlock()
+      		if ch.timer == t {
+      			ch.dropIfEmpty()
+      		}
+      	})
+      	ch.timer = t
+      }
+
+      func (ch *channel) dropIfEmpty() {
+      	if len(ch.readers) == 0 {
+      		ch.drop()
+      	}
+      }
+
+      func (ch *channel) drop() { // let go of the provider's stream now (mu held)
+      	if ch.timer != nil {
+      		ch.timer.Stop()
+      		ch.timer = nil
+      	}
+      	if !ch.done {
+      		ch.cancel()
+      		ch.done = true
+      		lastDrop[ch.provider] = mono()
+      		if channels[ch.key] == ch {
+      			delete(channels, ch.key)
+      		}
+      	}
+      }
+
+      // tsSource: the provider's own MPEG-TS stream, asked for again if it ends while people watch.
+      func tsSource(target string, h http.Header) source {
+      	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
+      		again, sent, quiet := false, int64(0), 0
+      		for {
+      			began, got := mono(), false
+      			wait := float64(headerWait)
+      			if again {
+      				wait = reopenWait // readers are waiting
+      			}
+      			r, err := fetch(ctx, target, h, opts{wait: wait})
+      			if err != nil {
+      				return err
+      			}
+      			if r.StatusCode != 200 && r.StatusCode != 206 {
+      				say("a provider answered %d when asked for a channel", r.StatusCode)
+      				text, _ := readAll(r, 65536, 5) // what the provider said, passed on to the player
+      				return &refused{r.StatusCode, r.Header.Get("Content-Type"), text[:min(len(text), 65536)]}
+      			}
+      			err = func() error {
+      				defer r.Body.Close()
+      				setWait(r, quietWait)
+      				if again {
+      					setWait(r, 2*reopenWait)
+      				}
+      				var head []byte // a stream opened again is joined on at a whole packet
+      				joining := again
+      				buf := make([]byte, 65536)
+      				for {
+      					n, err := r.Body.Read(buf)
+      					setWait(r, quietWait)
+      					data := append([]byte(nil), buf[:n]...)
+      					if joining {
+      						head = append(head, data...)
+      						if err == nil && len(head) < 16384 {
+      							continue
+      						}
+      						data, head, joining = head[cleanStart(head):], nil, false
+      						if len(data) > 0 && sent%188 != 0 { // the old stream stopped mid-packet: fill it out
+      							fill := make([]byte, 188-sent%188)
+      							for i := range fill {
+      								fill[i] = 0xff
+      							}
+      							sent += int64(len(fill))
+      							if !yield(fill) {
+      								return errStop
+      							}
+      						}
+      					}
+      					if len(data) > 0 {
+      						got = true
+      						sent += int64(len(data))
+      						if !yield(data) {
+      							return errStop
+      						}
+      					}
+      					if err == io.EOF {
+      						return nil
+      					} else if err != nil {
+      						return err
+      					}
+      				}
+      			}()
+      			if errors.Is(err, errStop) || ctx.Err() != nil || (err != nil && !got) {
+      				return err
+      			}
+      			// The provider ended it. Ask again if anyone still watches, unless it ran under reopenAfter, or another
+      			// channel of this provider opened in the last 15 s (one-connection accounts: asking would end that one).
+      			mu.Lock()
+      			ran, op := mono()-began, lastOpen[ch.provider]
+      			if isTimeout(err) && ran < quietWait+reopenAfter { // silent twice in a row: the channel is dead
+      				quiet++
+      			} else {
+      				quiet = 0
+      			}
+      			stop := quiet >= 2 || len(ch.readers) == 0 || ran < reopenAfter || (op.at > math.Max(began, mono()-15) && op.key != ch.key)
+      			mu.Unlock()
+      			if quiet >= 2 {
+      				say("a channel went silent twice in a row; letting its readers go")
+      			}
+      			if stop {
+      				return nil
+      			}
+      			again = true
+      			say("a provider ended a channel that was being watched; asking for it again")
+      			if err := sleep(ctx, dropGap); err != nil {
+      				return err
+      			}
+      		}
+      	}
+      }
+
+      // ---------------------------------------------------------------------------
+      // Requests from Caddy
+      // ---------------------------------------------------------------------------
+
+      // What a player sent that is not passed on: what belongs to one connection, and this proxy's notes.
+      var skipRe = regexp.MustCompile(`(?i)^(host|connection|keep-alive|proxy-.*|te|trailer|transfer-encoding|upgrade|content-length` +
+      	`|range|if-range|accept-encoding|via|x-relay-.*|x-hls-.*|x-real-ip|x-forwarded-.*)$$`)
+      var notPrintable = regexp.MustCompile(`[^\x20-\x7e]`)
+
+      const notProxy = "Not a request from the proxy.\n"
+
+      func answer(w http.ResponseWriter, status int, kind, text string) {
+      	if kind == "" {
+      		kind = "text/plain"
+      	}
+      	w.Header().Set("Content-Type", kind)
+      	w.Header().Set("Content-Length", strconv.Itoa(len(text)))
+      	w.Header().Set("Connection", "close")
+      	w.WriteHeader(status)
+      	io.WriteString(w, text)
+      }
+
+      // channelKey: one name per channel, whichever address form (/live/u/p/1.ts, /u/p/1.ts, /u/p/1) is used.
+      func channelKey(path, provider, uri string) string {
+      	parts := strings.FieldsFunc(strings.SplitN(uri, "?", 2)[0], func(r rune) bool { return r == '/' })
+      	if len(parts) > 0 && parts[0] == "live" {
+      		parts = parts[1:]
+      	}
+      	if len(parts) > 0 {
+      		parts[len(parts)-1] = strings.TrimSuffix(parts[len(parts)-1], ".ts")
+      	}
+      	return path + " " + provider + " " + strings.Join(parts, "/")
+      }
+
+      // channelID: the channel's number (last address part without extension); never a login.
+      func channelID(uri string) string {
+      	parts := strings.Split(strings.SplitN(uri, "?", 2)[0], "/")
+      	id, _, _ := strings.Cut(parts[len(parts)-1], ".")
+      	if id == "" || len(id) > 12 || strings.Trim(id, "0123456789") != "" {
+      		return "?"
+      	}
+      	return id
+      }
+
+      func whoIs(r *http.Request) string { // the player's address as Caddy passed it
+      	if ip, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Relay-Client"))); err == nil {
+      		return ip.String()
+      	}
+      	return "a player"
+      }
+
+      func hostOf(provider string) string {
+      	if i := strings.Index(provider, "://"); i >= 0 {
+      		h, _, _ := strings.Cut(provider[i+3:], "/")
+      		if host, _, err := net.SplitHostPort(h); err == nil {
+      			return host
+      		}
+      		return h
+      	}
+      	return "?"
+      }
+
+      func hms(s float64) string {
+      	n := int64(s)
+      	switch {
+      	case n >= 3600:
+      		return fmt.Sprintf("%dh %02dm %02ds", n/3600, n/60%60, n%60)
+      	case n >= 60:
+      		return fmt.Sprintf("%dm %02ds", n/60, n%60)
+      	}
+      	return fmt.Sprintf("%ds", n)
+      }
+
+      func serveHTTP(w http.ResponseWriter, r *http.Request) {
+      	switch r.URL.Path {
+      	case "/healthz":
+      		answer(w, 200, "", "ok\n")
+      	case "/status":
+      		statusPage(w, r)
+      	case "/check":
+      		check(w, r)
+      	case "/hl":
+      		failed(w, playlistRequest(w, r))
+      	case "/api":
+      		failed(w, api(w, r))
+      	case "/stat":
+      		mu.Lock()
+      		text := fmt.Sprintf("%d %d\n", len(channels), allReaders())
+      		mu.Unlock()
+      		answer(w, 200, "", text)
+      	case "/ts", "/hls":
+      		live(w, r)
+      	default:
+      		answer(w, 403, "", notProxy)
+      	}
+      }
+
+      // failed answers a refusal with its status; anything else that broke before an answer, 502.
+      func failed(w http.ResponseWriter, err error) {
+      	var r *refused
+      	if errors.As(err, &r) {
+      		answer(w, r.status, r.kind, string(r.text))
+      	} else if err != nil {
+      		answer(w, 502, "", "")
+      	}
+      }
+
+      func live(w http.ResponseWriter, r *http.Request) {
+      	path := r.URL.Path
+      	provider, uri := strings.TrimRight(r.Header.Get("X-Relay-Provider"), "/"), r.Header.Get("X-Relay-Uri")
+      	if !providers[provider] || !strings.HasPrefix(uri, "/") {
+      		answer(w, 403, "", notProxy)
+      		return
+      	}
+      	if r.Method == "HEAD" { // always 200 here: asking the provider would open a connection
+      		w.Header().Set("Content-Type", "video/mp2t")
+      		w.WriteHeader(200)
+      		return
+      	}
+      	if r.Method != "GET" {
+      		answer(w, 400, "", "")
+      		return
+      	}
+      	sent := http.Header{} // the player's own headers, for the provider
+      	for k, vs := range r.Header {
+      		if !skipRe.MatchString(k) {
+      			for _, v := range vs {
+      				sent.Add(k, notPrintable.ReplaceAllString(v, ""))
+      			}
+      		}
+      	}
+      	key, gone := channelKey(path, provider, uri), r.Context().Done()
+      	mu.Lock()
+      	ch := channels[key]
+      	first := ch == nil
+      	if first {
+      		// Changing channel: the hang-up on the old one and this request arrive in either order. Channels of
+      		// this provider nobody reads go now; a hang-up just behind gets 30 ms; the provider gets dropGap to see it.
+      		lastOpen[provider] = opened{mono(), key}
+      		releaseFor(provider, whoIs(r), key)
+      		var mine []*channel
+      		live := false
+      		for _, c := range channels {
+      			if c.provider == provider {
+      				mine = append(mine, c)
+      				c.dropIfEmpty()
+      				live = live || !c.done
+      			}
+      		}
+      		mu.Unlock()
+      		if live {
+      			time.Sleep(30 * time.Millisecond)
+      			mu.Lock()
+      			for _, c := range mine {
+      				c.dropIfEmpty()
+      			}
+      			mu.Unlock()
+      		}
+      		mu.Lock()
+      		wait := lastDrop[provider] + dropGap - mono()
+      		mu.Unlock()
+      		time.Sleep(secs(math.Max(0, wait)))
+      		if r.Context().Err() != nil { // the player has already moved on
+      			return
+      		}
+      		mu.Lock()
+      		for _, c := range channels { // once more, for hang-ups during the waits
+      			if c.provider == provider && c.key != key {
+      				c.dropIfEmpty()
+      			}
+      		}
+      		if ch = channels[key]; ch == nil {
+      			src := tsSource(provider+uri, sent)
+      			if path == "/hls" {
+      				orig, port := r.Header.Get("X-Relay-Orig"), r.Header.Get("X-Relay-Port")
+      				if _, err := strconv.Atoi(port); !strings.HasPrefix(orig, "/") || err != nil {
+      					mu.Unlock()
+      					answer(w, 400, "", "")
+      					return
+      				}
+      				plain, query, _ := strings.Cut(orig, "?")
+      				if query != "" {
+      					query = "?" + query
+      				}
+      				// One HLS address per channel whatever form the reader used: a second form would be a
+      				// second provider session, which ends the players' one.
+      				parts := strings.FieldsFunc(strings.TrimSuffix(plain, ".ts"), func(r rune) bool { return r == '/' })
+      				if len(parts) > 0 && parts[0] == "live" {
+      					parts = parts[1:]
+      				}
+      				plain = strings.TrimSuffix(plain, ".ts")
+      				if len(parts) == 3 {
+      					plain = "/live/" + strings.Join(parts, "/")
+      				}
+      				src = hlsSource(fmt.Sprintf("http://127.0.0.1:%s/__ch%s.m3u8/__index.m3u8%s", port, plain, query),
+      					notPrintable.ReplaceAllString(r.Header.Get("User-Agent"), ""))
+      			}
+      			ch = newChannel(key, src, provider)
+      			channels[key] = ch
+      		} else {
+      			first = false
+      		}
+      	}
+      	if allReaders() >= readersMax {
+      		if first {
+      			ch.drop()
+      		}
+      		mu.Unlock()
+      		answer(w, 503, "", "Too many readers at once.\n")
+      		return
+      	}
+      	rd := ch.join(first)
+      	rd.who, rd.id, rd.port, rd.came = whoIs(r), channelID(uri), r.Header.Get("X-Relay-Port"), mono()
+      	rd.kind = map[string]string{"/ts": "MPEG-TS", "/hls": "MPEG-TS fed from HLS"}[path]
+      	mu.Unlock()
+      	why, started := "the player hung up", false
+      	defer func() {
+      		mu.Lock()
+      		still := max(0, len(ch.readers)-1)
+      		ch.leave(rd)
+      		mu.Unlock()
+      		say("a reader left after %d s: %s (%d still on its channel)", int64(mono()-rd.came), why, still)
+      		if started {
+      			say("%s left channel %s after %s, %.1f MB sent: %s", rd.who, rd.id, hms(mono()-rd.came), float64(rd.written.Load())/1048576, why)
+      		}
+      	}()
+      	t := time.NewTimer(startWait * time.Second)
+      	select {
+      	case <-ch.ready:
+      	case <-gone:
+      	case <-t.C:
+      	}
+      	t.Stop()
+      	if r.Context().Err() != nil {
+      		return
+      	}
+      	mu.Lock()
+      	status, e, born, asked := ch.status, ch.refusal, ch.born, ch.asked
+      	mu.Unlock()
+      	if status != 200 {
+      		switch {
+      		case e != nil && e.status >= 400 && e.status < 600: // the provider's own answer, passed on
+      			answer(w, e.status, e.kind, string(e.text))
+      		case status == 0:
+      			answer(w, 504, "", "")
+      		case status >= 400 && status < 600:
+      			answer(w, status, "", "")
+      		default:
+      			answer(w, 502, "", "")
+      		}
+      		return
+      	}
+      	rc := http.NewResponseController(w)
+      	defer context.AfterFunc(r.Context(), func() { rc.SetWriteDeadline(time.Now()) })() // a blocked write gives up on hang-up
+      	w.Header().Set("Content-Type", "video/mp2t")
+      	w.WriteHeader(200)
+      	rc.Flush()
+      	mu.Lock()
+      	rd.cut = func() { rc.SetWriteDeadline(time.Now()) }
+      	mu.Unlock()
+      	started = true
+      	if first {
+      		say("%s started channel %s (%s), first video in %.1f s", rd.who, rd.id, hostOf(provider), born-asked)
+      	} else {
+      		say("%s joined channel %s (%s)", rd.who, rd.id, hostOf(provider))
+      	}
+      	for {
+      		mu.Lock()
+      		if rd.dropped { // too slow: cut the connection, as the Python did
+      			mu.Unlock()
+      			panic(http.ErrAbortHandler)
+      		}
+      		if p := rd.pace; len(rd.q) > 0 && p != nil { // a joiner: at playing speed, holding its cushion here
+      			now := mono()
+      			speed, ok := ch.speed(now)
+      			if !ok {
+      				speed = p.guess
+      			}
+      			// a little faster when more than the cushion waits, a little slower when less
+      			rate := speed * math.Min(1.5, math.Max(0.8, 1+0.5*(float64(rd.n)-p.have)/math.Max(p.have, 1)))
+      			most := speed * joinStart
+      			p.credit, p.at = math.Min(p.credit+(now-p.at)*rate, most), now
+      			// an item longer than joinStart seconds goes once the allowance is full; its play time is waited after
+      			if need := math.Min(float64(len(rd.q[0])), most); p.credit < need {
+      				mu.Unlock()
+      				t := time.NewTimer(secs((need - p.credit) / rate))
+      				select {
+      				case <-gone:
+      					t.Stop()
+      					return
+      				case <-t.C:
+      				}
+      				continue
+      			}
+      			p.credit -= float64(len(rd.q[0]))
+      		}
+      		if len(rd.q) > 0 {
+      			data := rd.q[0]
+      			rd.q[0], rd.q = nil, rd.q[1:]
+      			rd.n -= len(data)
+      			if rd.pace == nil {
+      				rd.given = max(0, rd.given-len(data))
+      			}
+      			mu.Unlock()
+      			n, err := w.Write(data)
+      			if err == nil {
+      				err = rc.Flush()
+      			}
+      			rd.written.Add(int64(n))
+      			if err != nil {
+      				mu.Lock()
+      				dropped := rd.dropped
+      				mu.Unlock()
+      				if dropped {
+      					panic(http.ErrAbortHandler)
+      				}
+      				select {
+      				case <-gone:
+      				case <-time.After(50 * time.Millisecond): // (the hang-up is usually seen a moment later)
+      					why = "the line to the player broke"
+      				}
+      				return
+      			}
+      			continue
+      		}
+      		if rd.over {
+      			why = "its channel ended"
+      			mu.Unlock()
+      			return
+      		}
+      		mu.Unlock()
+      		select {
+      		case <-rd.wake:
+      		case <-gone:
+      			return
+      		}
+      	}
+      }
+
+      func main() {
+      	port := os.Getenv("RELAY_PORT")
+      	if port == "" {
+      		port = "8197"
+      	}
+      	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+      	if err != nil {
+      		log.Fatal(err)
+      	}
+      	srv := &http.Server{Handler: http.HandlerFunc(serveHTTP), ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10,
+      		ErrorLog: log.New(io.Discard, "", 0)}
+      	s := "s"
+      	if len(providers) == 1 {
+      		s = ""
+      	}
+      	say("ready, for %d provider%s", len(providers), s)
+      	go srv.Serve(ln)
+      	stop := make(chan os.Signal, 1) // stop when told to (the container's first process)
+      	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+      	<-stop
+      	srv.Close() // let go of every stream at once
+      	mu.Lock()
+      	for _, ch := range channels {
+      		ch.cancel()
+      	}
+      	mu.Unlock()
+      	time.Sleep(100 * time.Millisecond)
+      }
+
+  relay-hls:
+    content: |
+      // HLS: the /hls bridge's source, playlists with one provider session per live channel, the provider's
+      // lists (/api) and the /__cdn/ name check (/check).
+      package main
+
+      import (
+      	"bytes"
+      	"compress/gzip"
+      	"context"
+      	"errors"
+      	"io"
+      	"math"
+      	"net/http"
+      	"net/url"
+      	"regexp"
+      	"strconv"
+      	"strings"
+      	"time"
+      )
+
+      var errNotHLS = errors.New("not joinable HLS")
+
+      type playlist struct {
+      	seq            int64
+      	target, newest float64
+      	pieces         []string
+      	best           string // the best quality on offer, when the playlist lists qualities
+      	ended          bool
+      }
+
+      var (
+      	extinfRe = regexp.MustCompile(`^#EXTINF:\s*(\d+(?:\.\d*)?)`)
+      	nonDigit = regexp.MustCompile(`\D`)
+      	nonNum   = regexp.MustCompile(`[^0-9.]`)
+      	bwRe     = regexp.MustCompile(`[:,]BANDWIDTH=(\d+)`)
+      )
+
+      func readPlaylist(text string) (p playlist, err error) {
+      	if !strings.Contains(text, "#EXTM3U") {
+      		return p, errNotHLS
+      	}
+      	p.target = 4
+      	length, rate, bestRate := 0.0, int64(-1), int64(-1)
+      	for _, line := range strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' }) {
+      		line = strings.TrimSpace(line)
+      		switch {
+      		case strings.HasPrefix(line, "#EXTINF:"): // a piece's playing time (0 if unreadable)
+      			length = 0
+      			if m := extinfRe.FindStringSubmatch(line); m != nil {
+      				length, _ = strconv.ParseFloat(m[1], 64)
+      			}
+      		case strings.HasPrefix(line, "#EXT-X-MEDIA-SEQUENCE:"):
+      			p.seq, _ = strconv.ParseInt(nonDigit.ReplaceAllString(line[22:], ""), 10, 64)
+      		case strings.HasPrefix(line, "#EXT-X-TARGETDURATION:"):
+      			if s := nonNum.ReplaceAllString(line[22:], ""); s != "" {
+      				if p.target, err = strconv.ParseFloat(s, 64); err != nil {
+      					return p, err
+      				}
+      			}
+      		case strings.HasPrefix(line, "#EXT-X-STREAM-INF"):
+      			rate = 0
+      			if m := bwRe.FindStringSubmatch(line); m != nil {
+      				rate, _ = strconv.ParseInt(m[1], 10, 64)
+      			}
+      		case strings.HasPrefix(line, "#EXT-X-ENDLIST"):
+      			p.ended = true
+      		case strings.HasPrefix(line, "#EXT-X-MAP") || strings.HasPrefix(line, "#EXT-X-BYTERANGE") ||
+      			strings.HasPrefix(line, "#EXT-X-KEY") && !strings.Contains(line, "METHOD=NONE"):
+      			return p, errNotHLS // locked, or not whole MPEG-TS files: cannot be joined end to end
+      		case line != "" && !strings.HasPrefix(line, "#"):
+      			if rate >= 0 {
+      				if rate > bestRate {
+      					p.best, bestRate = line, rate
+      				}
+      				rate = -1
+      			} else {
+      				p.pieces = append(p.pieces, line)
+      				p.newest, length = length, 0
+      			}
+      		}
+      	}
+      	return p, nil
+      }
+
+      // beforeMinute: seconds until just before the next whole minute; 0 from 1 s before it to 0.3 s after.
+      // Recorders stop at whole minutes and cut at once, so around then nothing is held back.
+      func beforeMinute() float64 {
+      	s := math.Mod(float64(time.Now().UnixNano())/1e9, 60)
+      	if s >= 59 || s < 0.3 {
+      		return 0
+      	}
+      	return 59 - s
+      }
+
+      // hlsSource: the channel's HLS pieces end to end, fetched from this stack's proxy at the players' own
+      // addresses so the reader shares their one provider session; handed on at playing speed.
+      func hlsSource(start, agent string) source {
+      	h, home := agentOf(agent), ""
+      	if u, err := url.Parse(start); err == nil {
+      		home = u.Host
+      	}
+      	inside := func(base, ref string) (*url.URL, error) { // the playlist's addresses must be this proxy's own
+      		b, err := url.Parse(base)
+      		if err != nil {
+      			return nil, err
+      		}
+      		u, err := b.Parse(ref)
+      		if err == nil && u.Host != home {
+      			err = errNotHLS
+      		}
+      		return u, err
+      	}
+      	look := func(ctx context.Context) (string, playlist, error) { // always from the channel's own address
+      		at := start
+      		for i := 0; i < 4; i++ {
+      			status, data, err := get(ctx, at, h, 2<<20)
+      			if err != nil {
+      				return "", playlist{}, err
+      			}
+      			if status != 200 {
+      				return "", playlist{}, &refused{status: status}
+      			}
+      			pl, err := readPlaylist(string(data))
+      			if err != nil || pl.best == "" {
+      				return at, pl, err
+      			}
+      			u, err := inside(at, pl.best)
+      			if err != nil {
+      				return "", playlist{}, err
+      			}
+      			at = u.String()
+      		}
+      		return "", playlist{}, errNotHLS
+      	}
+      	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
+      		// Video waiting, (due, bytes), oldest first: each piece goes out over its playing time, everything
+      		// at once before each whole minute and when the feed ends, so a recording that stops loses nothing.
+      		var queue []item
+      		pop := func() []byte { d := queue[0].data; queue = queue[1:]; return d }
+      		due := func() bool {
+      			now, flush := mono(), beforeMinute() == 0
+      			for len(queue) > 0 && (flush || queue[0].t <= now) {
+      				if !yield(pop()) {
+      					return false
+      				}
+      			}
+      			return true
+      		}
+      		flushAll := func() bool {
+      			for len(queue) > 0 {
+      				if !yield(pop()) {
+      					return false
+      				}
+      			}
+      			return true
+      		}
+      		// wait until `until`, or until job is done, handing on what falls due meanwhile (a fetch can take
+      		// seconds; a whole minute passing meanwhile must not hold video back).
+      		wait := func(until float64, job chan struct{}) error {
+      			for {
+      				if !due() {
+      					return errStop
+      				}
+      				nap := 3600.0
+      				if job == nil {
+      					if nap = until - mono(); nap <= 0 {
+      						return nil
+      					}
+      				}
+      				select {
+      				case <-job:
+      					return nil
+      				default:
+      				}
+      				if len(queue) > 0 {
+      					nap = math.Min(nap, math.Min(queue[0].t-mono(), beforeMinute()))
+      				}
+      				t := time.NewTimer(secs(math.Max(0, nap)))
+      				select {
+      				case <-job:
+      				case <-t.C:
+      				case <-ctx.Done():
+      					t.Stop()
+      					return ctx.Err()
+      				}
+      				t.Stop()
+      			}
+      		}
+      		do := func(f func(context.Context)) error { // a request under way; called off if the feed ends
+      			jctx, cancel := context.WithCancel(ctx)
+      			defer cancel()
+      			done := make(chan struct{})
+      			go func() { f(jctx); close(done) }()
+      			return wait(0, done)
+      		}
+      		fail := func(err error) error { // the feed ends with a fault: what waits is handed on first
+      			if !flushAll() {
+      				return errStop
+      			}
+      			return err
+      		}
+      		mu.Lock()
+      		ch.paced = true // its own pauses are not the provider's
+      		mu.Unlock()
+      		var last int64
+      		hasLast, misses, lost, got, fresh := false, 0, 0, 0.0, mono()
+      		var sent []string // names of the newest 60 pieces
+      		for {
+      			began := mono()
+      			var at string
+      			var pl playlist
+      			var err error
+      			if e := do(func(c context.Context) { at, pl, err = look(c) }); e != nil {
+      				return e
+      			}
+      			if ctx.Err() != nil {
+      				return ctx.Err()
+      			}
+      			if err != nil { // no playlist this time: ask again, as a player would (4 tries at start, 9 once playing)
+      				misses++
+      				var r *refused
+      				status := 502
+      				if errors.As(err, &r) {
+      					status = r.status
+      				}
+      				if (hasLast && misses > 8) || (!hasLast && misses > 3) {
+      					return fail(&refused{status: status})
+      				}
+      				nap := 1.0
+      				if hasLast {
+      					nap = 2
+      				}
+      				if e := wait(mono()+nap, nil); e != nil {
+      					return e
+      				}
+      				continue
+      			}
+      			misses = 0
+      			top := pl.seq + int64(len(pl.pieces)) - 1
+      			afresh := hasLast && (top < last || pl.seq > last+1)
+      			opening := !hasLast || afresh
+      			if opening { // joining, or the numbering started afresh: start near the newest video
+      				last, hasLast = max(pl.seq-1, top-3), true
+      			}
+      			first := last + 1 - pl.seq
+      			newest := int64(len(pl.pieces)) - 1 + pl.seq
+      			length := pl.target // a piece's playing time, as the playlist gives it
+      			if 0 < pl.newest && pl.newest <= 2*pl.target {
+      				length = pl.newest
+      			}
+      			isNew := first < int64(len(pl.pieces))
+      			for i := max(first, 0); i < int64(len(pl.pieces)); i++ {
+      				number := pl.seq + i
+      				last = number
+      				u, err := inside(at, pl.pieces[i])
+      				if errors.Is(err, errNotHLS) { // a line that does not lead back here: not fetched
+      					lost++
+      					continue
+      				} else if err != nil {
+      					return fail(err)
+      				}
+      				if afresh && contains(sent, u.Path) { // already passed on under its old number
+      					continue
+      				}
+      				var data []byte
+      				for try := 0; try < 2 && data == nil; try++ {
+      					if e := do(func(c context.Context) {
+      						if status, d, err := get(c, u.String(), h, 64<<20); err == nil && status == 200 && len(d) > 0 {
+      							data = d
+      						}
+      					}); e != nil {
+      						return e
+      					}
+      				}
+      				if data == nil {
+      					lost++
+      					say("a piece of video could not be fetched and is missing from a stream")
+      					if lost >= 3 {
+      						return fail(&refused{status: 502})
+      					}
+      					continue
+      				}
+      				lost = 0
+      				if sent = append(sent, u.Path); len(sent) > 60 {
+      					sent = sent[1:]
+      				}
+      				now := mono()
+      				if got != 0 && now-got > math.Max(4, 1.5*length) { // a piece well later than its length
+      					say("a provider sent nothing for %.0f s, then carried on", now-got)
+      				}
+      				got, fresh = now, now
+      				var parts [][]byte // whole 188-byte packets
+      				for j := 0; j < len(data); j += 65424 {
+      					parts = append(parts, data[j:min(j+65424, len(data))])
+      				}
+      				// A channel's start goes at once, except its newest piece, which goes over its playing time
+      				// so the stream has video in hand from its first second.
+      				if opening {
+      					if !flushAll() {
+      						return errStop
+      					}
+      					if number != newest {
+      						for _, p := range parts {
+      							if !yield(p) {
+      								return errStop
+      							}
+      						}
+      						continue
+      					}
+      				}
+      				startAt := now
+      				if len(queue) > 0 {
+      					startAt = math.Max(now, queue[len(queue)-1].t)
+      				}
+      				if shift := startAt - now - 2*pl.target; shift > 0 { // never more than two target durations waiting
+      					for k := range queue {
+      						queue[k].t -= shift
+      					}
+      					startAt -= shift
+      				}
+      				for k, p := range parts {
+      					queue = append(queue, item{startAt + length*float64(k)/float64(len(parts)), p})
+      				}
+      				if !due() {
+      					return errStop
+      				}
+      			}
+      			if !isNew && (pl.ended || mono()-fresh > math.Max(30, 6*pl.target)) {
+      				if !flushAll() {
+      					return errStop
+      				}
+      				return nil // the playlist finished, or stopped moving
+      			}
+      			// Ask again at the HLS spec's pace (RFC 8216bis 6.3.4): after a change, the newest piece's length
+      			// from when this look began; after none, half the target duration.
+      			nap := pl.target / 2
+      			if isNew {
+      				nap = pl.target
+      				if 0 < pl.newest && pl.newest < pl.target {
+      					nap = pl.newest
+      				}
+      			}
+      			if e := wait(began+math.Max(0.5, nap), nil); e != nil {
+      				return e
+      			}
+      		}
+      	}
+      }
+
+      func contains(list []string, s string) bool {
+      	for _, x := range list {
+      		if x == s {
+      			return true
+      		}
+      	}
+      	return false
+      }
+
+      // ---------------------------------------------------------------------------
+      // Playlists: every address pointed back here; ONE provider session per live channel
+      // ---------------------------------------------------------------------------
+      // Addresses become /__cdn/<scheme>/<server>/<path>, resolved as a player resolves them. Many providers start
+      // a new session (ending the last) at every open of a channel's address, so the first open is remembered and
+      // the player is given /__ch/<channel>/__index.m3u8; later looks go to the remembered session. A session
+      // that fails is opened again ONCE; one unused for a minute is forgotten.
+
+      var (
+      	uriInTag  = regexp.MustCompile(`(?i)(URI=")([^"]*)(")`)
+      	hasScheme = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.-]*:`)
+      	plSkipRe  = regexp.MustCompile(`(?i)^(host|connection|keep-alive|proxy-.*|te|trailer|transfer-encoding|upgrade|content-length|content-encoding` +
+      		`|range|if-range|content-range|accept-ranges|accept-encoding|x-accel-.*|server|date|via|x-relay-.*|x-hls-.*|x-pl-.*|x-real-ip|x-forwarded-.*)$$`)
+      	realRe   = regexp.MustCompile(`(?i)^/__cdn/(https?)/([^/?]+)(/[^?]*)?(\?.*)?$$`)
+      	cdnRe    = regexp.MustCompile(`(?i)^/__cdn/(https?)/([^/?]+)(/[^?]*)?$$`)
+      	chRe     = regexp.MustCompile(`^/__ch(/.+?\.m3u8)/(.*)$$`)
+      	renewOn  = map[int]bool{400: true, 401: true, 403: true, 404: true, 410: true, 429: true, 500: true, 502: true, 503: true, 504: true, 509: true, 520: true, 521: true, 522: true, 523: true, 524: true}
+      	sessions = map[string]*session{}
+      	locks    = map[string]chan struct{}{}
+      	hlsSeen  = map[string]float64{} // channels whose playlist was just asked for (status page count)
+      	hlsWho   = map[string]float64{} // (player, channel) -> when its "opened" line was written
+      	hlsRows  = map[string]*hlsRow{} // (player, provider, channel) -> its playlist requests (status page table)
+      )
+
+      type session struct {
+      	loc, final string // where the provider sent the channel; the playlist's real address
+      	used       float64
+      }
+
+      type hlsRow struct {
+      	first, last             float64
+      	who, id, provider, port string
+      }
+
+      // cdnAddress: this proxy's address for a full http(s) address ("" for anything else).
+      func cdnAddress(u *url.URL) string {
+      	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+      		return ""
+      	}
+      	host, path := u.Host, u.EscapedPath()
+      	if u.User != nil {
+      		host = u.User.String() + "@" + host // (Caddy refuses these)
+      	}
+      	if path == "" {
+      		path = "/"
+      	}
+      	if u.RawQuery != "" {
+      		path += "?" + u.RawQuery
+      	}
+      	return "/__cdn/" + u.Scheme + "/" + host + path
+      }
+
+      // realAddress: the real address behind /__cdn/<scheme>/<server>/<path> ("" for anything else).
+      func realAddress(local string) string {
+      	m := realRe.FindStringSubmatch(local)
+      	if m == nil {
+      		return ""
+      	}
+      	if m[3] == "" {
+      		m[3] = "/"
+      	}
+      	return strings.ToLower(m[1]) + "://" + m[2] + m[3] + m[4]
+      }
+
+      // rewritePlaylist points every address back at this proxy. With home (the player's own path, for a playlist the
+      // provider answered directly), addresses on the provider's own server resolve against the player's path, so
+      // they come back with the easy login and the real one is never written into the playlist.
+      func rewritePlaylist(text, base, home string) (string, error) {
+      	b, err := url.Parse(base)
+      	if err != nil {
+      		return "", err
+      	}
+      	hu, err := url.Parse("http://home.invalid" + home)
+      	if err != nil {
+      		return "", err
+      	}
+      	move := func(s string) (string, error) {
+      		ref := strings.TrimSpace(s)
+      		full, err := b.Parse(ref)
+      		if err != nil && !hasScheme.MatchString(ref) {
+      			// A relative address Go will not read as written, which players read anyway: a colon in its
+      			// first part ("chunk_23:00:00.ts", RFC 3986 wants "./chunk_..."), or a stray control
+      			// character. Read it the way a player does.
+      			ref = "./" + strings.Map(func(r rune) rune {
+      				if r < 0x20 || r == 0x7f {
+      					return -1
+      				}
+      				return r
+      			}, ref)
+      			full, err = b.Parse(ref)
+      		}
+      		if err != nil {
+      			return "", err // an absolute address nothing could reach: refuse rather than pass a login through
+      		}
+      		if home != "" && full.Scheme == b.Scheme && full.Host == b.Host && !hasScheme.MatchString(ref) {
+      			mine, _ := hu.Parse(ref)
+      			p := mine.EscapedPath()
+      			if p == "" {
+      				p = "/"
+      			}
+      			if mine.RawQuery != "" {
+      				p += "?" + mine.RawQuery
+      			}
+      			return p, nil
+      		}
+      		if c := cdnAddress(full); c != "" {
+      			return c, nil
+      		}
+      		return s, nil
+      	}
+      	lines := strings.Split(text, "\n")
+      	for n, line := range lines {
+      		core := strings.TrimSpace(line)
+      		if n == 0 || core == "" {
+      			continue
+      		}
+      		if !strings.HasPrefix(core, "#") { // an address
+      			moved, err := move(core)
+      			if err != nil {
+      				return "", err
+      			}
+      			if strings.HasSuffix(line, "\r") {
+      				moved += "\r"
+      			}
+      			lines[n] = moved
+      			continue
+      		}
+      		var out strings.Builder // a tag: addresses sit in URI="..."
+      		at := 0
+      		for _, m := range uriInTag.FindAllStringSubmatchIndex(line, -1) {
+      			moved, err := move(line[m[4]:m[5]])
+      			if err != nil {
+      				return "", err
+      			}
+      			out.WriteString(line[at:m[4]] + moved + line[m[6]:m[7]])
+      			at = m[1]
+      		}
+      		lines[n] = out.String() + line[at:]
+      	}
+      	return strings.Join(lines, "\n"), nil
+      }
+
+      // send passes an answer on: the server's headers except what belongs to one connection.
+      func send(w http.ResponseWriter, status int, h http.Header, data []byte) {
+      	for k, vs := range h {
+      		if !plSkipRe.MatchString(k) {
+      			w.Header()[k] = vs
+      		}
+      	}
+      	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+      	w.Header().Set("Connection", "close")
+      	w.WriteHeader(status)
+      	w.Write(data)
+      }
+
+      // servePlaylist rewrites a playlist; anything else is passed on as it came.
+      func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte, base, home string) error {
+      	if bytes.Contains(data[:min(len(data), 1024)], []byte("#EXTM")) {
+      		text, err := rewritePlaylist(string(data), base, home)
+      		if err != nil {
+      			return err
+      		}
+      		data = []byte(text)
+      	}
+      	send(w, status, h, data)
+      	return nil
+      }
+
+      // fetchViaProxy fetches a playlist on a video server through Caddy's /__cdn/ (riding Caddy's kept-open
+      // connection), after checking where the name leads. Returns the answer and where it really came from.
+      func fetchViaProxy(ctx context.Context, target string, h http.Header, port string, wait float64) (*http.Response, string, error) {
+      	for hop := 0; hop < 10; hop++ {
+      		u, err := url.Parse(target)
+      		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+      			return nil, "", &refused{status: 403}
+      		}
+      		if home, err := leadsHome(ctx, u.Hostname()); err != nil {
+      			return nil, "", err
+      		} else if home {
+      			return nil, "", &refused{status: 403}
+      		}
+      		local := "http://127.0.0.1:" + port + cdnAddress(u)
+      		hh := h.Clone()
+      		hh.Set("X-Relay-Fetch", "1")
+      		r, err := fetch(ctx, local, hh, opts{noFollow: true, wait: wait})
+      		if err != nil || !isRedirect(r.StatusCode) || r.Header.Get("Location") == "" {
+      			return r, target, err
+      		}
+      		r.Body.Close()
+      		next, err := r.Request.URL.Parse(r.Header.Get("Location"))
+      		if err != nil {
+      			return nil, "", &refused{status: 502}
+      		}
+      		if target = next.String(); next.Host == "127.0.0.1:"+port {
+      			target = realAddress(next.RequestURI())
+      		}
+      		if target == "" {
+      			return nil, "", &refused{status: 502}
+      		}
+      	}
+      	return nil, "", &refused{status: 502}
+      }
+
+      func forgetIdle() { // (mu held)
+      	now := mono()
+      	for k, s := range sessions {
+      		if now-s.used > 60 {
+      			delete(sessions, k)
+      		}
+      	}
+      	for k, l := range locks {
+      		if _, ok := sessions[k]; !ok && len(l) == 0 {
+      			delete(locks, k)
+      		}
+      	}
+      	for k, t := range hlsWho {
+      		if now-t > 60 {
+      			delete(hlsWho, k)
+      		}
+      	}
+      	for k, row := range hlsRows {
+      		if now-row.last > 30 {
+      			delete(hlsRows, k)
+      		}
+      	}
+      }
+
+      type direct struct { // the provider answered without sending the channel elsewhere: passed on as is
+      	status int
+      	h      http.Header
+      	data   []byte
+      }
+
+      // openChannel asks the provider once and remembers where it sent the channel; later opens wait up to 20 s.
+      func openChannel(key, target string, h http.Header, renewFrom string) (*session, *direct, error) {
+      	mu.Lock()
+      	lock := locks[key]
+      	if lock == nil {
+      		lock = make(chan struct{}, 1)
+      		locks[key] = lock
+      	}
+      	mu.Unlock()
+      	select {
+      	case lock <- struct{}{}:
+      	case <-time.After(20 * time.Second):
+      		return nil, nil, &refused{status: 504}
+      	}
+      	defer func() { <-lock }()
+      	mu.Lock()
+      	if s := sessions[key]; s != nil && (renewFrom == "" || s.loc != renewFrom) {
+      		s.used = mono() // opened (or renewed) by someone else meanwhile
+      		mu.Unlock()
+      		return s, nil, nil
+      	}
+      	mu.Unlock()
+      	r, err := fetch(context.Background(), target, h, opts{noFollow: true, wait: playlistWait})
+      	if err != nil {
+      		return nil, nil, err
+      	}
+      	if loc := r.Header.Get("Location"); isRedirect(r.StatusCode) && loc != "" {
+      		r.Body.Close()
+      		u, err := r.Request.URL.Parse(loc)
+      		if err != nil {
+      			return nil, nil, &refused{status: 502}
+      		}
+      		if isPrivate(u.Hostname()) || strings.EqualFold(u.Hostname(), "localhost") || (u.Scheme != "http" && u.Scheme != "https") {
+      			return nil, nil, &refused{status: 403}
+      		}
+      		s := &session{u.String(), u.String(), mono()}
+      		mu.Lock()
+      		sessions[key] = s
+      		mu.Unlock()
+      		if renewFrom != "" {
+      			say("a live HLS channel was opened again at the provider")
+      		} else {
+      			say("a live HLS channel was opened at the provider")
+      		}
+      		return s, nil, nil
+      	}
+      	data, err := readAll(r, 4<<20, playlistWait)
+      	return nil, &direct{r.StatusCode, r.Header, data}, err
+      }
+
+      func playlistRequest(w http.ResponseWriter, r *http.Request) error {
+      	provider, uri, orig := strings.TrimRight(r.Header.Get("X-Relay-Provider"), "/"), r.Header.Get("X-Relay-Uri"), r.Header.Get("X-Relay-Orig")
+      	port := r.Header.Get("X-Relay-Port")
+      	if _, err := strconv.Atoi(port); !providers[provider] || !strings.HasPrefix(uri, "/") || !strings.HasPrefix(orig, "/") || err != nil {
+      		answer(w, 403, "", notProxy)
+      		return nil
+      	}
+      	mu.Lock()
+      	forgetIdle()
+      	mu.Unlock()
+      	h := http.Header{}
+      	for k, vs := range r.Header {
+      		if !plSkipRe.MatchString(k) {
+      			h[k] = vs
+      		}
+      	}
+      	opath, oquery, _ := strings.Cut(orig, "?")
+      	q := ""
+      	if oquery != "" {
+      		q = "?" + oquery
+      	}
+      	ctx := r.Context()
+      	if m := cdnRe.FindStringSubmatch(opath); m != nil { // a playlist on a server the provider sent the player to
+      		if m[3] == "" {
+      			m[3] = "/"
+      		}
+      		resp, final, err := fetchViaProxy(ctx, strings.ToLower(m[1])+"://"+m[2]+m[3]+q, h, port, playlistWait)
+      		if err != nil {
+      			return err
+      		}
+      		data, err := readAll(resp, 4<<20, playlistWait)
+      		if err != nil {
+      			return err
+      		}
+      		return servePlaylist(w, resp.StatusCode, resp.Header, data, final, "")
+      	}
+      	if r.Header.Get("X-Relay-Mode") == "ts" { // a ts provider: live HLS is built from the shared MPEG-TS stream
+      		if done, err := hlsFromTS(w, r, provider, uri, opath, q, port); done {
+      			return err
+      		}
+      	}
+      	m := chRe.FindStringSubmatch(opath) // a channel's own folder: /__ch/<channel>/<__index.m3u8 or a piece>
+      	chanOrig := opath
+      	if m != nil {
+      		chanOrig = m[1]
+      	}
+      	plainURI := strings.SplitN(uri, "?", 2)[0]
+      	if p := strings.FieldsFunc(plainURI, func(r rune) bool { return r == '/' }); len(p) == 3 && strings.HasSuffix(p[2], ".m3u8") {
+      		plainURI = "/live/" + strings.Join(p, "/") // the same channel as its /live/ form: one provider session
+      	}
+      	key, target := provider+" "+plainURI, provider+uri
+      	if m != nil && oquery != "" && !strings.Contains(uri, "?") {
+      		target += q
+      	}
+      	mu.Lock()
+      	s := sessions[key]
+      	mu.Unlock()
+      	if s == nil {
+      		var d *direct
+      		var err error
+      		if s, d, err = openChannel(key, target, h, ""); err != nil {
+      			return err
+      		} else if d != nil {
+      			return servePlaylist(w, d.status, d.h, d.data, target, chanOrig)
+      		}
+      	}
+      	mu.Lock()
+      	s.used = mono()
+      	who := whoIs(r)
+      	if rk := who + " " + provider + " " + channelID(uri); who != "127.0.0.1" && who != "::1" { // (not the relay's own bridge)
+      		if row := hlsRows[rk]; row != nil && mono()-row.last <= 30 {
+      			row.last = mono()
+      		} else {
+      			hlsRows[rk] = &hlsRow{mono(), mono(), who, channelID(uri), provider, port}
+      		}
+      	}
+      	t, said := hlsWho[who+" "+key]
+      	hlsWho[who+" "+key] = mono()
+      	mu.Unlock()
+      	if m == nil { // the player opened the channel: give it the channel's folder
+      		if !said || mono()-t > 60 { // (once a minute: some players ask the channel's own address at each refresh)
+      			say("%s opened HLS channel %s (%s)", who, channelID(uri), hostOf(provider))
+      		}
+      		w.Header().Set("Location", "/__ch"+opath+"/__index.m3u8"+q)
+      		answer(w, 302, "", "")
+      		return nil
+      	}
+      	if m[2] != "__index.m3u8" { // a piece named next to the playlist: where it really is
+      		mu.Lock()
+      		final := s.final
+      		mu.Unlock()
+      		b, _ := url.Parse(final)
+      		u, err := b.Parse(m[2] + q)
+      		if err != nil || cdnAddress(u) == "" {
+      			answer(w, 404, "", "")
+      			return nil
+      		}
+      		w.Header().Set("Location", cdnAddress(u))
+      		answer(w, 302, "", "")
+      		return nil
+      	}
+      	var status int
+      	var hd http.Header
+      	var data []byte
+      	var final string
+      	for attempt := 1; attempt <= 2; attempt++ {
+      		mu.Lock()
+      		loc := s.loc
+      		mu.Unlock()
+      		resp, fin, err := fetchViaProxy(ctx, loc, h, port, 25)
+      		if err == nil {
+      			data, err = readAll(resp, 4<<20, 25)
+      			status, hd, final = resp.StatusCode, resp.Header, fin
+      		}
+      		if err != nil {
+      			if attempt == 2 {
+      				return err
+      			}
+      			var rf *refused
+      			status, hd, data, final = 502, nil, nil, loc
+      			if errors.As(err, &rf) {
+      				status = rf.status
+      			}
+      		}
+      		if !renewOn[status] || attempt == 2 {
+      			break
+      		}
+      		ns, d, err := openChannel(key, target, h, loc) // the remembered session is gone
+      		if err != nil {
+      			return err
+      		} else if d != nil {
+      			return servePlaylist(w, d.status, d.h, d.data, target, chanOrig)
+      		}
+      		s = ns
+      	}
+      	mu.Lock()
+      	s.final = final
+      	if status == 200 {
+      		hlsSeen[port+chanOrig] = mono()
+      		if len(hlsSeen) > 300 {
+      			for k, t := range hlsSeen {
+      				if mono()-t > 30 {
+      					delete(hlsSeen, k)
+      				}
+      			}
+      		}
+      	}
+      	mu.Unlock()
+      	return servePlaylist(w, status, hd, data, final, "")
+      }
+
+      // ---------------------------------------------------------------------------
+      // /check: where a /__cdn/ server name really leads (Caddy asks before it connects); kept a minute
+      // ---------------------------------------------------------------------------
+      type checked struct {
+      	at float64
+      	ok bool
+      }
+
+      var checks = map[string]checked{}
+
+      func check(w http.ResponseWriter, r *http.Request) {
+      	u, err := url.Parse("//" + r.Header.Get("X-Relay-Check"))
+      	if err != nil || u.Hostname() == "" {
+      		answer(w, 403, "", "No server named.\n")
+      		return
+      	}
+      	host, now := strings.ToLower(u.Hostname()), mono()
+      	mu.Lock()
+      	c, have := checks[host]
+      	mu.Unlock()
+      	if !have || now-c.at >= 60 {
+      		home, _ := leadsHome(r.Context(), host) // no answer: Caddy's own lookup fails the same way
+      		c = checked{now, !home}
+      		mu.Lock()
+      		if len(checks) > 2000 {
+      			checks = map[string]checked{}
+      		}
+      		checks[host] = c
+      		mu.Unlock()
+      	}
+      	if c.ok {
+      		answer(w, 200, "", "ok\n")
+      	} else {
+      		answer(w, 403, "", "That address leads to this machine or a home network.\n")
+      	}
+      }
+
+      // ---------------------------------------------------------------------------
+      // /api: player_api.php lists, every "http(s)://... (also JSON's \/ form) pointed back here, piece by piece
+      // ---------------------------------------------------------------------------
+      var (
+      	apiLink  = regexp.MustCompile(`"(https?):(?:\\/\\/|//)`)
+      	hostKeep = regexp.MustCompile(`[^A-Za-z0-9.:\[\]-]`)
+      )
+
+      func api(w http.ResponseWriter, r *http.Request) error {
+      	provider, uri := strings.TrimRight(r.Header.Get("X-Relay-Provider"), "/"), r.Header.Get("X-Relay-Uri")
+      	home := hostKeep.ReplaceAllString(r.Header.Get("X-Relay-Host"), "")
+      	if !providers[provider] || !strings.HasPrefix(uri, "/") || home == "" {
+      		answer(w, 403, "", notProxy)
+      		return nil
+      	}
+      	h := http.Header{}
+      	for k, vs := range r.Header {
+      		if !skipRe.MatchString(k) {
+      			h[k] = vs
+      		}
+      	}
+      	resp, err := fetch(r.Context(), provider+uri, h, opts{guardAll: true, wait: 300})
+      	if err != nil {
+      		return err
+      	}
+      	defer resp.Body.Close()
+      	if ce := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); ce != "" && ce != "identity" {
+      		return &refused{status: 502} // asked for plain text; a compressed answer cannot be read
+      	}
+      	for k, vs := range resp.Header {
+      		if !plSkipRe.MatchString(k) {
+      			w.Header()[k] = vs
+      		}
+      	}
+      	gz := strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip")
+      	if gz {
+      		w.Header().Set("Content-Encoding", "gzip")
+      		w.Header().Set("Vary", "Accept-Encoding")
+      	}
+      	w.WriteHeader(resp.StatusCode)
+      	if err := apiStream(w, resp.Body, []byte(`"http://`+home+"/__cdn/"), gz); err != nil {
+      		panic(http.ErrAbortHandler) // cut off: the app must see a broken answer, not a short complete one
+      	}
+      	return nil
+      }
+
+      func apiStream(w io.Writer, body io.Reader, link []byte, gz bool) error {
+      	repl := append(append([]byte{}, link...), "$${1}/"...)
+      	out := w
+      	var z *gzip.Writer
+      	if gz {
+      		z, _ = gzip.NewWriterLevel(w, 1)
+      		out = z
+      	}
+      	var tail []byte
+      	buf := make([]byte, 65536)
+      	for {
+      		n, err := body.Read(buf)
+      		data := append(tail, buf[:n]...)
+      		tail = nil
+      		// every link starts with a quote: hold back a quote near the end until the next piece
+      		if cut := bytes.LastIndexByte(data, '"'); err == nil && cut >= 0 && len(data)-cut < 12 {
+      			data, tail = data[:cut], append([]byte{}, data[cut:]...)
+      		}
+      		if _, werr := out.Write(apiLink.ReplaceAll(data, repl)); werr != nil {
+      			return werr
+      		}
+      		if err == io.EOF {
+      			break
+      		} else if err != nil {
+      			return err
+      		}
+      	}
+      	if z != nil {
+      		return z.Close()
+      	}
+      	return nil
+      }
+
+  relay-tshls:
+    content: |
+      package main
+
+      // HLS built from the shared MPEG-TS stream, for a provider set to NAME_LIVE_TV=ts.
+      //
+      // Most providers allow one session per channel, and an HLS request and an MPEG-TS request for the same
+      // channel count as two: each ends the other. So on a ts provider the provider only ever sees MPEG-TS. A
+      // player that asks for a live channel as HLS joins the channel's one shared MPEG-TS stream like any other
+      // reader, and the relay cuts that stream into short pieces at keyframes (timed by the video's own clock)
+      // and serves a normal live playlist from memory. Everyone on the channel stays on one provider connection.
+
+      import (
+      	"context"
+      	"fmt"
+      	"math"
+      	"net/http"
+      	"regexp"
+      	"strconv"
+      	"strings"
+      	"time"
+      )
+
+      const (
+      	segTarget   = 4.0      // seconds of video per piece (cut at the first keyframe after this)
+      	segKeep     = 8        // pieces kept (about half a minute)
+      	segIdle     = 30.0     // seconds without a playlist request before the HLS reader leaves the channel
+      	segMinFirst = 2        // pieces a playlist waits for first (a provider's opening burst holds them)
+      	segWait     = 20       // seconds a playlist request waits for them
+      	segBytes    = 40 << 20 // pieces kept, at most, in bytes (a 4K channel's pieces are much larger)
+      )
+
+      // a live channel address that can be built from MPEG-TS: /live/U/P/<n>.m3u8 or /U/P/<n>.m3u8
+      var liveM3U8 = regexp.MustCompile(`^/+(live/+)?[^/]+/+[^/]+/+[0-9]+\.m3u8$$`)
+
+      type segment struct {
+      	seq   int
+      	dur   float64
+      	disc  bool
+      	data  []byte
+      	ready time.Time
+      }
+
+      type segmenter struct {
+      	key, provider, who, port, id string
+      	ch                           *channel
+      	rd                           *reader
+      	segs                         []*segment
+      	next                         int
+      	asked                        float64 // last playlist or piece request
+      	grew                         chan struct{}
+      	over, started                bool
+      	discSeq                      int
+      	longest                      float64            // the longest piece so far: TARGETDURATION never goes down
+      	players                      map[string]float64 // device -> its last request
+      }
+
+      var segmenters = map[string]*segmenter{} // TS channel key -> its HLS builder
+
+      // hlsFromTS answers a playlist or piece request for a live channel of a ts provider. ok=false: not a live
+      // channel address (catch-up and the like), handled the usual way.
+      func hlsFromTS(w http.ResponseWriter, r *http.Request, provider, uri, opath, q, port string) (bool, error) {
+      	chURI := strings.SplitN(uri, "?", 2)[0]
+      	if !liveM3U8.MatchString(chURI) {
+      		return false, nil
+      	}
+      	m := chRe.FindStringSubmatch(opath)
+      	who, id := whoIs(r), channelID(chURI)
+      	if m == nil { // the player opened the channel: give it the channel's folder (nothing asked of the provider yet)
+      		mu.Lock()
+      		t, said := hlsWho[who+" ts "+provider+" "+id]
+      		hlsWho[who+" ts "+provider+" "+id] = mono()
+      		mu.Unlock()
+      		if !said || mono()-t > 60 { // (once a minute: some players ask the channel's own address at each refresh)
+      			say("%s opened channel %s as HLS (%s); it is built from the shared MPEG-TS stream", who, id, hostOf(provider))
+      		}
+      		w.Header().Set("Location", "/__ch"+opath+"/__index.m3u8"+q)
+      		answer(w, 302, "", "")
+      		return true, nil
+      	}
+      	tsURI := strings.TrimSuffix(chURI, ".m3u8") + ".ts"
+      	key := channelKey("/ts", provider, tsURI)
+      	sg, err := segmenterFor(r.Context(), key, provider, tsURI, who, port, id, r.Header)
+      	if err != nil {
+      		return true, err
+      	}
+      	mu.Lock()
+      	sg.asked = mono()
+      	sg.players[who] = mono()
+      	if rk := who + " " + provider + " " + id; who != "127.0.0.1" && who != "::1" {
+      		if row := hlsRows[rk]; row != nil && mono()-row.last <= 30 {
+      			row.last = mono()
+      		} else {
+      			hlsRows[rk] = &hlsRow{mono(), mono(), who, id, provider, port}
+      		}
+      	}
+      	mu.Unlock()
+      	if name := m[2]; name != "__index.m3u8" { // a piece
+      		n, perr := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, "seg_"), ".ts"))
+      		mu.Lock()
+      		var data []byte
+      		for _, s := range sg.segs {
+      			if perr == nil && s.seq == n {
+      				data = s.data
+      			}
+      		}
+      		mu.Unlock()
+      		if data == nil {
+      			answer(w, 404, "", "")
+      			return true, nil
+      		}
+      		w.Header().Set("Content-Type", "video/mp2t")
+      		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+      		w.WriteHeader(200)
+      		w.Write(data)
+      		return true, nil
+      	}
+      	deadline := time.After(segWait * time.Second) // the playlist: wait for the first pieces
+      wait:
+      	for {
+      		mu.Lock()
+      		n, over, grew := len(sg.segs), sg.over, sg.grew
+      		mu.Unlock()
+      		switch {
+      		case n >= segMinFirst || (over && n > 0):
+      			break wait
+      		case over: // the provider's own refusal is passed on, as for MPEG-TS
+      			mu.Lock()
+      			e := sg.ch.refusal
+      			mu.Unlock()
+      			if e != nil && e.status >= 400 && e.status < 600 {
+      				answer(w, e.status, e.kind, string(e.text))
+      			} else {
+      				answer(w, 502, "", "")
+      			}
+      			return true, nil
+      		}
+      		select {
+      		case <-grew:
+      		case <-deadline:
+      			if n == 0 {
+      				answer(w, 504, "", "")
+      				return true, nil
+      			}
+      			break wait
+      		case <-r.Context().Done():
+      			return true, nil
+      		}
+      	}
+      	mu.Lock()
+      	var b strings.Builder
+      	fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n", int(sg.target()))
+      	if len(sg.segs) > 0 {
+      		fmt.Fprintf(&b, "#EXT-X-MEDIA-SEQUENCE:%d\n#EXT-X-DISCONTINUITY-SEQUENCE:%d\n", sg.segs[0].seq, sg.discSeq)
+      	}
+      	for _, s := range sg.segs {
+      		if s.disc {
+      			b.WriteString("#EXT-X-DISCONTINUITY\n")
+      		}
+      		fmt.Fprintf(&b, "#EXTINF:%.3f,\nseg_%d.ts%s\n", s.dur, s.seq, q)
+      	}
+      	if sg.over {
+      		b.WriteString("#EXT-X-ENDLIST\n")
+      	}
+      	mu.Unlock()
+      	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+      	w.Header().Set("Cache-Control", "no-cache")
+      	answer(w, 200, "application/vnd.apple.mpegurl", b.String())
+      	return true, nil
+      }
+
+      // segmenterFor finds the channel's HLS builder, or joins the channel's shared MPEG-TS stream (opening it at
+      // the provider if nobody is on it) and starts one.
+      func segmenterFor(ctx context.Context, key, provider, tsURI, who, port, id string, rh http.Header) (*segmenter, error) {
+      	mu.Lock()
+      	if sg := segmenters[key]; sg != nil && !sg.over {
+      		mu.Unlock()
+      		return sg, nil
+      	}
+      	ch := channels[key]
+      	first := ch == nil
+      	if first {
+      		lastOpen[provider] = opened{mono(), key}
+      		releaseFor(provider, who, key)
+      		for _, c := range channels { // channels of this provider that nobody reads go first (changing channel)
+      			if c.provider == provider {
+      				c.dropIfEmpty()
+      			}
+      		}
+      		wait := lastDrop[provider] + dropGap - mono()
+      		mu.Unlock()
+      		time.Sleep(secs(math.Max(0, wait)))
+      		mu.Lock()
+      		if sg := segmenters[key]; sg != nil && !sg.over { // another request got here first
+      			mu.Unlock()
+      			return sg, nil
+      		}
+      		if ch = channels[key]; ch == nil {
+      			sent := http.Header{}
+      			for k, vs := range rh {
+      				if !skipRe.MatchString(k) {
+      					for _, v := range vs {
+      						sent.Add(k, notPrintable.ReplaceAllString(v, ""))
+      					}
+      				}
+      			}
+      			ch = newChannel(key, tsSource(provider+tsURI, sent), provider)
+      			channels[key] = ch
+      		} else {
+      			first = false
+      		}
+      	}
+      	rd := ch.join(first)
+      	rd.pace = nil // the builder takes the joiner's cushion at once: the first pieces are ready straight away
+      	rd.who, rd.id, rd.port, rd.came, rd.kind = who, id, port, mono(), "HLS built from MPEG-TS"
+      	// Piece numbers keep growing from one builder to the next (a new one starting again at 0 left players
+      	// frozen after a pause), and a new builder's first piece is marked as not following on from the last.
+      	now := int(time.Now().Unix())
+      	sg := &segmenter{key: key, provider: provider, who: who, port: port, id: id, ch: ch, rd: rd, asked: mono(),
+      		grew: make(chan struct{}), next: now, discSeq: now, players: map[string]float64{}}
+      	segmenters[key] = sg
+      	mu.Unlock()
+      	if first {
+      		say("%s started channel %s (%s) for HLS from MPEG-TS", who, id, hostOf(provider))
+      	} else {
+      		say("%s joined channel %s (%s) for HLS from MPEG-TS", who, id, hostOf(provider))
+      	}
+      	go sg.run()
+      	return sg, nil
+      }
+
+      // target: the playlist's TARGETDURATION, in whole seconds. (mu held)
+      func (sg *segmenter) target() float64 { return math.Ceil(math.Max(segTarget, sg.longest)) }
+
+      // patPMT: the PMT PID of a PAT section's first program (program 0 is the network table, not a program).
+      func patPMT(p []byte) int {
+      	if len(p) < 12 {
+      		return -1
+      	}
+      	end := min(len(p)-4, 3+(int(p[1]&0x0f)<<8|int(p[2]))-4) // (minus the CRC)
+      	for i := 8; i+4 <= end; i += 4 {
+      		if p[i] != 0 || p[i+1] != 0 {
+      			return int(p[i+2]&0x1f)<<8 | int(p[i+3])
+      		}
+      	}
+      	return -1
+      }
+
+      // run reads the channel's MPEG-TS as it arrives and cuts it into pieces.
+      func (sg *segmenter) run() {
+      	var cut tsCutter
+      	start := mono()
+      	defer func() {
+      		mu.Lock()
+      		sg.over = true
+      		close(sg.grew)
+      		sg.grew = make(chan struct{})
+      		sg.ch.leave(sg.rd)
+      		if segmenters[sg.key] == sg {
+      			delete(segmenters, sg.key)
+      		}
+      		written := sg.rd.written.Load()
+      		mu.Unlock()
+      		say("%s left channel %s (HLS from MPEG-TS) after %s, %.1f MB cut into pieces", sg.who, sg.id, hms(mono()-start), float64(written)/1048576)
+      	}()
+      	for {
+      		mu.Lock()
+      		if sg.rd.dropped || (mono()-sg.asked > segIdle) {
+      			mu.Unlock()
+      			return
+      		}
+      		if len(sg.rd.q) == 0 {
+      			if sg.rd.over {
+      				mu.Unlock()
+      				if seg := cut.flush(); seg != nil {
+      					sg.add(seg)
+      				}
+      				return
+      			}
+      			mu.Unlock()
+      			select {
+      			case <-sg.rd.wake:
+      			case <-time.After(5 * time.Second): // (to notice a player that stopped asking)
+      			}
+      			continue
+      		}
+      		data := sg.rd.q[0]
+      		sg.rd.q[0], sg.rd.q = nil, sg.rd.q[1:]
+      		sg.rd.n -= len(data)
+      		sg.rd.given = max(0, sg.rd.given-len(data))
+      		mu.Unlock()
+      		sg.rd.written.Add(int64(len(data)))
+      		for _, seg := range cut.feed(data) {
+      			sg.add(seg)
+      		}
+      	}
+      }
+
+      func (sg *segmenter) add(s *segment) {
+      	mu.Lock()
+      	defer mu.Unlock()
+      	s.seq = sg.next
+      	sg.next++
+      	sg.longest = math.Max(sg.longest, s.dur)
+      	if !sg.started {
+      		s.disc, sg.started = true, true
+      	}
+      	sg.segs = append(sg.segs, s)
+      	total := 0
+      	for _, x := range sg.segs {
+      		total += len(x.data)
+      	}
+      	for len(sg.segs) > segKeep || (len(sg.segs) > 4 && total > segBytes) { // (a playlist keeps 3 target durations and the piece being fetched)
+      		total -= len(sg.segs[0].data)
+      		if sg.segs[0].disc {
+      			sg.discSeq++
+      		}
+      		sg.segs[0] = nil
+      		sg.segs = sg.segs[1:]
+      	}
+      	close(sg.grew)
+      	sg.grew = make(chan struct{})
+      }
+
+      // ---------------------------------------------------------------------------
+      // Cutting MPEG-TS into pieces
+      // ---------------------------------------------------------------------------
+      // Each piece starts with the stream's program tables (PAT and PMT) and, when the stream marks them, at a
+      // keyframe of the video, so a player can start playing any piece. Durations come from the video's own
+      // timestamps (PTS). A jump in the timestamps (the provider's stream was asked for again) starts a new piece
+      // marked as a discontinuity.
+      type tsCutter struct {
+      	buf           []byte
+      	pmtPID, avPID int
+      	pat, pmt      []byte
+      	cur           []byte  // the piece being built
+      	curStart      float64 // PTS (seconds) of its first frame
+      	lastPTS       float64 // PTS of the newest frame start; -1 = none yet
+      	firstPTS      float64 // the first frame seen; -1 = none yet
+      	sawKey        bool    // the stream marks keyframes
+      	nextDis       bool
+      }
+
+      func (c *tsCutter) feed(data []byte) []*segment {
+      	if c.avPID == 0 { // (first call)
+      		c.pmtPID, c.avPID, c.lastPTS, c.firstPTS = -1, -1, -1, -1
+      	}
+      	c.buf = append(c.buf, data...)
+      	var out []*segment
+      	for len(c.buf) >= 188 {
+      		if c.buf[0] != 0x47 { // lost the packet boundary: find it again
+      			i := 1
+      			for ; i+376 < len(c.buf); i++ {
+      				if c.buf[i] == 0x47 && c.buf[i+188] == 0x47 && c.buf[i+376] == 0x47 {
+      					break
+      				}
+      			}
+      			if i+376 >= len(c.buf) {
+      				c.buf = append([]byte(nil), c.buf[len(c.buf)-min(len(c.buf), 376):]...)
+      				return out
+      			}
+      			c.buf = c.buf[i:]
+      			continue
+      		}
+      		if seg := c.packet(c.buf[:188:188]); seg != nil {
+      			out = append(out, seg)
+      		}
+      		c.buf = c.buf[188:]
+      	}
+      	c.buf = append([]byte(nil), c.buf...) // (keep only the partial packet)
+      	return out
+      }
+
+      func (c *tsCutter) packet(pkt []byte) *segment {
+      	pid := int(pkt[1]&0x1f)<<8 | int(pkt[2])
+      	pusi := pkt[1]&0x40 != 0
+      	afc := (pkt[3] >> 4) & 3
+      	payload, rai := 4, false
+      	if afc&2 != 0 {
+      		alen := int(pkt[4])
+      		rai = alen > 0 && pkt[5]&0x40 != 0
+      		payload = 5 + alen
+      	}
+      	if afc&1 == 0 || payload >= 188 {
+      		payload = 188
+      	}
+      	body := pkt[payload:]
+      	switch {
+      	case pid == 0 && pusi:
+      		c.pat = append([]byte(nil), pkt...)
+      		if pmt := patPMT(tableStart(body)); pmt >= 0 {
+      			c.pmtPID = pmt // the first program
+      		}
+      		return nil // (every piece starts with its own copy)
+      	case pid == c.pmtPID && pusi:
+      		c.pmt = append([]byte(nil), pkt...)
+      		if c.avPID < 0 {
+      			c.avPID = pickStream(tableStart(body))
+      		}
+      		return nil
+      	case pid == 0 || pid == c.pmtPID:
+      		return nil
+      	}
+      	var seg *segment
+      	if pid == c.avPID && pusi && c.pat != nil && c.pmt != nil {
+      		if pts, ok := pesPTS(body); ok {
+      			c.sawKey = c.sawKey || rai
+      			if c.firstPTS < 0 {
+      				c.firstPTS = pts
+      			}
+      			jump := c.lastPTS >= 0 && (pts < c.lastPTS-1 || pts > c.lastPTS+10)
+      			if jump {
+      				c.firstPTS = pts // (counted again from here, for a stream that marks no keyframes)
+      			}
+      			// a frame a piece may start at: a keyframe, or any frame if the stream marks none (after a while)
+      			// (a piece is also cut when keyframe marks stop coming, so it cannot grow without end)
+      			startable := rai || (!c.sawKey && pts-c.firstPTS >= 2*segTarget) || jump || pts-c.curStart >= 5*segTarget
+      			if c.cur != nil && startable && (pts-c.curStart >= segTarget || jump) {
+      				dur := pts - c.curStart
+      				if jump {
+      					dur = c.lastPTS - c.curStart + 0.04
+      				}
+      				seg = &segment{dur: math.Max(dur, 0.1), disc: c.nextDis, data: c.cur}
+      				c.cur, c.nextDis = nil, jump
+      			}
+      			if c.cur == nil && startable {
+      				c.cur = append(append(make([]byte, 0, 1<<20), c.pat...), c.pmt...)
+      				c.curStart = pts
+      			}
+      			c.lastPTS = pts
+      		}
+      	}
+      	if c.cur != nil {
+      		c.cur = append(c.cur, pkt...)
+      	}
+      	return seg
+      }
+
+      // flush: what is left when the stream ends.
+      func (c *tsCutter) flush() *segment {
+      	if c.cur == nil || c.lastPTS <= c.curStart {
+      		return nil
+      	}
+      	s := &segment{dur: c.lastPTS - c.curStart, disc: c.nextDis, data: c.cur}
+      	c.cur = nil
+      	return s
+      }
+
+      // tableStart: the section after a PSI pointer field.
+      func tableStart(body []byte) []byte {
+      	if len(body) < 1 || int(body[0])+1 > len(body) {
+      		return nil
+      	}
+      	return body[1+int(body[0]):]
+      }
+
+      // pickStream: the video stream of a PMT section, or else its first audio stream.
+      func pickStream(s []byte) int {
+      	if len(s) < 12 {
+      		return -1
+      	}
+      	end := min(len(s)-4, 3+int(s[1]&0x0f)<<8|int(s[2])-4) // (minus the CRC)
+      	i := 12 + (int(s[10]&0x0f)<<8 | int(s[11]))
+      	audio := -1
+      	for i+5 <= end {
+      		typ, pid, info := s[i], int(s[i+1]&0x1f)<<8|int(s[i+2]), int(s[i+3]&0x0f)<<8|int(s[i+4])
+      		switch typ {
+      		case 0x01, 0x02, 0x10, 0x1b, 0x24, 0x42, 0xea:
+      			return pid
+      		case 0x03, 0x04, 0x0f, 0x11, 0x81, 0x87:
+      			if audio < 0 {
+      				audio = pid
+      			}
+      		}
+      		i += 5 + info
+      	}
+      	return audio
+      }
+
+      // pesPTS: the presentation time, in seconds, of a PES packet that starts in this payload.
+      func pesPTS(b []byte) (float64, bool) {
+      	if len(b) < 14 || b[0] != 0 || b[1] != 0 || b[2] != 1 || b[7]&0x80 == 0 {
+      		return 0, false
+      	}
+      	p := int64(b[9]&0x0e)<<29 | int64(b[10])<<22 | int64(b[11]&0xfe)<<14 | int64(b[12])<<7 | int64(b[13])>>1
+      	return float64(p) / 90000, true
+      }
+
+      // releaseFor: a device that opens another channel of a provider has left its old one. A builder only that
+      // device was using lets go now, so its provider connection is free at once (one-connection accounts). (mu held)
+      func releaseFor(provider, who, key string) {
+      	for k, sg := range segmenters {
+      		if sg.provider != provider || k == key || sg.players[who] == 0 {
+      			continue
+      		}
+      		alone := true
+      		for p, t := range sg.players { // (a player asks about once per target duration)
+      			alone = alone && (p == who || mono()-t > 3*sg.target())
+      		}
+      		if alone {
+      			delete(segmenters, k)
+      			sg.asked = 0       // (its loop sees this and ends)
+      			sg.ch.leave(sg.rd) // let go now: the provider gets dropGap to see it before the next channel
+      			sg.rd.signal()
+      		}
+      	}
+      }
+
+  relay-status:
+    content: |
+      // The status page: what is set up, what is wrong, where the VPN comes out, and who is watching what.
+      package main
+
+      import (
+      	"bytes"
+      	"context"
+      	"encoding/json"
+      	"fmt"
+      	"math"
+      	"net/http"
+      	"net/url"
+      	"sort"
+      	"strconv"
+      	"strings"
+      	"sync"
+      	"syscall"
+      	"time"
+      )
+
+      func parseJSON(data []byte) (any, error) {
+      	d := json.NewDecoder(bytes.NewReader(data))
+      	d.UseNumber()
+      	var v any
+      	return v, d.Decode(&v)
+      }
+
+      func pyStr(v any) string { // str() as Python writes a JSON value
+      	switch v := v.(type) {
+      	case nil:
+      		return "None"
+      	case bool:
+      		return map[bool]string{true: "True", false: "False"}[v]
+      	case string:
+      		return v
+      	}
+      	return fmt.Sprint(v)
+      }
+
+      func truthy(v any) bool {
+      	switch v := v.(type) {
+      	case nil:
+      		return false
+      	case bool:
+      		return v
+      	case string:
+      		return v != ""
+      	case json.Number:
+      		f, _ := v.Float64()
+      		return f != 0
+      	case []any:
+      		return len(v) > 0
+      	case map[string]any:
+      		return len(v) > 0
+      	}
+      	return true
+      }
+
+      func esc(v any) string { // html.escape(str(v), quote=True)
+      	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#x27;").Replace(pyStr(v))
+      }
+
+      func field(v any, k string) any { m, _ := v.(map[string]any); return m[k] }
+
+      // ---- answers from outside, kept so the page is quick (failures are retried after a minute)
+      type keptValue struct {
+      	at    float64
+      	value any
+      	busy  chan struct{}
+      }
+
+      var keptValues = map[string]*keptValue{}
+
+      func kept(name string, keep float64, ask func(context.Context) (any, error)) any {
+      	mu.Lock()
+      	k := keptValues[name]
+      	if k == nil {
+      		k = &keptValue{at: -1e9}
+      		keptValues[name] = k
+      	}
+      	limit := keep
+      	if k.value == nil {
+      		limit = 60
+      	}
+      	if k.busy == nil && mono()-k.at >= limit {
+      		k.busy = make(chan struct{})
+      		go func(done chan struct{}) {
+      			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+      			v, err := ask(ctx)
+      			cancel()
+      			if err != nil {
+      				v = nil
+      			}
+      			mu.Lock()
+      			k.at, k.value, k.busy = mono(), v, nil
+      			mu.Unlock()
+      			close(done)
+      		}(k.busy)
+      	}
+      	busy := k.busy
+      	mu.Unlock()
+      	if busy != nil {
+      		<-busy
+      	}
+      	mu.Lock()
+      	defer mu.Unlock()
+      	return k.value
+      }
+
+      func whereAmI() any { // what the internet sees, asked through the VPN (certificate checked)
+      	return kept("where", 300, func(ctx context.Context) (any, error) {
+      		r, err := fetch(ctx, "https://ipinfo.io/json", agentOf("curl/8"), opts{verify: true, wait: headerWait})
+      		if err != nil {
+      			return nil, err
+      		}
+      		data, err := readAll(r, 1<<20, 6)
+      		if err != nil || r.StatusCode != 200 {
+      			return nil, err
+      		}
+      		return parseJSON(data)
+      	})
+      }
+
+      // vpnPing: round trip to the VPN server in ms. A packet allowed one hop dies there and its "time exceeded"
+      // lands in the socket's error queue (IP_RECVERR): no raw socket or privilege needed.
+      func vpnPing() (float64, bool) {
+      	var times []float64
+      	for n := 0; n < 3; n++ {
+      		func() {
+      			fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+      			if err != nil {
+      				return
+      			}
+      			defer syscall.Close(fd)
+      			syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, 1)
+      			syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_RECVERR, 1)
+      			syscall.SetNonblock(fd, true)
+      			start := mono()
+      			if syscall.Sendto(fd, []byte{0}, 0, &syscall.SockaddrInet4{Port: 33434 + n, Addr: [4]byte{1, 1, 1, 1}}) != nil {
+      				return
+      			}
+      			oob := make([]byte, 512)
+      			for mono()-start < 1 {
+      				_, oobn, _, _, err := syscall.Recvmsg(fd, make([]byte, 64), oob, syscall.MSG_ERRQUEUE)
+      				if err == syscall.EAGAIN {
+      					time.Sleep(2 * time.Millisecond)
+      					continue
+      				}
+      				notes, _ := syscall.ParseSocketControlMessage(oob[:oobn])
+      				for _, m := range notes {
+      					if err == nil && len(m.Data) > 5 && m.Data[4] == 2 && m.Data[5] == 11 { // ICMP time exceeded
+      						times = append(times, (mono()-start)*1000)
+      						break
+      					}
+      				}
+      				return
+      			}
+      		}()
+      	}
+      	if len(times) == 0 {
+      		return 0, false
+      	}
+      	sort.Float64s(times)
+      	return times[len(times)/2], true
+      }
+
+      // ---- the provider's account page, through the proxy with the easy login: at most every 15 s while the
+      // page is viewed; after failures 2, 4, 8... at most 15 minutes apart; the last good answer shown with its age.
+      type accountState struct {
+      	good, last map[string]any
+      	at, tried  float64
+      	fails      int
+      	task       chan struct{}
+      }
+
+      var accounts = map[string]*accountState{}
+
+      func playerAPI(ctx context.Context, port, user, password, extra string) (int, []byte, error) {
+      	u := fmt.Sprintf("http://127.0.0.1:%s/player_api.php?username=%s&password=%s%s", port, url.QueryEscape(user), url.QueryEscape(password), extra)
+      	status, data, err := get(ctx, u, agentOf(""), 64<<20)
+      	if err == nil && status == 502 { // most often a name lookup that failed for a moment
+      		time.Sleep(500 * time.Millisecond)
+      		status, data, err = get(ctx, u, agentOf(""), 64<<20)
+      	}
+      	return status, data, err
+      }
+
+      func account(port, user, password string) map[string]any {
+      	mu.Lock()
+      	st := accounts[port]
+      	if st == nil {
+      		st = &accountState{tried: -1e9}
+      		accounts[port] = st
+      	}
+      	every := 15.0
+      	if st.fails > 0 {
+      		every = math.Min(60*math.Pow(2, float64(st.fails)), 900)
+      	}
+      	if st.task == nil && mono()-st.tried >= every {
+      		st.tried, st.task = mono(), make(chan struct{})
+      		go func(done chan struct{}) {
+      			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+      			defer cancel()
+      			var value map[string]any
+      			if status, data, err := playerAPI(ctx, port, user, password, ""); err == nil && status != 200 {
+      				value = map[string]any{"answer": status}
+      			} else if err == nil {
+      				if v, err := parseJSON(data); err == nil {
+      					info := field(v, "user_info")
+      					value = map[string]any{"answer": 200, "status": field(info, "status"), "auth": field(info, "auth"),
+      						"exp": field(info, "exp_date"), "used": field(info, "active_cons"), "max": field(info, "max_connections")}
+      				}
+      			}
+      			mu.Lock()
+      			if value != nil && value["answer"] == 200 {
+      				st.good, st.at, st.fails, st.last = value, mono(), 0, nil
+      			} else {
+      				st.fails, st.last = st.fails+1, value
+      			}
+      			st.task = nil
+      			mu.Unlock()
+      			close(done)
+      		}(st.task)
+      	}
+      	task := st.task
+      	mu.Unlock()
+      	if task != nil { // an answer is on its way: wait a little for it
+      		select {
+      		case <-task:
+      		case <-time.After(6 * time.Second):
+      		}
+      	}
+      	mu.Lock()
+      	defer mu.Unlock()
+      	if st.good != nil && mono()-st.at < 900 {
+      		a := map[string]any{"age": mono() - st.at}
+      		for k, v := range st.good {
+      			a[k] = v
+      		}
+      		return a
+      	}
+      	return st.last
+      }
+
+      // ---- channel names for the table: each provider's live list, kept 6 hours, fetched in the background
+      type nameList struct {
+      	at    float64
+      	names map[string]string
+      	busy  bool
+      }
+
+      var channelNames = map[string]*nameList{}
+
+      func names(port, user, password string) chan struct{} {
+      	mu.Lock()
+      	defer mu.Unlock()
+      	n := channelNames[port]
+      	if n == nil {
+      		n = &nameList{at: -1e9}
+      		channelNames[port] = n
+      	}
+      	done := make(chan struct{})
+      	if n.busy || (len(n.names) > 0 && mono()-n.at < 6*3600) || (len(n.names) == 0 && mono()-n.at < 60) {
+      		close(done)
+      		return done
+      	}
+      	n.busy = true
+      	go func() {
+      		defer close(done)
+      		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+      		defer cancel()
+      		got := map[string]string{}
+      		if status, data, err := playerAPI(ctx, port, user, password, "&action=get_live_streams"); err == nil && status == 200 {
+      			var list []struct {
+      				ID   json.RawMessage `json:"stream_id"`
+      				Name string          `json:"name"`
+      			}
+      			json.Unmarshal(data, &list)
+      			for _, s := range list {
+      				got[strings.Trim(string(s.ID), `"`)] = s.Name
+      			}
+      		}
+      		mu.Lock()
+      		n.at, n.busy = mono(), false
+      		if len(got) > 0 {
+      			n.names = got
+      		}
+      		mu.Unlock()
+      	}()
+      	return done
+      }
+
+      const style = `
       :root{--bg:#f5f6f8;--card:#fff;--ink:#16181d;--soft:#5b6270;--line:#e6e8ee;--chip:#eef0f5;--good:#12805c;--goodbg:#e7f6ef;
       --bad:#c0362c;--badbg:#fdecea;--warn:#8a5a00;--warnbg:#fff4d6;--link:#2457d6;--shadow:0 1px 2px rgba(16,24,40,.06),0 4px 16px rgba(16,24,40,.06)}
       @media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b22;--ink:#eceef2;--soft:#9aa3b2;--line:#272b35;--chip:#232733;
@@ -2427,315 +4169,250 @@ configs:
       p{margin:10px 0 0}.note{color:var(--soft);font-size:15px}ul{margin:8px 0 0;padding-left:20px}li{margin:7px 0}
       a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
       footer{color:var(--soft);font-size:14px;text-align:center;margin-top:22px}
-      """
+      `
 
-      def esc(text):
-          return html.escape(str(text), quote=True)
+      func plural(n int, one, many string) string {
+      	if n == 1 {
+      		return one
+      	}
+      	return many
+      }
 
-      async def status_page(w, h):
-          port = h.get('x-relay-port', '')
-          host = (h.get('host', '') or 'this-machine').rsplit(':', 1)[0] if port.isdigit() else 'this-machine'
-          info = {'problems': ['The proxy could not read its own start-up notes. Look at the log: docker logs iptv-caddy'], 'providers': []}
-          if port.isdigit():
-              try:
-                  status, data = await asyncio.wait_for(get('http://127.0.0.1:%s/__status.json' % port, '', 1 << 20), 5)
-                  if status == 200:
-                      info = json.loads(data)
-              except Exception:
-                  pass
-          problems = [str(p) for p in info.get('problems') or []]
-          good = [p for p in info.get('providers') or [] if p.get('ok')]
-          skipped = [p for p in info.get('providers') or [] if not p.get('ok')]
-          working = not problems and bool(good)
-          user, password = h.get('x-relay-user', ''), h.get('x-relay-pass', '')
-          where, accounts, ping = await asyncio.gather(where_am_i(), asyncio.gather(*[account(str(p.get('port')), user, password) for p in good]),
-                                                       asyncio.get_running_loop().run_in_executor(None, vpn_ping))
+      func statusPage(w http.ResponseWriter, r *http.Request) {
+      	port := r.Header.Get("X-Relay-Port")
+      	_, perr := strconv.Atoi(port)
+      	host := "this-machine"
+      	if perr == nil && r.Host != "" {
+      		host = r.Host
+      		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+      			host = host[:i]
+      		}
+      	}
+      	info := any(map[string]any{"problems": []any{"The proxy could not read its own start-up notes. Look at the log: docker logs iptv-caddy"}, "providers": []any{}})
+      	if perr == nil {
+      		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+      		if status, data, err := get(ctx, "http://127.0.0.1:"+port+"/__status.json", agentOf(""), 1<<20); err == nil && status == 200 {
+      			if v, err := parseJSON(data); err == nil {
+      				info = v
+      			}
+      		}
+      		cancel()
+      	}
+      	var problems []string
+      	ps, _ := field(info, "problems").([]any)
+      	for _, p := range ps {
+      		problems = append(problems, pyStr(p))
+      	}
+      	var good, skipped []any
+      	provs, _ := field(info, "providers").([]any)
+      	provName := map[string]string{} // port -> NAME, for the table
+      	for _, p := range provs {
+      		if truthy(field(p, "ok")) {
+      			good = append(good, p)
+      			provName[pyStr(field(p, "port"))] = pyStr(field(p, "name"))
+      		} else {
+      			skipped = append(skipped, p)
+      		}
+      	}
+      	working := len(problems) == 0 && len(good) > 0
+      	user, password := r.Header.Get("X-Relay-User"), r.Header.Get("X-Relay-Pass")
 
-          o = ['<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
-               '<meta name="color-scheme" content="light dark"><meta http-equiv="refresh" content="30"><title>IPTV proxy status</title><style>', STYLE, '</style></head><body><main>',
-               '<header class="%s"><span class="dot"></span><h1>IPTV proxy status</h1></header>' % ('' if working else 'down')]
-          if working:
-              o.append('<div class="card banner good"><div>&#9989;</div><div>The proxy is working.<small>%d provider%s loaded.</small></div></div>'
-                       % (len(good), ' is' if len(good) == 1 else 's are'))
-          else:
-              o.append('<div class="card banner bad"><div>&#10060;</div><div>The proxy is NOT working yet.<ul>')
-              o += ['<li>%s</li>' % esc(p) for p in problems]
-              if not problems and not good:
-                  o.append('<li>No provider is set up. Open your settings file (<code>.env</code>) and add the five lines for a provider. The file itself shows how.</li>')
-              o.append('</ul><small>After you fix the settings file, start the stack again and reload this page.</small></div></div>')
-          if skipped:
-              o.append('<div class="card warn"><h2 style="color:inherit">&#9888;&#65039; These providers were left out</h2><ul>')
-              o += ['<li><b>%s</b>: %s</li>' % (esc(p.get('name', '')), esc(p.get('why', ''))) for p in skipped]
-              o.append('</ul><p>Fix the line in your settings file (<code>.env</code>) and start the stack again.</p></div>')
+      	var where any
+      	accts := make([]map[string]any, len(good))
+      	var ping float64
+      	var pinged bool
+      	var wg sync.WaitGroup
+      	wg.Add(2 + 2*len(good))
+      	go func() { defer wg.Done(); where = whereAmI() }()
+      	go func() { defer wg.Done(); ping, pinged = vpnPing() }()
+      	for i, p := range good {
+      		go func() { defer wg.Done(); accts[i] = account(pyStr(field(p, "port")), user, password) }()
+      		go func() { // names wait at most 2 s: missing ones show as ids and fill in on a later refresh
+      			defer wg.Done()
+      			select {
+      			case <-names(pyStr(field(p, "port")), user, password):
+      			case <-time.After(2 * time.Second):
+      			}
+      		}()
+      	}
+      	wg.Wait()
 
-          o.append('<div class="card"><h2>Your VPN</h2>')
-          if where and where.get('ip'):
-              place = ', '.join(str(where[k]) for k in ('city', 'region', 'country') if where.get(k))
-              o.append('<dl class="pair"><dt>The internet sees you as</dt><dd>%s</dd><dt>Location</dt><dd>%s</dd>%s%s</dl>'
-                       % (esc(where['ip']), esc(place), '<dt>Network</dt><dd>%s</dd>' % esc(where['org']) if where.get('org') else '',
-                          '<dt>Ping to the VPN server</dt><dd>%.0f ms</dd>' % ping if ping is not None else ''))
-              o.append('<p class="note">This should be your VPN, not your home. If you see your own town and your own internet company here, stop and check your VPN settings.</p>')
-          else:
-              o.append('The proxy could not look up its public address just now. Reload this page in a minute.'
-                       '<p class="note">The VPN container still blocks all traffic when the VPN is down, so nothing leaves from your home address.</p>')
-          o.append('</div>')
+      	var o strings.Builder
+      	add := func(f string, a ...any) { fmt.Fprintf(&o, f, a...) }
+      	add(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`)
+      	add(`<meta name="color-scheme" content="light dark"><meta http-equiv="refresh" content="30"><title>IPTV proxy status</title><style>%s</style></head><body><main>`, style)
+      	add(`<header class="%s"><span class="dot"></span><h1>IPTV proxy status</h1></header>`, map[bool]string{true: "", false: "down"}[working])
+      	if working {
+      		add(`<div class="card banner good"><div>&#9989;</div><div>The proxy is working.<small>%d provider%s loaded.</small></div></div>`, len(good), plural(len(good), " is", "s are"))
+      	} else {
+      		add(`<div class="card banner bad"><div>&#10060;</div><div>The proxy is NOT working yet.<ul>`)
+      		for _, p := range problems {
+      			add(`<li>%s</li>`, esc(p))
+      		}
+      		if len(problems) == 0 && len(good) == 0 {
+      			add(`<li>No provider is set up. Open your settings file (<code>.env</code>) and add the five lines for a provider. The file itself shows how.</li>`)
+      		}
+      		add(`</ul><small>After you fix the settings file, start the stack again and reload this page.</small></div></div>`)
+      	}
+      	if len(skipped) > 0 {
+      		add(`<div class="card warn"><h2 style="color:inherit">&#9888;&#65039; These providers were left out</h2><ul>`)
+      		for _, p := range skipped {
+      			add(`<li><b>%s</b>: %s</li>`, esc(field(p, "name")), esc(field(p, "why")))
+      		}
+      		add(`</ul><p>Fix the line in your settings file (<code>.env</code>) and start the stack again.</p></div>`)
+      	}
 
-          o.append('<div class="card"><h2>Your providers</h2>')
-          if not good:
-              o.append('None loaded.')
-          for p, a in zip(good, accounts):
-              pill, facts = '<span class="pill warn">no answer from the provider</span>', []
-              if a and a.get('answer') == 200:
-                  state = str(a.get('status') or '')
-                  if str(a.get('auth')) == '0':
-                      pill = '<span class="pill bad">login refused by the provider</span>'
-                  elif state:
-                      pill = '<span class="pill %s">%s</span>' % ('good' if state.lower() == 'active' else 'warn', esc(state))
-                  else:
-                      pill = '<span class="pill">answered</span>'
-                  try:
-                      facts.append('Expires <b>%s</b>' % time.strftime('%Y-%m-%d', time.gmtime(int(a['exp']))) if a.get('exp') else 'No end date')
-                  except (ValueError, TypeError, OverflowError, OSError):
-                      pass
-                  if a.get('max') is not None:
-                      facts.append('In use <b>%s of %s</b>' % (esc('?' if a.get('used') is None else a['used']), esc(a['max'])))
-                  age = a.get('age', 0)
-                  facts.append('Checked <b>%s</b>' % ('just now' if age < 5 else '%d s ago' % age if age < 120 else '%d min ago' % (age // 60)))
-              elif a and a.get('answer'):
-                  pill = '<span class="pill bad">the provider answered %s</span>' % esc(a['answer'])
-              o.append('<div class="provider"><div class="top"><span class="name">%s</span>%s<span class="pill">%s</span></div>'
-                       '<div>Type this into your player: <code>http://%s:%s</code></div><div class="facts">%s</div></div>'
-                       % (esc(p.get('name', '')), pill, 'MPEG-TS' if p.get('mode') == 'ts' else 'HLS', esc(host), esc(p.get('port', '')),
-                          ''.join('<span>%s</span>' % f for f in facts)))
-          if good:
-              o.append('<p class="note">In your player, add an Xtream login with that address and the easy username and password from your settings file (<code>PLAYER_USER</code> and <code>PLAYER_PASSWORD</code>).</p>')
-          o.append('</div>')
+      	add(`<div class="card"><h2>Your VPN</h2>`)
+      	if truthy(field(where, "ip")) {
+      		var place []string
+      		for _, k := range []string{"city", "region", "country"} {
+      			if truthy(field(where, k)) {
+      				place = append(place, pyStr(field(where, k)))
+      			}
+      		}
+      		org, pl := "", ""
+      		if truthy(field(where, "org")) {
+      			org = "<dt>Network</dt><dd>" + esc(field(where, "org")) + "</dd>"
+      		}
+      		if pinged {
+      			pl = fmt.Sprintf("<dt>Ping to the VPN server</dt><dd>%.0f ms</dd>", ping)
+      		}
+      		add(`<dl class="pair"><dt>The internet sees you as</dt><dd>%s</dd><dt>Location</dt><dd>%s</dd>%s%s</dl>`, esc(field(where, "ip")), esc(strings.Join(place, ", ")), org, pl)
+      		add(`<p class="note">This should be your VPN, not your home. If you see your own town and your own internet company here, stop and check your VPN settings.</p>`)
+      	} else {
+      		add(`The proxy could not look up its public address just now. Reload this page in a minute.<p class="note">The VPN container still blocks all traffic when the VPN is down, so nothing leaves from your home address.</p>`)
+      	}
+      	add(`</div><div class="card"><h2>Your providers</h2>`)
+      	if len(good) == 0 {
+      		add(`None loaded.`)
+      	}
+      	for i, p := range good {
+      		a := accts[i]
+      		pill, facts := `<span class="pill warn">no answer from the provider</span>`, ""
+      		if a != nil && a["answer"] == 200 {
+      			state := ""
+      			if truthy(a["status"]) {
+      				state = pyStr(a["status"])
+      			}
+      			switch {
+      			case pyStr(a["auth"]) == "0":
+      				pill = `<span class="pill bad">login refused by the provider</span>`
+      			case state != "":
+      				pill = fmt.Sprintf(`<span class="pill %s">%s</span>`, map[bool]string{true: "good", false: "warn"}[strings.ToLower(state) == "active"], esc(state))
+      			default:
+      				pill = `<span class="pill">answered</span>`
+      			}
+      			if !truthy(a["exp"]) {
+      				facts += "<span>No end date</span>"
+      			} else if t, err := strconv.ParseFloat(strings.TrimSpace(pyStr(a["exp"])), 64); err == nil {
+      				facts += "<span>Expires <b>" + time.Unix(int64(t), 0).UTC().Format("2006-01-02") + "</b></span>"
+      			}
+      			if a["max"] != nil {
+      				used := a["used"]
+      				if used == nil {
+      					used = "?"
+      				}
+      				facts += fmt.Sprintf("<span>In use <b>%s of %s</b></span>", esc(used), esc(a["max"]))
+      			}
+      			switch age := a["age"].(float64); {
+      			case age < 5:
+      				facts += "<span>Checked <b>just now</b></span>"
+      			case age < 120:
+      				facts += fmt.Sprintf("<span>Checked <b>%d s ago</b></span>", int(age))
+      			default:
+      				facts += fmt.Sprintf("<span>Checked <b>%d min ago</b></span>", int(age/60))
+      			}
+      		} else if a != nil && truthy(a["answer"]) {
+      			pill = fmt.Sprintf(`<span class="pill bad">the provider answered %s</span>`, esc(a["answer"]))
+      		}
+      		add(`<div class="provider"><div class="top"><span class="name">%s</span>%s<span class="pill">%s</span></div><div>Type this into your player: <code>http://%s:%s</code></div><div class="facts">%s</div></div>`,
+      			esc(field(p, "name")), pill, map[bool]string{true: "MPEG-TS", false: "HLS"}[field(p, "mode") == "ts"], esc(host), esc(field(p, "port")), facts)
+      	}
+      	if len(good) > 0 {
+      		add(`<p class="note">In your player, add an Xtream login with that address and the easy username and password from your settings file (<code>PLAYER_USER</code> and <code>PLAYER_PASSWORD</code>).</p>`)
+      	}
+      	add(`</div><div class="card"><h2>The Live TV setting</h2>Each provider has one line in your settings file that says how your players watch its live channels.<ul><li><code>NAME_LIVE_TV=hls</code> Your players use <b>HLS</b>. Everyone on a channel shares one connection to the provider, so you can watch and record the same channel at once. A recorder that asks for MPEG-TS is given the same video as your players.</li><li><code>NAME_LIVE_TV=ts</code> Your players use <b>MPEG-TS</b>. You get the provider&#39;s own stream, and everyone on a channel shares one connection to the provider. A player that asks for HLS instead is given HLS built from that same stream, so the provider still sees one connection.</li></ul><p class="note">Pick the one that matches the live format chosen in your players and in your playlist manager if you use one. They have to agree. If a provider only offers one of the two, use that one.</p></div>`)
 
-          o.append('<div class="card"><h2>The Live TV setting</h2>Each provider has one line in your settings file that says how your players watch its live channels.'
-                   '<ul><li><code>NAME_LIVE_TV=hls</code> Your players use <b>HLS</b>. Everyone on a channel shares one connection to the provider, so you can watch and record the same channel at once. A recorder that asks for MPEG-TS is given the same video as your players.</li>'
-                   '<li><code>NAME_LIVE_TV=ts</code> Your players use <b>MPEG-TS</b>. You get the provider&#39;s own stream, and everyone on a channel shares one connection to the provider. Do not open a channel as HLS while it is playing or recording as MPEG-TS: most providers allow one kind at a time per channel, and the two will cut each other off.</li></ul>'
-                   '<p class="note">Pick the one that matches the live format chosen in your players and in your playlist manager if you use one. They have to agree. If a provider only offers one of the two, use that one.</p></div>')
+      	add(`<div class="card"><h2>Playing right now</h2>%s<p class="note">Live channels only. Movies, series and catch-up are not counted.</p></div>`, playing(provName))
+      	add(`<div class="card"><h2>Still stuck?</h2>Each of the three containers keeps a log. Run the command on the machine this stack runs on.<ul><li><code>docker logs iptv-caddy</code><br>The proxy. At the top it lists every provider it found, and any it left out and why. After that, one line for every request.</li><li><code>docker logs iptv-relay</code><br>The relay. It says who is watching what, when when a live channel is opened and closed, how long the provider took to send the first video, and anything that went wrong with a channel.</li><li><code>docker logs iptv-vpn</code><br>The VPN. It says whether the tunnel is up and where it comes out.</li><li>The instructions: <a href="https://github.com/mackid1993/iptv-vpn-proxy">github.com/mackid1993/iptv-vpn-proxy</a></li></ul></div><footer>IPTV VPN proxy</footer></main></body></html>`)
+      	w.Header().Set("Cache-Control", "no-store")
+      	answer(w, map[bool]int{true: 200, false: 503}[working], "text/html; charset=utf-8", o.String())
+      }
 
-          now = time.monotonic()
-          for k in [k for k, t in HLS_SEEN.items() if now - t > 30]:
-              del HLS_SEEN[k]
-          hls, ts = len(HLS_SEEN), sum(1 for c in CHANNELS.values() if c.key.startswith('/ts '))
-          readers = sum(len(c.readers) for c in CHANNELS.values() if c.key.startswith('/ts '))
-          recorders = sum(len(c.readers) for c in CHANNELS.values() if c.key.startswith('/hls '))
-          playing = []
-          if hls:
-              playing.append('<b>%d</b> channel%s as HLS' % (hls, '' if hls == 1 else 's'))
-          if ts:
-              playing.append('<b>%d</b> channel%s as MPEG-TS, shared by <b>%d</b> reader%s' % (ts, '' if ts == 1 else 's', readers, '' if readers == 1 else 's'))
-          if recorders:
-              playing.append('<b>%d</b> MPEG-TS reader%s being fed from HLS' % (recorders, '' if recorders == 1 else 's'))
-          o.append('<div class="card"><h2>Playing right now</h2>%s<p class="note">Live channels only. Movies, series and catch-up are not counted.</p></div>'
-                   % ('Nothing.' if not playing else '<br>'.join(playing)))
+      // playing: the Python summary line, then one table row per live reader and per HLS player.
+      func playing(provName map[string]string) string {
+      	type row struct{ who, id, port, provider, kind, since, data string }
+      	var rows []row
+      	mu.Lock()
+      	now := mono()
+      	for k, t := range hlsSeen {
+      		if now-t > 30 {
+      			delete(hlsSeen, k)
+      		}
+      	}
+      	hls, ts, readers, recorders := len(hlsSeen), 0, 0, 0
+      	for _, c := range channels {
+      		if strings.HasPrefix(c.key, "/ts ") {
+      			ts, readers = ts+1, readers+len(c.readers)
+      		} else {
+      			recorders += len(c.readers)
+      		}
+      		for rd := range c.readers {
+      			if rd.kind == "HLS built from MPEG-TS" { // (its players have rows of their own, below)
+      				continue
+      			}
+      			rows = append(rows, row{rd.who, rd.id, rd.port, c.provider, rd.kind, hms(now - rd.came), fmt.Sprintf("%.1f MB", float64(rd.written.Load())/1048576)})
+      		}
+      	}
+      	for _, h := range hlsRows {
+      		if now-h.last <= 30 {
+      			rows = append(rows, row{h.who, h.id, h.port, h.provider, "HLS", hms(h.last - h.first), "-"})
+      		}
+      	}
+      	for i, x := range rows { // channel names, provider NAMEs
+      		if n := channelNames[x.port]; n != nil && n.names[x.id] != "" {
+      			rows[i].id = n.names[x.id]
+      		}
+      		if name := provName[x.port]; name != "" {
+      			rows[i].provider = name
+      		} else {
+      			rows[i].provider = hostOf(x.provider)
+      		}
+      	}
+      	mu.Unlock()
+      	var lines []string
+      	if hls > 0 {
+      		lines = append(lines, fmt.Sprintf("<b>%d</b> channel%s as HLS", hls, plural(hls, "", "s")))
+      	}
+      	if ts > 0 {
+      		lines = append(lines, fmt.Sprintf("<b>%d</b> channel%s as MPEG-TS, shared by <b>%d</b> reader%s", ts, plural(ts, "", "s"), readers, plural(readers, "", "s")))
+      	}
+      	if recorders > 0 {
+      		lines = append(lines, fmt.Sprintf("<b>%d</b> MPEG-TS reader%s being fed from HLS", recorders, plural(recorders, "", "s")))
+      	}
+      	if len(lines) == 0 && len(rows) == 0 {
+      		return "Nothing."
+      	}
+      	sort.Slice(rows, func(i, j int) bool { return rows[i].who+rows[i].id < rows[j].who+rows[j].id })
+      	cell := `<td style="padding:6px 10px;border-top:1px solid var(--line)">`
+      	t := `<table style="width:100%;border-collapse:collapse;margin-top:12px;font-size:15px"><tr style="color:var(--soft);text-align:left">` +
+      		`<th style="padding:6px 10px">Device</th><th style="padding:6px 10px">Channel</th><th style="padding:6px 10px">Provider</th>` +
+      		`<th style="padding:6px 10px">Format</th><th style="padding:6px 10px">Watching for</th><th style="padding:6px 10px">Data sent</th></tr>`
+      	for _, x := range rows {
+      		t += "<tr>"
+      		for _, v := range []string{x.who, x.id, x.provider, x.kind, x.since, x.data} {
+      			t += cell + esc(v) + "</td>"
+      		}
+      		t += "</tr>"
+      	}
+      	return strings.Join(lines, "<br>") + t + "</table>"
+      }
 
-          o.append('<div class="card"><h2>Still stuck?</h2>Each of the three containers keeps a log. Run the command on the machine this stack runs on.<ul>'
-                   '<li><code>docker logs iptv-caddy</code><br>The proxy. At the top it lists every provider it found, and any it left out and why. After that, one line for every request.</li>'
-                   '<li><code>docker logs iptv-relay</code><br>The Python relay. It says when a live channel is opened and closed, how long the provider took to send the first video, and anything that went wrong with a channel.</li>'
-                   '<li><code>docker logs iptv-vpn</code><br>The VPN. It says whether the tunnel is up and where it comes out.</li>'
-                   '<li>The instructions: <a href="https://github.com/mackid1993/iptv-vpn-proxy">github.com/mackid1993/iptv-vpn-proxy</a></li>'
-                   '</ul></div><footer>IPTV VPN proxy</footer></main></body></html>')
-          answer(w, 200 if working else 503, ''.join(o), 'text/html; charset=utf-8', 'Cache-Control: no-store\r\n')
+  relay-gomod:
+    content: |
+      module relay
 
-      async def handle(r, w):
-          rd = ch = None
-          OPEN.add(w)
-          try:
-              line = (await asyncio.wait_for(r.readline(), 10)).decode('latin-1').split()
-              h, sent, raw = {}, [], []
-              for _ in range(HEADER_LINES):
-                  x = (await asyncio.wait_for(r.readline(), 10)).decode('latin-1')
-                  if x in ('\r\n', '\n', ''):
-                      break
-                  name, _, value = x.partition(':')
-                  h[name.strip().lower()] = value.strip()
-                  raw.append((name.strip(), value.strip()))
-                  if not SKIP.match(name.strip()):       # the player's own headers, in its order, for the provider
-                      sent.append((name.strip(), re.sub(r'[^\x20-\x7e]', '', value.strip())))
-              if len(line) < 2:
-                  return
-              method, path = line[0], line[1].split('?')[0]
-              if path == '/healthz':
-                  return answer(w, 200, 'ok\n')
-              if path == '/status':
-                  return await status_page(w, h)
-              if path == '/check':
-                  return await where_it_leads(w, h)
-              if path == '/hl':
-                  return await hls(w, h, raw)
-              if path == '/api':
-                  return await api(w, h, raw)
-              if path == '/stat':
-                  return answer(w, 200, '%d %d\n' % (len(CHANNELS), sum(len(c.readers) for c in CHANNELS.values())))
-              provider, uri = h.get('x-relay-provider', '').rstrip('/'), h.get('x-relay-uri', '')
-              if path not in ('/ts', '/hls') or provider not in PROVIDERS or not uri.startswith('/'):
-                  return answer(w, 403, 'Not a request from the proxy.\n')
-              if method == 'HEAD':                      # always answered here with 200: asking the provider would open a connection
-                  w.write(HEAD_OK)
-                  return
-              if method != 'GET':
-                  return answer(w, 400)
-              agent = re.sub(r'[^\x20-\x7e]', '', h.get('user-agent', ''))
-              target = provider + uri
-              key = channel_key(path, provider, uri)
-              ch = CHANNELS.get(key)
-              first = ch is None
-              if first:
-                  # Changing channel. A player hangs up on the old channel and asks for the new one at
-                  # almost the same moment, and the two can arrive here in either order. So, for this
-                  # provider: channels nobody is reading are let go now; if one of its channels is still
-                  # being read, a hang-up that is just behind this request is given a moment to arrive;
-                  # and the provider is given DROP_GAP to see a hang-up before this channel is asked for.
-                  LAST_OPEN[provider] = (time.monotonic(), key)
-                  mine = [c for c in CHANNELS.values() if c.provider == provider]
-                  for other in mine:
-                      other.drop_if_empty()
-                  if any(not c.done for c in mine):
-                      await asyncio.sleep(0.03)
-                      for other in mine:
-                          other.drop_if_empty()
-                  wait = LAST_DROP.get(provider, 0) + DROP_GAP - time.monotonic()
-                  if wait > 0:
-                      await asyncio.sleep(wait)
-                  if r.at_eof():                        # the player has already moved on: nothing is opened for it
-                      return
-                  for other in CHANNELS.values():       # and once more, for hang-ups that came during the waits
-                      if other.provider == provider and other.key != key:
-                          other.drop_if_empty()
-                  ch = CHANNELS.get(key)
-                  first = ch is None
-                  if first:
-                      source = ts_source(target, sent)
-                      if path == '/hls':
-                          orig, port = h.get('x-relay-orig', ''), h.get('x-relay-port', '')
-                          if not orig.startswith('/') or not port.isdigit():
-                              return answer(w, 400)
-                          q = orig.find('?')
-                          plain, query = (orig, '') if q < 0 else (orig[:q], orig[q:])
-                          plain = plain[:-3] if plain.endswith('.ts') else plain
-                          # The same channel has one HLS address, whichever form the reader used
-                          # (/user/pass/1, /user/pass/1.ts, /live/user/pass/1.ts), as in channel_key: a
-                          # player on HLS asks for /live/user/pass/1.m3u8, and a second form would be a
-                          # second session at the provider, which ends the first.
-                          parts = [p for p in plain.split('/') if p]
-                          if parts and parts[0] == 'live':
-                              parts = parts[1:]
-                          if len(parts) == 3:
-                              plain = '/live/' + '/'.join(parts)
-                          source = hls_source('http://127.0.0.1:%s/__ch%s.m3u8/__index.m3u8%s' % (port, plain, query), agent)
-                      ch = CHANNELS[key] = Channel(key, source, provider)
-              if sum(len(c.readers) for c in CHANNELS.values()) >= READERS_MAX:
-                  if first:
-                      ch.drop()
-                  ch = None
-                  return answer(w, 503, 'Too many readers at once.\n')
-              rd = ch.join(first)
-              rd.w = w
-              came, why = time.monotonic(), 'the player hung up'
-              gone = asyncio.ensure_future(r.read(1))   # completes when Caddy (so the player) hangs up
-              gone.add_done_callback(lambda f: f.cancelled() or f.exception())   # a reset here is expected; keep it out of the log
-              try:
-                  wait = asyncio.ensure_future(ch.ready.wait())
-                  await asyncio.wait({wait, gone}, timeout=START_WAIT, return_when=asyncio.FIRST_COMPLETED)
-                  wait.cancel()
-                  if gone.done():
-                      return
-                  if ch.status != 200:
-                      e = ch.refusal
-                      if e is not None and 400 <= e.status < 600:   # the provider's own answer, passed on
-                          return answer(w, e.status, e.text, e.kind)
-                      return answer(w, 504 if ch.status is None else ch.status if 400 <= ch.status < 600 else 502)
-                  w.write(HEAD_OK)
-                  while True:
-                      if rd.q and rd.pace:                  # a joiner: at playing speed, holding its cushion here (see join)
-                          now = time.monotonic()
-                          speed = ch.speed(now) or rd.pace[3]
-                          if speed <= 0:
-                              rd.pace = None                # (no measure of the channel's speed: as before, at once)
-                          else:
-                              # a little faster when more than the cushion is waiting, a little slower when less
-                              rate = speed * min(1.5, max(0.8, 1 + 0.5 * (rd.n - rd.pace[0]) / max(rd.pace[0], 1)))
-                              most = speed * JOIN_START
-                              rd.pace[1] = min(rd.pace[1] + (now - rd.pace[2]) * rate, most)
-                              rd.pace[2] = now
-                              # An item can hold more than JOIN_START seconds of video (the 256 KB start of the cushion
-                              # on a low-rate channel, or one piece of a very low-rate one). It goes once the allowance
-                              # is full, and the allowance then goes below zero, so the time it plays is waited for
-                              # after it instead.
-                              need = min(len(rd.q[0]), most)
-                              if rd.pace[1] < need:
-                                  await asyncio.wait({gone}, timeout=(need - rd.pace[1]) / rate)
-                                  if gone.done():
-                                      return
-                                  continue
-                              rd.pace[1] -= len(rd.q[0])
-                      if rd.q:
-                          data = rd.q.popleft()
-                          rd.n -= len(data)
-                          if not rd.pace:
-                              rd.given = max(0, rd.given - len(data))   # (the join's allowance is used up as the join is sent)
-                          w.write(data)
-                          drain = asyncio.ensure_future(w.drain())
-                          await asyncio.wait({drain, gone}, return_when=asyncio.FIRST_COMPLETED)
-                          if gone.done():
-                              drain.cancel()
-                              return
-                          drain.result()
-                          continue
-                      if rd.over:
-                          why = 'its channel ended'
-                          return
-                      rd.wake.clear()
-                      if rd.q or rd.over:
-                          continue
-                      wake = asyncio.ensure_future(rd.wake.wait())
-                      await asyncio.wait({wake, gone}, return_when=asyncio.FIRST_COMPLETED)
-                      wake.cancel()
-                      if gone.done():
-                          return
-              except OSError:
-                  why = 'the line to the player broke'
-                  raise
-              finally:
-                  gone.cancel()
-                  say('a reader left after %d s: %s (%d still on its channel)' % (time.monotonic() - came, why, max(0, len(ch.readers) - 1)))
-          except Refused as e:                          # (hls and api refuse before they have written anything)
-              try:
-                  answer(w, e.status, e.text, e.kind or 'text/plain')
-              except Exception:
-                  pass
-          except (OSError, ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError):
-              pass
-          except Exception as e:
-              say('a request failed: ' + type(e).__name__)
-          finally:
-              OPEN.discard(w)
-              if ch is not None and rd is not None:
-                  ch.leave(rd)
-              try:
-                  w.close()
-              except Exception:
-                  pass
-
-      async def main():
-          server = await asyncio.start_server(handle, '127.0.0.1', PORT, limit=1 << 16)
-          say('ready, for %d provider%s' % (len(PROVIDERS), '' if len(PROVIDERS) == 1 else 's'))
-          stop = asyncio.Event()                        # stop when told to (this program is the container's first process)
-          for sig in (signal.SIGTERM, signal.SIGINT):
-              asyncio.get_running_loop().add_signal_handler(sig, stop.set)
-          await stop.wait()
-          server.close()                                # stopping: let go of every stream at once
-          for ch in list(CHANNELS.values()):
-              ch.task.cancel()
-          for w in list(OPEN):
-              shut(w)
-          await asyncio.sleep(0.1)
-
-      if __name__ == '__main__':
-          asyncio.run(main())
+      go 1.22
 ```
 
 </details>
@@ -2765,9 +4442,8 @@ line is left out.
   same video as your players, so you can watch and record a channel at once.
 - `ts`: your players use MPEG-TS. Everyone on a channel shares one connection
   to the provider and gets the provider's own stream, so you can watch and
-  record a channel at once. Do not open a channel as HLS while it is playing
-  or recording as MPEG-TS: most providers allow one kind at a time per
-  channel.
+  record a channel at once. A device that asks for HLS instead is given HLS
+  built from that same stream, so it shares the connection too.
 
 Use the format chosen in your players, and in your playlist manager if you
 have one. They all have to agree. If a provider offers only one of the two,
@@ -2887,7 +4563,8 @@ and the last is there to help you. Engineers will find the details under
 7. **One provider connection per live channel for MPEG-TS too.** This is the
    relay's other main job. With `NAME_LIVE_TV=ts`, the first reader of a
    channel makes the relay open it at the provider, and everyone else on that
-   channel is given the same video. With `NAME_LIVE_TV=hls`, a reader that
+   channel is given the same video, also a device that asks for HLS (it gets
+   HLS built from that stream). With `NAME_LIVE_TV=hls`, a reader that
    asks for MPEG-TS (many recorders do) is given the channel's HLS video
    joined end to end, so it shares the session your players are on.
 8. **A status page.** The relay draws a page that shows what is set up, what
@@ -2899,9 +4576,7 @@ port.
 
 No video server is named anywhere in the two files, because a provider can
 move to other servers at any time. Caddy needs no list of them: it keeps
-connections open to whichever servers it fetches from, by itself. (The nginx
-version had to learn each server, keep a list of them in a Docker volume and
-reload nginx to use it. None of that exists any more.)
+connections open to whichever servers it fetches from, by itself.
 
 The relay is now in the path of live TV, playlists and the provider's lists.
 If it is not running, those do not work until it is back. Movies, series,
@@ -2915,14 +4590,13 @@ The goal is parity with direct credentials, and no gap has been seen so far
 on the real setup it was run on. Some of that was confirmed against real
 providers and some only against simulated ones, so here is which is which.
 
-**The Caddy version (November 20, 2026).** Run on one real setup, against
+**Real providers (November 20, 2026).** Run on one real setup, against
 two real providers through the VPN, and against a simulated provider. Caddy
 was at version 2.11.9 at the time.
 Against the real providers:
 
 - The account check.
-- Channel categories and channel lists (40,036 and 25,215 channels), the same
-  byte for byte as from the nginx version apart from the port number.
+- Channel categories and channel lists (40,036 and 25,215 channels).
 - Every logo pointed back at the proxy (33,668 and 25,215), and one logo
   fetched through it.
 - Lists compressed with gzip when the player asked.
@@ -2938,6 +4612,13 @@ Against the real providers:
   was put to use again and checked once more through the ports players use:
   live HLS and MPEG-TS on both providers, 15 seconds each, no gaps, with the
   playlist refreshes going through Caddy's kept-open connections.
+
+The checks above were made with the Python relay. The Go relay that replaced
+it was checked against a simulated provider (the list below, plus a TS and
+an HLS device sharing one channel through one provider connection, devices
+changing channel on a one-connection account, a player that stops reading,
+and a restarted tunnel), reviewed independently twice, and then put to use
+on the real setup.
 
 Against a simulated provider:
 
@@ -2977,87 +4658,18 @@ Against a simulated provider:
   never reached, no secret reached a log, and normal playback worked
   afterwards.
 
-Speed was compared on the real setup: the same requests through both
-versions, taking turns, middle value of 4 rounds. It is a short sample, so
-read it as a direction only. Time to the first byte of a movie was 184 ms
-with Caddy and 235 ms with nginx; after a jump to the middle, 130 ms against
-239 ms, and the next 2 MB took 0.16 s against 0.78 s. The first 32 MB of a
-movie took 1.35 s against 1.17 s, which the provider's own speed decides
-more than the proxy. A channel list took 0.32 s against 0.27 s, and the
-account check 78 ms against 65 ms; both now go through the relay.
-
-**Not run on the Caddy version:**
+**Not run against real providers:**
 
 - The guide (`xmltv.php`) against the real providers. It was run only against
   the simulated one, including a redirect to a server with no path.
 - Catch-up and time shift against the real providers.
-- The HLS-to-MPEG-TS bridge (`/hls`) since the change.
+- The HLS-to-MPEG-TS bridge (`/hls`). It was run against the simulated
+  provider in both orders (an HLS player first, then an MPEG-TS reader, and
+  the other way round), with the provider seeing one session each time.
 - A hosted playlist manager in front (see
   [With a playlist manager](#with-a-playlist-manager)).
 - The [platform notes](#platform-notes) other than plain Linux with Docker
   Compose. They are written from each platform's documentation.
-
-**Earlier results, on the nginx version.** Everything from here to the end
-of this section was run on the nginx version, before November 20, 2026. It
-is kept as history. Where it describes how the proxy worked, it describes
-the nginx version.
-
-The relay's parts (MPEG-TS sharing, the HLS-to-MPEG-TS bridge, playlist
-rewriting by the relay, the status page) were run on one real setup on
-November 14, 2026, and against simulated providers. On the real setup: three
-players shared one MPEG-TS channel on one provider connection, joining and
-leaving without disturbing each other; HLS played with playlists rewritten by
-the relay; and an MPEG-TS reader was fed from a channel's HLS session while an
-HLS player watched the same channel. That is hours of use, not weeks. The
-lists below describe the proxy as it was before the relay was added.
-
-**Confirmed against real providers (nginx version):**
-
-- Live TV over HLS and over MPEG-TS
-- Movies, including skipping around in them
-- Catch-up and time shift
-- The guide and the provider's lists
-- Changing channels
-- Several readers on the same channel at once, over HLS
-- Scheduled recordings
-- A session ended by the provider being replaced without a failed request
-- Restarting the proxy while a channel is playing
-- Logos and posters loading through the proxy
-- Several opens of one channel arriving at the same moment ending up on one
-  session
-- A playlist refresh reusing the player's open connection
-- Video servers being learned from what was played, and connections to them
-  being reused for playlists and video pieces
-- The learned servers still being known after the proxy was restarted
-
-Connection reuse was measured on a real provider by reading the nginx log
-while live channels played. About 99 percent of requests reused an open
-connection, and the rest connected in a few hundredths of a second, with no
-visible stutter over a long viewing session. Without reuse, every playlist
-refresh and every video piece set up its own encrypted connection, and an
-occasional one took about a second, which was enough to empty the player's
-live buffer and show as a stutter.
-
-**Confirmed against simulated providers only (nginx version).** These are
-behaviors a provider could have that the real ones used for testing did not,
-so a stand-in was built for each. All of them passed, but none has been seen
-against a real service:
-
-- Playlists that name their pieces by bare file name (`chunk_123.ts`),
-  including a further playlist in a sub-folder
-- A provider that answers with the playlist itself instead of a redirect
-- Redirects written in less common forms
-- Playlist lines written as `//server/path` (another server, same http or
-  https)
-- Playlist lines written as `../folder/file` in a live channel's playlist,
-  with a player that works the `..` out itself and with one that sends it as
-  written. The nginx version did not handle a few rarer forms there:
-  `./../x`, `folder/../../x`, a bare `..`, and a line that climbs more than
-  32 folders above the server's top folder. The Caddy version works every
-  address out the way a player does, so these no longer need special rules.
-- Playlists labeled with an unusual content type
-- Logins full of special characters (`@ # % & + = ? / " $ ; { } \`, an
-  apostrophe, non-English letters)
 
 ## Trade-offs and things to know
 
@@ -3082,10 +4694,9 @@ against a real service:
   addresses it saved earlier. The proxy never sees those, so they are fetched
   directly. Only a player that talks to the proxy itself gets every picture
   through the VPN.
-- **Pick one live format per provider and use it everywhere.** With
-  `NAME_LIVE_TV=ts`, do not open a channel as HLS while it is playing or
-  recording as MPEG-TS: most providers allow one kind at a time per channel,
-  and the two will cut each other off.
+- **Pick one live format per provider and use it everywhere.** A device on
+  the other format still works and shares the channel's one connection, but
+  each player plays best in the format it was set up for.
 - **If a provider offers both formats, HLS is the recommended setting.**
   MPEG-TS is one continuous stream, so how smoothly it plays depends on how
   evenly the provider sends video. The relay passes it on as it arrives and
@@ -3138,7 +4749,7 @@ and the session memory for live HLS channels, and is capped at 512 MB in all.
 - You replaced `compose.yaml` with a newer version: run
   `docker compose up -d --force-recreate`. A plain `up -d` can leave the proxy
   running its old configuration.
-- New versions of gluetun, Caddy or Python: `docker compose pull`, then
+- New versions of gluetun, Caddy or Go: `docker compose pull`, then
   `docker compose up -d`. The images are not pinned to a version on purpose: a
   VPN client and a proxy should get their security fixes.
 - Coming from the nginx version: replace `compose.yaml` and run
@@ -3237,8 +4848,9 @@ same everywhere; what differs is where they live and how you start them.
   time is high or packets go missing, choose another server.
 - **Two devices cut each other off on one channel.** Check that the
   provider's `NAME_LIVE_TV` matches the live format your players really use.
-  With `ts`, a channel opened as HLS while it is playing or recording as
-  MPEG-TS still ends one of the two: that is the provider's rule.
+  Devices on the proxy share one connection per channel in either format; a
+  device that skips the proxy and goes to the provider directly is a second
+  connection, which the provider may refuse.
 - **Reading the Caddy log.** After the start lines, Caddy writes one line per
   request when the request ends (a live stream: when it is stopped), with
   the date and time in your time zone first and the details after it. A
@@ -3256,8 +4868,10 @@ same everywhere; what differs is where they live and how you start them.
     `guide`.
   - `status` is the answer's status code, and `size` how many bytes were
     sent.
-  - `duration` is how long the request took, in seconds. For a live stream
-    that is how long it was watched.
+  - `duration` is how long the request took, in seconds. A live MPEG-TS
+    stream that the player stops (changing channel, turning off) is logged
+    with `duration` 0 and without `provider` and `k`; the relay's log line
+    for it gives how long it was watched.
   - `request.remote_ip` is the device that asked. `127.0.0.1` is the stack
     itself: the relay fetching a playlist or reading a channel for a
     recorder, or the status page checking an account.
@@ -3294,7 +4908,7 @@ file disagree, the file is right.
 |---|---|---|---|
 | `vpn` | `iptv-vpn` | `qmcgaw/gluetun` | Holds the tunnel and publishes the `PROXY_PORTS` range. |
 | `caddy` | `iptv-caddy` | `caddy:alpine` | Every player connection. One listener per provider. The login swap, redirects, and all proxying that is not live TV, playlists or the provider's lists. |
-| `relay` | `iptv-relay` | `python:3-alpine` | Long-lived live streams, HLS session memory and playlist rewriting, picture addresses in the provider's lists, the status page. |
+| `relay` | `iptv-relay` | `golang:alpine` | Long-lived live streams, HLS built from MPEG-TS for `ts` providers, HLS session memory and playlist rewriting, picture addresses in the provider's lists, the status page. Built from its inline source at every start. |
 
 - `caddy` and `relay` both run with `network_mode: "service:vpn"`. They have no
   network of their own: they share the gluetun container's interfaces,
@@ -3321,8 +4935,8 @@ file disagree, the file is right.
   so Docker starts the container again inside the tunnel's new network.
 - `vpn` is given a fixed list of gluetun settings by name. `caddy` and `relay`
   read the whole settings file (`.env`, or `stack.env` under Portainer). The
-  relay's start command strips the environment down before Python runs, to
-  `PATH` and a list of provider addresses. Caddy's start script does the same
+  relay's start command strips the environment down before the relay runs,
+  to `PATH`, a memory target (`GOMEMLIMIT`) and a list of provider addresses. Caddy's start script does the same
   before Caddy runs: what is left is `PATH`, `TZ`, Caddy's own folders and the
   providers' logins (each provider's block reads its login from there when a
   request comes in). The VPN keys and the rest of `.env` are not in Caddy's
@@ -3354,7 +4968,10 @@ live video does not wait in a buffer. Toward a provider and the servers it
 sends players to, Caddy allows 60 seconds without data (300 seconds for the
 guide). Nothing about the player or the proxy is added to the request: the
 `X-Forwarded-*` and `Via` headers are removed, so the provider sees the
-player's own request, from the VPN. Compression is off in Caddy's transports,
+player's own request, from the VPN. Toward the player, replies carry no
+`Via` line either, and a live MPEG-TS stream is sent the way the provider
+sends it: not cut into chunks, and ended by closing the connection.
+Compression is off in Caddy's transports,
 so the player's own `Accept-Encoding` goes through as it is and nothing is
 added or unpacked on the way. Upstream certificates are not verified
 (`tls_insecure_skip_verify`): many players do not check them either, and
@@ -3393,8 +5010,7 @@ which leads to `127.0.0.1`, or a number written as one long decimal).
 Answers are kept for a minute, so a channel's pieces cost one lookup a
 minute. A name that changes its answer between that lookup and Caddy's own
 is not covered. `/__cdn/` takes `GET` and `HEAD` only (405 for
-anything else). The `/__cdu/` addresses of the nginx version are gone and
-answer 404.
+anything else).
 
 **The login swap.** A request that carries `PLAYER_USER` and
 `PLAYER_PASSWORD` is sent upstream with the provider login of the port it
@@ -3426,7 +5042,9 @@ steer the relay with them.
 
 ### What the relay does
 
-The relay is one asyncio program. It listens on `127.0.0.1:8197`, so Caddy is
+The relay is one Go program, standard library only, built from its source in
+the compose file each time the container starts. It listens on
+`127.0.0.1:8197`, so Caddy is
 its only caller. It has six endpoints that matter, plus `/healthz` for the
 container's health check and `/stat`, a one-line count of open channels and
 readers.
@@ -3435,7 +5053,7 @@ readers.
 |---|---|
 | `/ts` | Share one provider MPEG-TS stream between every reader of a channel. |
 | `/hls` | Give a reader that asks for MPEG-TS the channel's HLS video, joined end to end. |
-| `/hl` | Keep one provider session per live HLS channel, and point the addresses inside an HLS playlist back at the proxy. |
+| `/hl` | Keep one provider session per live HLS channel, and point the addresses inside an HLS playlist back at the proxy. For a `ts` provider, build a live channel's HLS from its shared MPEG-TS stream instead. |
 | `/api` | Point the picture addresses in the provider's lists (`player_api.php`) back at the proxy. |
 | `/check` | Say whether a server named in a `/__cdn/` address leads to this machine or a home network, before Caddy connects to it. |
 | `/status` | Draw the status page. |
@@ -3471,8 +5089,9 @@ together.
   last minute and over the last 15 seconds, takes the larger, and multiplies.
   It never hands over more than the last 20 seconds of arrivals. In a channel's first 8 seconds there is no rate
   yet, and a joiner gets everything kept so far. The joiner's first byte is
-  placed on a program table (PAT) packet if one is near, otherwise on the
-  first whole packet.
+  placed on the program table (PAT) just before the first video keyframe, so
+  its player can start decoding at once. A stream that marks no keyframes
+  starts on the first program table, or else on the first whole packet.
 - **Slow readers are cut off.** Each reader has its own queue. A reader that
   has been more than 16 MB behind its channel for 15 seconds, or is ever 64
   MB behind, is disconnected, so that what is held for it stays bounded. What
@@ -3559,8 +5178,40 @@ session with every HLS player on the channel.
 
 The bridged stream is the HLS one, and the queue keeps up to about one piece
 in hand, so it runs a few seconds further behind live than the provider's own
-MPEG-TS would. The bridge has not been run against a real provider since the
-change to Caddy (see [What was tested, and how](#what-was-tested-and-how)).
+MPEG-TS would. The bridge has been run against a simulated provider only
+(see [What was tested, and how](#what-was-tested-and-how)).
+
+### HLS built from MPEG-TS (`ts` providers)
+
+With `NAME_LIVE_TV=ts`, a request for a live channel's HLS playlist
+(`/live/user/pass/1.m3u8` and the like) is not passed to the provider. The
+relay joins the channel's shared MPEG-TS stream instead, opening it at the
+provider if nobody is on it yet, and cuts HLS pieces from it. So a device on
+HLS and a device on MPEG-TS share the channel's one provider connection, and
+neither cuts the other off.
+
+- **The playlist.** The player is sent to the channel's own folder
+  (`/__ch/...`), where the playlist and its pieces live. Pieces are cut at
+  the first video keyframe after about 4 seconds. On a stream that marks no
+  keyframes they are cut every 4 seconds once 8 seconds have come in, and no
+  piece grows past 20 seconds. The newest 8
+  pieces are kept (at least 4 if the 40 MB they may use is reached, as on a
+  4K channel). The first playlist is answered once 2 pieces exist, which the
+  provider's opening burst usually covers; a request waits up to 20 seconds
+  for them.
+- **Numbers that only go up.** Piece numbers start from the clock and keep
+  growing, also when the stream is opened again, and each new stream is
+  marked as a discontinuity, so a player that paused or reconnected carries
+  on instead of freezing. `#EXT-X-TARGETDURATION` never goes down.
+- **Letting go.** The builder leaves the channel 30 seconds after the last
+  playlist or piece request. When a device opens another channel of the same
+  provider, a builder only that device was using lets go at once, so an
+  account with one connection can change channel. A device that is still
+  asking keeps its builder.
+- **Refusals.** If the provider refuses the channel, its status code and
+  answer reach the HLS player, as for MPEG-TS.
+- **The status page** shows a device on such a channel as HLS, with its data
+  as "-".
 
 ### HLS sessions and playlist rewriting (`/hl`)
 
@@ -3667,6 +5318,11 @@ the easy login in headers. The relay then:
 - counts live channels: HLS channels whose playlist was asked for in the last
   30 seconds (by a player, or by the relay for a recorder), MPEG-TS channels and their readers, and MPEG-TS readers
   being fed from HLS. Movies, series and catch-up are not counted.
+- lists what is playing right now, one row per device: the device's address,
+  the channel's name, the provider, the format, how long it has been on and
+  how much was sent ("-" for HLS). Channel names come from each provider's
+  live list, fetched in the background through Caddy at most every 6 hours;
+  until they arrive the channel's number is shown.
 
 The page returns 200 when at least one provider is set up and there is no
 settings problem, and 503 otherwise. It shows no logins.
@@ -3701,9 +5357,9 @@ As written in `compose.yaml`:
   redirected to another host.
 - **What it is given from `.env`.** The start command works out which
   providers are set up, using the main checks Caddy's start script uses (the
-  name, the address form, the lines being present, `hls` or `ts`), and starts
-  Python with a cleared environment holding only `PATH` and the list of those
-  providers' addresses. No login, password or VPN key is in the program's
+  name, the address form, the lines being present, `hls` or `ts`), builds the
+  relay, and starts it with a cleared environment holding only `PATH`, a
+  memory target and the list of those providers' addresses. No login, password or VPN key is in the program's
   environment. It does see a provider's login when Caddy hands it a live
   channel's, a playlist's or a list's address, and the easy login when the
   status page is drawn. The session memory holds channel addresses with the
@@ -3711,41 +5367,36 @@ As written in `compose.yaml`:
   disk.
 - **User.** It runs as `65534:65534` (nobody), with no added capabilities and
   no volumes.
-- **Memory.** `mem_limit: 512m`, a ceiling in case a provider misbehaves.
-- **Health check.** Every 30 seconds: it must still have an address in the
+- **Memory.** `mem_limit: 512m`, a ceiling for the build at start and the
+  channels being watched. `GOMEMLIMIT=384MiB` keeps the relay's heap under it.
+- **Health check.** Every 10 seconds: it must still have an address in the
   tunnel's namespace, and `/healthz` on `127.0.0.1:8197` must answer.
 - **Logs.** Its log lines never contain an address or a login.
-- **Dependencies.** None. The script uses only the Python standard library
-  (gzip is done with its `zlib` module) and refuses to start on a Python
-  older than 3.12.
+- **Dependencies.** None. It uses only Go's standard library and is built
+  with `GOTOOLCHAIN=local`, so the build never downloads anything. If a
+  future `golang:alpine` could not build it, the container stops with the
+  compiler's message in `docker logs iptv-relay`; live TV, playlists, the
+  provider's lists and the status page are down until then, while movies,
+  series and the guide still work.
 
-### Why Caddy, and why Python beside it
+### Why Caddy, and why Go beside it
 
 The design rule is that the proxy keeps doing what it is good at, which is
 HTTP proxying, and nothing else is added unless plain settings cannot do the
-job.
-
-The nginx version followed that rule but needed a lot of custom
-configuration to do it: a cache used as session memory, text rules for
-playlists and lists, a list of learned video servers with a loop and reloads
-to keep connections to them open, and maps to work around how nginx picks
-those. Each part was something an nginx update could break. Caddy keeps
-connections to any server open by itself, so its settings are much shorter
-and the proxy can take every security update. It is still the stock image,
-with settings only, no plugins and no custom build.
+job. Caddy keeps connections to any server open by itself and needs no list
+of video servers, so its settings stay short, and it is the stock image with
+settings only: no plugins and no custom build, so it can take every security
+update.
 
 The jobs that settings cannot do well live in the relay: fanning one
-upstream stream out to several readers, joining HLS pieces into one stream,
-remembering one session per live channel, reading a playlist line by line,
-rewriting a large list as it streams, and drawing a status page.
-
-Before the relay existed, a first attempt, which was never published, did
-the stream work inside nginx with its JavaScript module (njs). Measured on
-real streams, it either grew in memory for as long as video flowed through
-it, or, when that was worked around, corrupted the stream. Neither is
-acceptable in the video path. So the long-lived stream handling moved out to
-a small asyncio program: one process, standard library only, in the official
-Python image, with its source inline in the compose file like the proxy
+upstream stream out to several readers, joining HLS pieces into one stream
+and cutting one stream into HLS pieces, remembering one session per live
+channel, reading a playlist line by line, rewriting a large list as it
+streams, and drawing a status page. Video must not pass through anything that
+grows in memory or alters the stream, so this is one small program with a
+bounded memory and no dependencies. It is written in Go for durability: one
+compiled program with no interpreter, standard library only, built in the
+official Go image from its source inline in the compose file like the proxy
 settings. Caddy terminates every player connection and still does all
 proxying to providers for movies, series, catch-up, the guide and every video
 piece.
@@ -3759,9 +5410,11 @@ piece.
 - **HLS is the recommended setting where a provider offers it.** With HLS the
   player fetches finished pieces and keeps its own buffer, and a recorder
   that wants MPEG-TS is still served through the bridge.
-- **With `ts`, HLS and MPEG-TS do not mix on one channel.** Opening a channel
-  as HLS while it is being read as MPEG-TS still ends one of the two. That is
-  the provider's rule, and turning MPEG-TS into HLS is beyond this proxy.
+- **With `ts`, HLS is built from MPEG-TS.** A device asking for HLS gets
+  pieces of about 4 seconds, cut at keyframes from the shared stream. Its
+  first playlist comes once two pieces exist, which the provider's opening
+  burst usually covers; a channel nobody was watching can take a few
+  seconds longer.
 - **The bridge needs plain HLS.** Encrypted or byte-range playlists, and ones
   with an `EXT-X-MAP` line, are not bridged.
 - **The relay is in the path of live TV.** Recreating the relay container
@@ -3786,6 +5439,6 @@ page. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE). gluetun, Caddy and Python are separate projects with their own
+[MIT](LICENSE). gluetun, Caddy and Go are separate projects with their own
 licenses. This repository contains configuration for them and one small
-Python program, and does not distribute any of the three.
+Go program, and does not distribute any of the three.
