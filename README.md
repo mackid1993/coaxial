@@ -28,6 +28,11 @@ on any of them.
 - **A device joining a channel already playing starts on a whole picture.**
   Its first video begins at the program table just before a keyframe, so its
   player does not throw away up to a second of video it cannot decode.
+- **A player that hangs up and asks again while tuning keeps its full start.**
+  A channel nobody is on any more is opened for the next request as for
+  the first one: everything the provider sent so far, at once. Before, the
+  same player asking again was treated as a second device joining and was
+  given a smaller cushion, which a long pause from the provider could use up.
 - **Changing channel frees the provider connection at once for HLS too.**
   On an account with one connection, an HLS device changing channel no
   longer finds the new channel refused, and another device watching the old
@@ -1871,7 +1876,23 @@ configs:
       		ch.timer = nil
       	}
       	rd := &reader{wake: make(chan struct{}, 1)}
-      	if first {
+      	// Nobody is on the channel any more (it is kept a moment after its last reader left, in its first
+      	// seconds): this is the same tune carrying on, most often a player that hung up and asked again. It is
+      	// given everything kept so far at once, as the reader who opened it was, not a joiner's paced cushion:
+      	// that cushion is there for a second device on a channel someone is watching, and here nobody is.
+      	if !first && len(ch.readers) == 0 && len(ch.ring) > 0 {
+      		var head []byte // (the ring may have been trimmed: start where a decoder can)
+      		n := 0
+      		for ; n < len(ch.ring) && len(head) < 2<<20; n++ {
+      			head = append(head, ch.ring[n].data...)
+      		}
+      		rd.push(head[keyStart(head):])
+      		for _, it := range ch.ring[n:] {
+      			rd.push(it.data)
+      		}
+      		rd.given = rd.n
+      		say("a reader came back to a channel nobody else was on and was given %d KB at once", rd.n/1024)
+      	} else if first {
       		for _, it := range ch.ring {
       			rd.push(it.data)
       		}
@@ -5099,7 +5120,9 @@ together.
   is dropped at once. The exception is a channel in its first 5 seconds,
   where a tuning player often hangs up and asks again within a moment: the
   channel lingers for 0.4 seconds unless that player has just opened another
-  channel.
+  channel. A request that comes in while it lingers, with nobody on the
+  channel, is the same tune carrying on: it is given everything kept so far
+  at once, as the first reader was, not a joiner's cushion.
 - **Changing channel.** A player hangs up on the old channel and asks for the
   new one at almost the same moment, and the two can arrive in either order.
   Before a new channel is opened, the relay drops that provider's channels

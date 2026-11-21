@@ -1255,7 +1255,23 @@ configs:
       		ch.timer = nil
       	}
       	rd := &reader{wake: make(chan struct{}, 1)}
-      	if first {
+      	// Nobody is on the channel any more (it is kept a moment after its last reader left, in its first
+      	// seconds): this is the same tune carrying on, most often a player that hung up and asked again. It is
+      	// given everything kept so far at once, as the reader who opened it was, not a joiner's paced cushion:
+      	// that cushion is there for a second device on a channel someone is watching, and here nobody is.
+      	if !first && len(ch.readers) == 0 && len(ch.ring) > 0 {
+      		var head []byte // (the ring may have been trimmed: start where a decoder can)
+      		n := 0
+      		for ; n < len(ch.ring) && len(head) < 2<<20; n++ {
+      			head = append(head, ch.ring[n].data...)
+      		}
+      		rd.push(head[keyStart(head):])
+      		for _, it := range ch.ring[n:] {
+      			rd.push(it.data)
+      		}
+      		rd.given = rd.n
+      		say("a reader came back to a channel nobody else was on and was given %d KB at once", rd.n/1024)
+      	} else if first {
       		for _, it := range ch.ring {
       			rd.push(it.data)
       		}
