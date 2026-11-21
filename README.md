@@ -4,10 +4,77 @@ Put all of your IPTV behind one VPN, on every device, without installing a VPN
 on any of them.
 
 > [!NOTE]
-> **Changelog** · Last updated: November 16, 2026
+> **Changelog** · Last updated: November 20, 2026
 
 <details>
 <summary>Changelog</summary>
+
+### November 20, 2026
+
+- **nginx is replaced by Caddy.** The proxy container is now `iptv-caddy`. It
+  runs the stock Caddy image with settings only: no plugins and no custom
+  build.
+  **Why:** the nginx version needed a lot of custom configuration to do its
+  job, and every line of it was something that could break when nginx was
+  updated. Caddy needs far less, so the proxy can take every security update.
+  Caddy also keeps its connections to the provider's video servers open and
+  reuses them by itself. So the list of learned video servers, the loop that
+  kept it, and the nginx reloads it caused are all gone.
+- **More of the work moved into the relay.** It now:
+  - keeps the session memory for live HLS channels (one provider session per
+    channel), which nginx used to keep
+  - rewrites HLS playlists itself. It works out every address in a playlist
+    the way a player does, from where the playlist really came from, so every
+    way of writing an address is handled. The rare forms the old version
+    could not handle (`./../x`, `folder/../../x`, a bare `..`, a line that
+    climbs more than 32 folders) now work too.
+  - points the logos and posters in the provider's lists (`player_api.php`)
+    back at the proxy, as nginx did
+- **What you notice:** nothing in `.env` changes. The ports, the easy login
+  and the status page address are the same. The proxy's log is now
+  `docker logs iptv-caddy`, with one line per request (see
+  [When something is wrong](#when-something-is-wrong)). The two Docker
+  volumes the nginx version used, for the session memory and the learned
+  video servers, are no longer used.
+- **A safety gap closed.** The proxy refuses to fetch from this machine or
+  your home network, but like the nginx version it used to check only
+  addresses written as numbers. A server name that leads to this machine
+  (such as `localtest.me`) got through. Now the relay looks every such name
+  up before Caddy connects, and refuses it. Found with an adversarial test.
+- **The log is easier to read.** One line per request, your local time
+  first, only the useful fields, and two new ones: which server answered and
+  how long it took to start. A player hanging up mid-stream is normal and no
+  longer shows as a warning.
+- **One kind of login is not supported any more.** A provider whose username
+  or password contains a slash (`/`) is skipped at start, with that reason in
+  the log and on the status page: Caddy cannot pass a slash on inside an
+  address. Every other character still works, in both the address and the
+  `username=`/`password=` form.
+- **Two things behave differently.** The session memory is now kept in the
+  relay's memory instead of on disk, so restarting the relay opens playing
+  HLS channels afresh. And live TV, playlists, the provider's lists and the
+  check of where a server's name leads now go through the relay, so if the
+  relay is not running they do not work; the nginx version had a fallback
+  for some of those.
+- **Measured on one real setup, with two real providers.** The same requests
+  went through both versions, taking turns, and the middle value of 4 rounds
+  is shown. It is a short sample, so read it as a direction only:
+  - a movie, time to the first byte: 184 ms with Caddy, 235 ms with nginx
+  - a seek to the middle of a movie, time to the first byte: 130 ms against
+    239 ms
+  - the first 2 MB after that seek: 0.16 s against 0.78 s
+  - the first 32 MB of a movie: 1.35 s against 1.17 s (the provider's speed
+    decides most of this one)
+  - a channel list: 0.32 s against 0.27 s
+  - the account check: 78 ms against 65 ms (the provider's lists now go
+    through the relay)
+- **If you are updating:** replace `compose.yaml`, then run
+  `docker compose up -d --remove-orphans --force-recreate`. A plain `up -d`
+  does not notice changes to the configuration inside `compose.yaml`, and
+  `--remove-orphans` removes the old `iptv-nginx` container. Leave `.env` as
+  it is. When you like, remove the two old volumes with
+  `docker volume rm <folder>_hls-memory <folder>_video-servers` (for example
+  `iptv-vpn_hls-memory` when the folder is named `iptv-vpn`).
 
 ### November 16, 2026
 
@@ -131,10 +198,12 @@ login into your player, the same way you would with the provider's own
 details. That is the whole setup on the device.
 
 - **gluetun** holds the VPN tunnel.
-- **nginx** sits inside that tunnel and passes your players' requests on to the provider.
-- **the relay**, a small Python helper, sits inside the tunnel too. When
-  several devices watch or record the same live channel, it lets them share
-  one connection to the provider. It also draws the status page.
+- **Caddy** sits inside that tunnel and passes your players' requests on to the provider.
+- **the relay**, a small Python helper, sits inside the tunnel too. It keeps
+  one provider session per live channel, so several devices can watch or
+  record the same channel. It points the addresses inside playlists and the
+  provider's lists back at the proxy, so those come through the VPN too. It
+  also draws the status page.
 
 > **For your home network only.** The proxy ports have no protection of their
 > own. Never forward them from the internet. To watch away from home, reach
@@ -173,12 +242,12 @@ Use it only with services you are entitled to use.
    compose file. Adding a provider is five lines.
 4. **Works with any player and any Xtream provider.** Nothing in it is written
    for one provider or one app.
-5. **Nothing to build or install.** It is stock gluetun, stock nginx and the
+5. **Nothing to build or install.** It is stock gluetun, stock Caddy and the
    stock Python image, with nothing added to any of them. Everything that
    makes them a proxy is text inside the compose file, where you can read it:
-   the nginx settings, a few lines of shell that read your settings at start
-   and keep a list of the video servers your streams come from, and one
-   Python program (the relay) that uses only what Python ships with.
+   the Caddy settings, a few lines of shell that read your settings at start
+   and write one Caddy block per provider, and one Python program (the relay)
+   that uses only what Python ships with.
 
 ## Why this exists
 
@@ -229,7 +298,7 @@ channel the same video.
    ```
    It says whether the proxy is working, lists each provider, and names
    anything that is wrong along with the line to fix. The log of the
-   `iptv-nginx` container says the same in short at each start:
+   `iptv-caddy` container says the same in short at each start:
    ```
    PROVIDER PROVIDER1 on port 8095 -> https://provider.example
    STATUS PAGE: open http://<this machine's address>:8095/status in a web browser
@@ -237,7 +306,7 @@ channel the same video.
    A provider with a problem is listed as `SKIPPED` with the reason, and the
    others still start. Each of the three containers keeps a log:
    ```
-   docker logs iptv-nginx
+   docker logs iptv-caddy
    docker logs iptv-relay
    docker logs iptv-vpn
    ```
@@ -458,7 +527,7 @@ PROXY_PORTS=8095-8096
 #   1. Copy the example block below, remove the # in front of its five
 #      lines, change NAME, and fill in the values.
 #   2. Bring the stack up again.
-#   3. Check it was picked up: the iptv-nginx container's log lists the
+#   3. Check it was picked up: the iptv-caddy container's log lists the
 #      providers found at every start, like
 #          PROVIDER PROVIDER1 on port 8095 -> https://provider.example
 #      A provider with a problem is listed as SKIPPED with the reason, and
@@ -502,9 +571,10 @@ You do not edit this one. It is in this repository as
 containers and holds, as plain text with a comment on each part saying what it
 is for:
 
-- the whole nginx configuration
-- the short shell script that reads your settings when nginx starts
-- the relay, a Python program of about 1,000 lines that uses only what Python
+- Caddy's settings, and the block written once for each provider
+- the short shell script that reads your settings when Caddy starts and
+  writes those blocks
+- the relay, a Python program of about 1,400 lines that uses only what Python
   ships with
 
 Nothing is downloaded or installed when the stack starts except the three
@@ -519,15 +589,16 @@ stock images.
 #
 #   iptv-vpn     gluetun. Holds the VPN tunnel (WireGuard or OpenVPN, any
 #                provider gluetun supports).
-#   iptv-nginx   A reverse proxy in front of your IPTV providers. It lives
-#                inside the tunnel's network, so everything it fetches from a
-#                provider goes out through the VPN and nothing else can.
-#   iptv-relay   A small helper beside nginx, also inside the tunnel's
-#                network. When several of your devices watch or record the
-#                same live channel, it lets them share one connection to
-#                the provider. It also draws the status page. It is plain
-#                Python in the stock Python image; its whole text is at the
-#                bottom of this file.
+#   iptv-caddy   Caddy, a reverse proxy in front of your IPTV providers. It
+#                lives inside the tunnel's network, so everything it fetches
+#                from a provider goes out through the VPN and nothing else can.
+#   iptv-relay   A small helper beside Caddy, also inside the tunnel's
+#                network. It keeps one provider session per live channel (HLS
+#                and MPEG-TS alike), so several of your devices can watch or
+#                record the same channel; it points the addresses inside
+#                playlists and the provider's lists back at the proxy; and it
+#                draws the status page. It is plain Python in the stock Python
+#                image; its whole text is at the bottom of this file.
 #
 # Your players and playlist managers connect to this machine instead of to
 # the provider:
@@ -542,7 +613,7 @@ stock images.
 #        NAME_USER=...
 #        NAME_PASSWORD=...
 #        NAME_LIVE_TV=hls          (or ts: how your players watch its live TV)
-# then bring the stack up again. The iptv-nginx log lists the providers it
+# then bring the stack up again. The iptv-caddy log lists the providers it
 # found at each start, and names any it skipped and why.
 #
 # What the proxy does besides passing bytes on (each part is explained where
@@ -553,15 +624,17 @@ stock images.
 #   4. keeps ONE provider session per live HLS channel
 #   5. swaps the easy login for the provider's
 #   6. keeps ONE provider connection per live channel for MPEG-TS readers
-#      and recorders too (done by the small "relay" beside nginx)
+#      and recorders too
+# Caddy does 1, 2 and 5 and passes every byte on; the relay does 3, 4 and 6.
 #
 # To see what is set up, and what is wrong when something is, open
 #        http://<this machine>:<any provider's port>/status
-# in a web browser. The iptv-nginx log prints that address at every start.
+# in a web browser. The iptv-caddy log prints that address at every start.
 #
 # Each container keeps a log of what it is doing:
 #        docker logs iptv-vpn        the VPN tunnel
-#        docker logs iptv-nginx      the providers it found, and every request
+#        docker logs iptv-caddy      the providers it found, and every request
+#                                    (one line each, never the address)
 #        docker logs iptv-relay      each live channel it opens and closes,
 #                                    and anything that went wrong with one
 #
@@ -637,12 +710,14 @@ services:
       - HTTP_CONTROL_SERVER_ADDRESS=127.0.0.1:8000
 
   # ---------------------------------------------------------------------------
-  # nginx. Shares the tunnel's network. Its whole configuration is the text
-  # under "configs:" at the bottom of this file.
+  # Caddy. Shares the tunnel's network. Its whole configuration is the text
+  # under "configs:" at the bottom of this file: Caddy's settings, the block
+  # written once for each provider, and the few lines that write those blocks
+  # from .env at every start.
   # ---------------------------------------------------------------------------
-  nginx:
-    image: nginx:alpine
-    container_name: iptv-nginx
+  caddy:
+    image: caddy:alpine
+    container_name: iptv-caddy
     restart: unless-stopped
     network_mode: "service:vpn"         # all its traffic goes through the tunnel
     depends_on:
@@ -656,173 +731,25 @@ services:
         required: false
       - path: stack.env
         required: false
+    # The machine's own clock setting, so the log shows your local time (the Caddy image has no time zones of its own).
     volumes:
-      # Where the proxy remembers each channel's session. Kept in a small Docker
-      # volume so that when this container is recreated (a provider was added,
-      # an update), channels that are playing carry on with the same session.
-      - hls-memory:/var/cache/nginx/hls
-      # The video servers the proxy has learned (see "entrypoint" below).
-      - video-servers:/var/lib/video-servers
+      - /etc/localtime:/etc/localtime:ro
     configs:
-      - source: proxy
-        target: /etc/nginx/conf.d/default.conf
-      - source: provider-locations
-        target: /etc/nginx/provider-locations.conf
-    # At every start: build one nginx server block per provider found in .env
-    # (any NAME with NAME_URL, NAME_PORT, NAME_USER, NAME_PASSWORD and
-    # NAME_LIVE_TV), then
-    # start nginx as usual. A provider with a missing or unusable line is
-    # skipped and named in the log; the others still start.
-    #
-    # Provider logins may contain ANY characters. Each one is percent-encoded
-    # here (letters, digits and - . _ ~ stay as they are; everything else
-    # becomes %XX), which is the form a URL needs, so nginx only ever sees
-    # safe text and the provider receives exactly the login it issued.
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        # The status page is drawn by the relay. nginx hands it the request, and
-        # lets it read this start's notes about what was found (written below).
-        cat > /etc/nginx/status.inc <<'STATUS'
-        location = /status {
-          proxy_intercept_errors off;
-          proxy_read_timeout 30s;
-          proxy_set_header Connection "";
-          proxy_set_header Host $$http_host;
-          proxy_set_header X-Hls-Provider "";
-          proxy_set_header X-Hls-Renew "";
-          proxy_set_header X-Relay-Port $$server_port;
-          proxy_set_header X-Relay-User $$easy_user;
-          proxy_set_header X-Relay-Pass $$easy_pass;
-          proxy_set_header X-Relay-Provider "";
-          proxy_set_header X-Relay-Uri "";
-          proxy_set_header X-Relay-Orig "";
-          error_page 502 504 = @status_down;
-          proxy_pass http://127.0.0.1:8197/status;
-        }
-        location = /__status.json { allow 127.0.0.1; deny all; access_log off; default_type application/json; alias /etc/nginx/status.json; }
-        location @status_down { default_type text/plain; return 503 "The status page is drawn by the iptv-relay container, and it is not answering. Look at its log: docker logs iptv-relay\n"; }
-        STATUS
-        out=/etc/nginx/conf.d/providers.conf
-        : > "$$out"
-        enc() {
-          printf '%s' "$$1" | hexdump -v -e '1/1 "%02x\n"' | while read -r h; do
-            case "$$h" in
-              2d|2e|5f|7e|3[0-9]|4[1-9a-f]|5[0-9a]|6[1-9a-f]|7[0-9a]) printf "\\x$$h" ;;
-              *) printf '%%%s' "$$(echo "$$h" | tr a-f A-F)" ;;
-            esac
-          done
-        }
-        ports="$${PROXY_PORTS:-8095-8096}"; stop=""
-        # Notes for the status page (/status): what was found, what was left out and why.
-        notes=/tmp/status-notes; rm -rf "$$notes"; mkdir -p "$$notes"; : > "$$notes/problems"; : > "$$notes/providers"
-        clean() { printf '%s' "$$1" | tr -d '"\\' | tr '\n\r\t' '   '; }
-        echo "$$ports" | grep -Eqx '[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?' || stop="PROXY_PORTS must be one port or a range like 8095-8099 (found: $$ports)"
-        [ -z "$$stop" ] && [ "$$(printf '%s' "$$PLAYER_USER$$PLAYER_PASSWORD$$ports" | wc -l)" != 0 ] && stop="PLAYER_USER, PLAYER_PASSWORD and PROXY_PORTS must each be on one line"
-        [ -z "$$stop" ] && { echo "$$PLAYER_USER" | grep -Eqx '[A-Za-z0-9_-]+' && echo "$$PLAYER_PASSWORD" | grep -Eqx '[A-Za-z0-9_-]+' || stop="PLAYER_USER and PLAYER_PASSWORD must be letters, digits, - or _ only (they are yours to choose)"; }
-        [ -z "$$stop" ] && case "$$PLAYER_USER" in live|movie|series|timeshift) stop="PLAYER_USER cannot be live, movie, series or timeshift";; esac
-        lo=$${ports%-*}; hi=$${ports#*-}; used=" "
-        [ -n "$$stop" ] && { echo "PROXY SETTINGS PROBLEM: $$stop"; printf '"%s."\n' "$$(clean "$$stop")" >> "$$notes/problems"; }
-        env | sed -n 's/^\([A-Za-z0-9_]*[a-z][A-Za-z0-9_]*\)_URL=.*/\1/p' | while read -r low; do echo "PROVIDER $$low SKIPPED: the name must be in CAPITALS"; printf '{"name":"%s","port":"","ok":false,"why":"the name must be in CAPITALS"}\n' "$$(clean "$$low")" >> "$$notes/providers"; done
-        [ -z "$$stop" ] && for name in $$(env | sed -n 's/^\([A-Z][A-Z0-9_]*\)_URL=.*/\1/p' | sort); do
-          url=$$(printenv "$${name}_URL"); port=$$(printenv "$${name}_PORT")
-          user=$$(printenv "$${name}_USER"); pass=$$(printenv "$${name}_PASSWORD")
-          bad=""
-          case "$$name" in PROXY|PLAYER|VPN|OPENVPN|WIREGUARD|SERVER|FIREWALL|DNS) bad="$$name is one of the proxy's own names; pick another";; esac
-          [ -z "$$bad" ] && { [ -n "$$url" ] && [ -n "$$port" ] && [ -n "$$user" ] && [ -n "$$pass" ] || bad="needs $${name}_URL, _PORT, _USER and _PASSWORD"; }
-          [ -z "$$bad" ] && { echo "$$port" | grep -Eqx '[1-9][0-9]{0,4}' && [ "$$port" -le 65535 ] || bad="port must be a number from 1 to 65535"; }
-          [ -z "$$bad" ] && { echo "$$url" | grep -Eqx 'https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?/?' || bad="address must be http://name or https://name, optionally :port, with nothing after it"; }
-          [ -z "$$bad" ] && case " 53 8000 8195 8197 9999 " in *" $$port "*) bad="port $$port is used inside the VPN container itself";; esac
-          [ -z "$$bad" ] && case "$$used" in *" $$port "*) bad="port $$port is already used by another provider";; esac
-          [ -z "$$bad" ] && { [ "$$port" -ge "$$lo" ] && [ "$$port" -le "$$hi" ] || bad="port $$port is outside PROXY_PORTS ($$ports)"; }
-          mode=$$(printenv "$${name}_LIVE_TV")
-          [ -z "$$bad" ] && [ "$$(printf '%s' "$$url$$port$$user$$pass$$mode" | wc -l)" != 0 ] && bad="one of its lines is broken over two lines"
-          [ -z "$$bad" ] && case "$$mode" in hls|ts) ;; *) bad="needs the line $${name}_LIVE_TV=hls if your players use HLS, or $${name}_LIVE_TV=ts if they use MPEG-TS";; esac
-          if [ -n "$$bad" ]; then echo "PROVIDER $$name SKIPPED: $$bad"; printf '{"name":"%s","port":"","ok":false,"why":"%s"}\n' "$$name" "$$(clean "$$bad")" >> "$$notes/providers"; continue; fi
-          used="$$used$$port "
-          printf 'server {\n  listen %s;\n  set $$provider  %s;\n  set $$pscheme   %s;\n  set $$acct_user "%s";\n  set $$acct_pass "%s";\n  set $$live_tv   %s;\n  include /etc/nginx/provider-locations.conf;\n}\n' \
-            "$$port" "$${url%/}" "$${url%%://*}" "$$(enc "$$user")" "$$(enc "$$pass")" "$$mode" >> "$$out"
-          echo "PROVIDER $$name on port $$port -> $${url%/}"
-          printf '{"name":"%s","port":"%s","ok":true,"mode":"%s"}\n' "$$name" "$$port" "$$mode" >> "$$notes/providers"
-          { [ -z "$$first" ] || [ "$$port" -lt "$$first" ]; } && first="$$port"
-        done
-        [ "$$used" = " " ] && echo "NO PROVIDERS STARTED. nginx is running with none: fix .env and bring the stack up again."
-        # The status page. With no provider running, one port still answers so the
-        # page can say what is wrong, and the container reports itself unhealthy.
-        : > /var/run/proxy-problem
-        if [ "$$used" = " " ]; then
-          echo "not set up" > /var/run/proxy-problem
-          first=$$(echo "$$lo" | grep -Ex '[1-9][0-9]{0,4}' || echo 8095)
-          printf 'server {\n  listen %s;\n  set $$easy_user "";\n  set $$easy_pass "";\n  include /etc/nginx/status.inc;\n  location / { default_type text/plain; return 503 "The IPTV proxy is not set up yet. Open /status on this address in a web browser to see what is missing.\\n"; }\n}\n' "$$first" >> "$$out"
-        fi
-        printf '{"problems":[%s],"providers":[%s]}\n' "$$(paste -sd, "$$notes/problems")" "$$(paste -sd, "$$notes/providers")" > /etc/nginx/status.json
-        rm -rf "$$notes"
-        echo "STATUS PAGE: open http://<this machine's address>:$$first/status in a web browser"
-        # Keep connections to the provider's video servers open, the way a player
-        # talking to them directly does. nginx only reuses connections to servers
-        # it has a line for, and no server name is written in this file: nginx
-        # notes every video server a stream actually comes from (see "video
-        # servers" in the config below) and each new name gets a line of its own.
-        # The list is kept in a small Docker volume, so after the first time a
-        # server is seen it is already known at every later start and nothing has
-        # to be re-read while someone is watching.
-        # "max_fails=0": a server is never set aside after a failed request; the
-        # next request simply tries it again, as it would with no line for it.
-        # A provider can move to new servers at any time. A server that has never
-        # been seen works the old way (a new connection for every request) until
-        # the loop below adds it: it waits for a run of channel changes to end,
-        # then has nginx re-read its settings ONCE for all the new names.
-        vs=/etc/nginx/conf.d/video-servers.conf
-        kept=/var/lib/video-servers/learned.conf
-        mkdir -p /var/lib/video-servers; touch "$$kept"
-        sed -i -E 's/ keepalive_timeout [0-9]+s; }$$/ keepalive_timeout 20s; }/' "$$kept"   # (an idle time from another version of this file)
-        # only lines of exactly the form this script writes are taken back in
-        grep -E '^upstream [A-Za-z0-9.-]+ \{ zone vs[0-9]+_[0-9]+ 64k; server [A-Za-z0-9.-]+:443 resolve max_fails=0; keepalive 8; keepalive_timeout 20s; \}$$' "$$kept" | head -n 200 > "$$vs" || true
-        nginx -t -q 2>/dev/null || : > "$$vs"                   # the kept list is unusable: start without it
-        (
-          seen=/var/run/video-servers.seen
-          : > "$$seen"
-          while sleep 5; do
-            [ -s "$$seen" ] || continue
-            new=$$(sort -u "$$seen"); : > "$$seen"
-            fresh=0
-            for h in $$new; do grep -qF "upstream $$h {" "$$vs" || fresh=1; done
-            [ "$$fresh" = 1 ] || continue
-            sleep 20                                            # let the channel changes finish
-            new=$$(printf '%s\n%s\n' "$$new" "$$(cat "$$seen")" | sort -u); : > "$$seen"
-            [ "$$(wc -l < "$$vs")" -gt 200 ] && : > "$$vs"        # far more than any provider uses: start the list over
-            cp "$$vs" "$$vs.before"; added=0
-            for h in $$new; do
-              case "$$h" in ""|*[!A-Za-z0-9.-]*|.*|-*) continue;; esac  # a plain server name and nothing else
-              case "$$h" in *[A-Za-z]*) ;; *) continue;; esac           # not a bare number address
-              grep -qF "upstream $$h {" "$$vs" && continue
-              n=$$(( $$(wc -l < "$$vs") + 1 ))
-              printf 'upstream %s { zone vs%s_%s 64k; server %s:443 resolve max_fails=0; keepalive 8; keepalive_timeout 20s; }\n' "$$h" "$$n" "$$(date +%s)" "$$h" >> "$$vs"
-              added=1
-            done
-            [ "$$added" = 1 ] || continue
-            if nginx -t -q 2>/dev/null; then cp "$$vs" "$$kept"; nginx -s reload 2>/dev/null; else cp "$$vs.before" "$$vs"; fi
-          done
-        ) &
-        # nginx itself needs none of the settings (they are in the file written
-        # above), so it starts without them.
-        # One nginx worker. The image default is one per CPU thread (20 on a
-        # 20-thread machine), and each worker keeps its own separate set of open
-        # connections to the video servers, so a stream bounced between workers
-        # kept opening new ones. A home proxy carries a handful of streams; one
-        # worker handles them all and reuses the same connections for all of them.
-        sed -i "s/^worker_processes .*/worker_processes 1;/" /etc/nginx/nginx.conf
-        exec env -i PATH="$$PATH" TZ="$${TZ:-UTC}" /docker-entrypoint.sh nginx -g 'daemon off;'
-
-    # Healthy = nginx is still inside the tunnel container's network AND the
-    # settings were usable (see the status page) AND it answers. If the
-    # tunnel container was restarted underneath nginx, nginx is
-    # left in a dead network with no address of its own; then the check
-    # waits a moment for the tunnel container to be back and stops nginx, so
-    # Docker starts it again inside the tunnel's new network.
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+      - source: provider-block
+        target: /etc/caddy/provider.tmpl
+      - source: caddy-start
+        target: /start.sh
+    entrypoint: ["sh", "/start.sh"]
+    # Healthy = Caddy is still inside the tunnel container's network AND the
+    # settings were usable (see the status page) AND it answers. If the tunnel
+    # container was restarted underneath Caddy, Caddy is left in a dead network
+    # with no address of its own; then the check waits a moment for the tunnel
+    # container to be back and stops Caddy, so Docker starts it again inside
+    # the tunnel's new network.
     healthcheck:
-      test: ["CMD-SHELL", "ip -o addr show scope global | grep -q . || { sleep 12; kill 1; exit 1; }; [ ! -s /var/run/proxy-problem ] || exit 1; wget -q -T 5 -O /dev/null http://127.0.0.1:8195/healthz || exit 1"]
+      test: ["CMD-SHELL", "ip -o addr show scope global | grep -q . || { sleep 12; kill 1; exit 1; }; [ ! -s /run/iptv-proxy/problem ] || exit 1; wget -q -T 5 -O /dev/null http://127.0.0.1:$${HEALTH_PORT:-8195}/healthz || exit 1"]
       interval: 30s
       timeout: 20s
       start_period: 20s
@@ -831,12 +758,13 @@ services:
   # ---------------------------------------------------------------------------
   # The relay. Plain Python (the text under "relay" at the bottom of this file)
   # in the stock Python image, with nothing installed. It shares the tunnel's
-  # network like nginx does, so it has no other way out. nginx hands it three
-  # kinds of request: live MPEG-TS (part 6 of nginx's notes), HLS playlists
-  # (part 3b) and the status page. The top of the script says what it does
-  # with each. If it is not running, TV still plays: nginx passes live
-  # MPEG-TS to the provider itself, each reader on a connection of its own,
-  # and rewrites playlists itself.
+  # network like Caddy does, so it has no other way out. Caddy hands it live
+  # MPEG-TS (part 6), HLS playlists (parts 3 and 4), the provider's lists
+  # (player_api.php) and the status page, and asks it where a server's name
+  # really leads before fetching from a server the provider sent a player to
+  # (part 2). The top of the script says what it does with each. Movies,
+  # series, catch-up, the guide and every video piece go from Caddy to the
+  # provider directly.
   # ---------------------------------------------------------------------------
   relay:
     image: python:3-alpine
@@ -858,7 +786,7 @@ services:
       - source: relay
         target: /relay.py
     # Of everything in .env, the relay is given only the addresses of the
-    # providers that are set up (checked the way nginx checks them). No login,
+    # providers that are set up (checked the way Caddy's start checks them). No login,
     # no password and no VPN key is kept in its environment.
     command:
       - sh
@@ -866,699 +794,437 @@ services:
       - |
         list=""
         for n in $$(env | sed -n 's/^\([A-Z][A-Z0-9_]*\)_URL=.*/\1/p'); do
-          case "$$n" in PROXY|PLAYER|VPN|OPENVPN|WIREGUARD|SERVER|FIREWALL|DNS) continue;; esac
+          case "$$n" in PROXY|PLAYER|VPN|OPENVPN|WIREGUARD|SERVER|FIREWALL|DNS|RELAY|IPTV) continue;; esac
           case "$$(printenv "$${n}_LIVE_TV")" in hls|ts) ;; *) continue;; esac
           printenv "$${n}_URL" | grep -Eqx 'https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?/?' || continue
           printenv "$${n}_PORT" | grep -Eqx '[1-9][0-9]{0,4}' || continue
           [ -n "$$(printenv "$${n}_PORT")" ] && [ -n "$$(printenv "$${n}_USER")" ] && [ -n "$$(printenv "$${n}_PASSWORD")" ] || continue
           list="$$list $$(printenv "$${n}_URL")"
         done
-        exec env -i PATH="$$PATH" RELAY_PROVIDERS="$$list" python -u /relay.py
+        exec env -i PATH="$$PATH" RELAY_PROVIDERS="$$list" RELAY_PORT="$${RELAY_PORT:-8197}" python -u /relay.py
     # Healthy = still inside the tunnel container's network AND answering. As
-    # with nginx: if the tunnel was restarted underneath it, it stops so that
+    # with Caddy: if the tunnel was restarted underneath it, it stops so that
     # Docker starts it again inside the tunnel's new network.
     healthcheck:
-      test: ["CMD-SHELL", "ip -o addr show scope global | grep -q . || { sleep 12; kill 1; exit 1; }; wget -q -T 5 -O /dev/null http://127.0.0.1:8197/healthz || exit 1"]
+      test: ["CMD-SHELL", "ip -o addr show scope global | grep -q . || { sleep 12; kill 1; exit 1; }; wget -q -T 5 -O /dev/null http://127.0.0.1:$${RELAY_PORT:-8197}/healthz || exit 1"]
       interval: 30s
       timeout: 20s
       start_period: 20s
       retries: 3
 
-volumes:
-  hls-memory:
-  video-servers:
 
 configs:
-  proxy:
+  # Caddy's own settings. The provider blocks are read in at the bottom.
+  caddyfile:
     content: |
-      # Names are looked up through the tunnel container's own DNS.
-      resolver 127.0.0.1 ipv6=off valid=60s;
-      resolver_timeout 5s;
-
-      # ---- Logging. Xtream addresses contain the login, so the address is never logged.
-      map $$uri $$kind {
-        default                              api;
-        ~^/__cdu/.*\.m3u8$$                   cdn-playlist;
-        ~^/__cdu/                            cdn-media;
-        ~^/__cdn/.*\.m3u8$$                   cdn-playlist;
-        ~^/__cdn/                            cdn-media;
-        ~^/__ch/.*\.m3u8$$                    hls;
-        ~^/__ch/                             hls-media;
-        ~\.m3u8$$                             hls-open;
-        ~^/(live|movie|series|timeshift)/    media;
-        /xmltv.php                           guide;
-      }
-      log_format masked '$$remote_addr [$$time_local] $$server_port $$status $$body_bytes_sent $$request_time done=$$request_completion up=$$upstream_status up_bytes=$$upstream_bytes_received up_time=$$upstream_response_time m=$$request_method rng="$$http_range" ua="$$http_user_agent" k=$$kind s=$$sess uh=$$proxy_host uct=$$upstream_connect_time';
-      # ---- Video servers. Every request that was answered by a server on the
-      # ---- usual secure port, reached by name, has that name noted in a small
-      # ---- file. The loop in "entrypoint" above reads it every few seconds and
-      # ---- gives each new server a line of its own, so nginx keeps connections
-      # ---- to it open and reuses them. Nothing here names a server.
-      map $$upstream_status $$vs_ok {
-        default        0;
-        ~(^|\s)20[06]$$  1;
-      }
-      # ---- Only video counts: a playlist, a video piece, a stream or a film.
-      # ---- Servers that only hand out pictures (logos, posters) are not noted.
-      map "$$vs_ok:$$proxy_port:$$proxy_host $$upstream_http_content_type" $$vs_note {
-        default                        0;
-        "~*^1:443:[A-Za-z0-9.-]+ (video/|audio/|application/(vnd\.apple\.mpegurl|x-mpegurl|mpegurl|octet-stream))"  1;
-      }
-      log_format vs '$$proxy_host';
-      error_log /dev/stderr crit;                # upstream error lines would print the address, login included
-
-      # ---- Plain reverse-proxy settings, the same for everything.
-      proxy_http_version 1.1;
-      proxy_set_header Connection "";
-      proxy_set_header Accept-Encoding "";      # plain text, so HLS playlists can be read (see sub_filter)
-      proxy_set_header X-Hls-Provider "";       # internal notes of the session memory; never accepted from a player
-      proxy_set_header X-Hls-Renew "";
-      proxy_set_header X-Relay-Provider "";     # internal notes for the relay; never accepted from a player
-      proxy_set_header X-Relay-Uri "";
-      proxy_set_header X-Relay-Orig "";
-      proxy_set_header X-Relay-Port "";
-      proxy_set_header X-Relay-User "";
-      proxy_set_header X-Relay-Pass "";
-      proxy_ssl_server_name on;
-      # Certificates are not checked (nginx's default). Many players do not check
-      # them either, and some providers' servers have expired or self-made ones;
-      # checking here would refuse servers that play fine without the proxy.
-      proxy_buffering off;                      # pass bytes on as they arrive
-      proxy_request_buffering off;
-      proxy_max_temp_file_size 0;
-      proxy_buffer_size 64k;
-      proxy_buffers 8 64k;
-      chunked_transfer_encoding off;            # end streams by closing, like the provider does
-      proxy_connect_timeout 10s;
-      proxy_read_timeout 60s;                   # longest gap between bytes, not stream length
-      send_timeout 60s;
-
-      # ---- 1. Redirects (MPEG-TS, movies, series, catch-up, the guide). A provider
-      # ---- answers "go to that other server". Rewrite the address so the player
-      # ---- comes back to this proxy for it: /__cdn/<scheme>/<host>/...
-      absolute_redirect off;                    # hand the player "/__cdn/..." as is, never "http://this-host/__cdn/..."
-      proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
-      proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$pscheme/$$1$$2;   # "//server/path": same http or https as the provider
-
-      # ---- An http:// address with no port is sent with :80 written out. nginx
-      # ---- hands an address with no port to a learned video server's entry of the
-      # ---- same name (see "Video servers" above), whatever its http or https, and
-      # ---- such an entry connects to port 443; so a plain http:// request to a name
-      # ---- also learned from https:// would go to 443 and fail. With :80 written
-      # ---- out, no entry matches it and it goes where it says. https:// is not
-      # ---- changed, so it still uses the learned entries.
-      map $$provider $$provider_to {
-        volatile;
-        "~*^(?<p80h>http://[^/:?]+)$$"                 $$p80h:80;
-        default                                        $$provider;
-      }
-      map $$http_x_hls_provider $$hls_provider_to {
-        volatile;
-        "~*^(?<h80h>http://[^/:?]+)$$"                 $$h80h:80;
-        default                                        $$http_x_hls_provider;
-      }
-      map $$next $$next_to {
-        volatile;
-        "~*^(?<n80h>http://[^/:?]+)(?<n80r>[/?].*)?$$" $$n80h:80$$n80r;
-        default                                        $$next;
-      }
-      map $$pbase $$pbase_to {
-        volatile;
-        "~*^(?<b80h>http://[^/:?]+)$$"                 $$b80h:80;
-        default                                        $$pbase;
-      }
-      map $$cdn_target $$cdn_to {
-        volatile;
-        "~*^(?<c80h>http://[^/:?]+)(?<c80r>[/?].*)?$$" $$c80h:80$$c80r;
-        default                                        $$cdn_target;
-      }
-      map $$cdu_to $$cdu_go {
-        volatile;
-        "~*^(?<u80h>http://[^/:?]+)(?<u80r>[/?].*)?$$" $$u80h:80$$u80r;
-        default                                        $$cdu_to;
+      # Caddy's settings for the IPTV proxy. The providers' own blocks are written at every start from .env
+      # (see "entrypoint" in the compose file) and read in at the bottom.
+      {
+      	admin off # nothing to manage from outside; settings come from this file only
+      	auto_https off # a home proxy on plain http; the providers are reached over https as they say
+      	persist_config off
+      	servers {
+      		protocols h1 # players speak plain HTTP/1.1
+      	}
+      	# Caddy's own notes: only real errors (a server that could not be reached, a broken setting). A player
+      	# hanging up in the middle of a stream (changing channel, a connection test) is normal and is not
+      	# reported. Never with the address asked for (Xtream addresses contain the login) or the headers.
+      	log default {
+      		output stderr
+      		level ERROR
+      		format filter {
+      			wrap console {
+      				time_local
+      				time_format wall_milli
+      			}
+      			request>uri delete
+      			request>headers delete
+      			request>tls delete
+      		}
+      	}
       }
 
-      # ---- 2. Where a /__cdn/ request really goes, and what it may not reach.
-      map $$request_uri $$cdn_target {
-        default "";
-        ~*^/__cdn/(?<cs>https?)/(?<ch>[^/?]+)(?<cr>/.*)$$  $$cs://$$ch$$cr;
-        ~*^/__cdn/(?<cs>https?)/(?<ch>[^/?]+)$$            $$cs://$$ch/;
-      }
-      map $$request_uri $$cdn_prefix {
-        default "";
-        ~*^(?<cp>/__cdn/https?/[^/?]+)  $$cp;
-      }
-      map $$request_uri $$cdn_scheme {
-        default http;
-        ~*^/__cdn/https/  https;
-      }
-      map $$request_uri $$cdn_forbidden {         # nothing on this machine or this network
-        default 0;
-        "~*^/__cdn/https?/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$$)|\[|[^/]*[@%])"  1;
+      # What Caddy hands the relay carries no notes about the player's address or about Caddy (the relay passes the
+      # player's own headers on to the provider for live channels and lists).
+      (relay_headers) {
+      	header_up -X-Forwarded-For
+      	header_up -X-Forwarded-Proto
+      	header_up -X-Forwarded-Host
+      	header_up -Via
       }
 
-      # ---- 2b. /__cdu/: the same as /__cdn/, for one kind of address only: a
-      # ---- "../" line from a live channel's playlist (see $$cdn_up in part 3).
-      # ---- Such an address is /__cdu/<scheme>/<server>, then 32 spare folders
-      # ---- named "__up", then one named "__top", then the playlist's real folder
-      # ---- and the "../" line itself. The player does the climbing. Climbing
-      # ---- inside the real folders leaves the spares alone (first rule below).
-      # ---- Climbing higher than the server's top folder uses up "__top" and then
-      # ---- spares, never the server's name, and what is left is counted from
-      # ---- the top folder (second rule), which is where a player talking to the
-      # ---- server directly ends up too. /__cdn/ itself is not changed in any way.
-      map $$request_uri $$cdu_target {
-        default "";
-        "~*^/__cdu/(?<ua>https?)/(?<ub>[^/?]+)(/__up){32}/__top(?<uc>/.*)$$"  $$ua://$$ub$$uc;
-        "~*^/__cdu/(?<ua>https?)/(?<ub>[^/?]+)(/__up)*(?<uc>/.*)$$"           $$ua://$$ub$$uc;
-      }
-      map $$request_uri $$cdu_server {             # the server alone
-        default "";
-        "~*^/__cdu/(?<ue>https?)/(?<uf>[^/?]+)"  $$ue://$$uf;
-      }
-      map $$request_uri $$cdu_prefix {             # the same server's ordinary /__cdn/ address
-        default "";
-        "~*^/__cdu/(?<ug>https?)/(?<ui>[^/?]+)"  /__cdn/$$ug/$$ui;
-      }
-      map $$request_uri $$cdu_scheme {
-        default http;
-        ~*^/__cdu/https/  https;
-      }
-      map $$request_uri $$cdu_forbidden {         # nothing on this machine or this network (the same list as for /__cdn/)
-        default 0;
-        "~*^/__cdu/https?/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$$)|\[|[^/]*[@%])"  1;
-      }
-      # A few players send ".." as written instead of working it out. Normally
-      # that is passed on untouched and the video server works it out, as it would
-      # without the proxy. Only when such an address climbs higher than the
-      # server's top folder (the spares are no longer all there once nginx has
-      # worked the path out) is nginx's worked-out path used instead.
-      map $$request_uri $$cdu_dots {
-        default 0;
-        "~*^/__cdu/[^?]*/\.\.?(/|\?|$$)"  1;
-      }
-      map $$uri $$cdu_state {
-        default lost;                              # climbed past the spares and the server's name: nothing left to go by
-        "~*^/__cdu/https?/[^/]+(/__up){32}/__top(/|$$)"  intact;
-        "~*^/__cdu/https?/[^/]+(/__up)*/"               over;
-      }
-      map "$$cdu_dots:$$cdu_state" $$cdu_fix {
-        default  ok;
-        "1:over" over;
-        "1:lost" lost;
+      # Toward a provider or a server it sent the player to.
+      #   args[0]: http or https, args[1]: the server (for a redirect that names no server)
+      #  - Nothing about the player or this proxy is added (no X-Forwarded-*, no Via): the provider sees the
+      #    player's own request, from the VPN. (With "compression off" in each transport below, the player's
+      #    own Accept-Encoding goes through as it is, and nothing is added or unpacked on the way.)
+      #  - 1. Redirects. A provider answers "go to that other server". The address is rewritten so the
+      #    player comes back to this proxy for it: /__cdn/<http or https>/<server>/<path>.
+      #  - Bytes are passed on as they arrive (flush_interval -1): live video must not wait in a buffer.
+      #  - Certificates are not checked. Many players do not check them either, and some providers' servers
+      #    have expired or self-made ones; checking here would refuse servers that play fine without the proxy.
+      #  - Connections to every server are kept open and reused (Caddy does that by itself, for any server, named
+      #    here or not), and an idle one is let go after 20 seconds (keepalive in each transport below).
+      (upstream) {
+      	header_up -X-Relay-Fetch
+      	header_up -X-Forwarded-For
+      	header_up -X-Forwarded-Proto
+      	header_up -X-Forwarded-Host
+      	header_up -Via
+      	header_down Location ^/([^/].*)$$ /__cdn/{args[0]}/{args[1]}/$$1
+      	header_down Location ^//(.*)$$ /__cdn/{args[0]}/$$1
+      	header_down Location (?i)^(https?)://(.*)$$ /__cdn/$$1/$$2
+      	flush_interval -1
       }
 
-      # ---- 3. HLS playlists name their video pieces without a server (or with the
-      # ---- other server's full address). Point those lines back at this proxy too.
-      # http or https of the server the playlist in hand came from (for "//server/path")
-      map "$$cdn|$$pscheme" $$cdn_rel {
-        default            /__cdn/https;
-        ~^/__cdn/http/     /__cdn/http;
-        ~^\|http$$         /__cdn/http;
-      }
-      sub_filter_types application/vnd.apple.mpegurl application/x-mpegurl application/mpegurl audio/mpegurl audio/x-mpegurl;
-      sub_filter_once off;
-      # An address written as "//server/path" means "same http or https as this
-      # playlist, on that other server". These two rules must stay ABOVE the
-      # "/..." rules below: nginx uses the first rule that fits.
-      sub_filter "\n//"           "\n$$sf_rel/";
-      sub_filter 'URI="//'        'URI="$$sf_rel/';
-      sub_filter "\n/"            "\n$$sf_cdn/";
-      sub_filter 'URI="/'         'URI="$$sf_cdn/';
-      sub_filter "\nhttps://"     "\n$$sf_https";
-      sub_filter "\nhttp://"      "\n$$sf_http";
-      sub_filter 'URI="https://'  'URI="$$sf_https';
-      sub_filter 'URI="http://'   'URI="$$sf_http';
-      # An address written as "../folder/file" means "up one folder from this
-      # playlist". A live channel's playlist is handed to the player in a made-up
-      # folder (/__ch/..., see part 4), where "up one folder" leads nowhere. For
-      # those playlists $$cdn_up is the playlist's real folder on its own server,
-      # reached through /__cdu/ (part 2b), followed by "../", so the player does
-      # the climbing on the real address ("../../x" works the same way).
-      # Everywhere else $$cdn_up is just "../" and these two rules change nothing:
-      # a playlist fetched through /__cdn/ or /__cdu/ sits at its real address
-      # already, and its "../" lines are passed on exactly as they are.
-      # Not covered, because nothing is left to go by: a line that climbs more
-      # than 32 folders higher than the server's top folder. Not rewritten, and
-      # so no better than before: "./../x", "folder/../../x" and a bare "..".
-      sub_filter "\n../"          "\n$$sf_up";
-      sub_filter 'URI="../'       'URI="$$sf_up';
-      # ---- Who does this rewriting. A player's request for a playlist is handed to
-      # ---- the relay (part 3b in provider-locations), which reads the playlist
-      # ---- line by line, the way a player does, and so copes with forms these
-      # ---- text rules would miss. The relay asks nginx for the playlist from the
-      # ---- address 127.0.0.2. For that one caller the rules above put back
-      # ---- exactly what they found ($$sf_... below), so the playlist arrives as
-      # ---- the provider wrote it, and three notes say where its addresses lead.
-      # ---- For every other caller the rules work as described: that is what a
-      # ---- player gets if the relay is not running (asked from 127.0.0.3).
-      map $$remote_addr $$pl_raw   { default 0; 127.0.0.2 1; }
-      map $$remote_addr $$pl_inner { default 0; 127.0.0.2 1; 127.0.0.3 1; }
-      map $$pl_raw $$sf_rel   { default $$cdn_rel;       1 "/"; }
-      map $$pl_raw $$sf_cdn   { default $$cdn;           1 ""; }
-      map $$pl_raw $$sf_up    { default $$cdn_up;        1 "../"; }
-      map $$pl_raw $$sf_https { default "/__cdn/https/"; 1 "https://"; }
-      map $$pl_raw $$sf_http  { default "/__cdn/http/";  1 "http://"; }
-      map $$pl_raw $$pl_note_cdn { default ""; 1 $$cdn; }
-      map $$pl_raw $$pl_note_rel { default ""; 1 $$cdn_rel; }
-      map $$pl_raw $$pl_note_up  { default ""; 1 $$cdn_up; }
-      add_header X-Pl-Cdn $$pl_note_cdn;
-      add_header X-Pl-Rel $$pl_note_rel;
-      add_header X-Pl-Up  $$pl_note_up;
-      proxy_hide_header X-Pl-Cdn;               # only nginx writes these notes: a server that sends its own is not believed
-      proxy_hide_header X-Pl-Rel;
-      proxy_hide_header X-Pl-Up;
-      # which requests are playlists a player is asking for
-      map "$$request_method:$$pl_inner:$$uri" $$pl_via {
-        default 0;
-        "~^GET:0:/__ch/.*\.m3u8$$"          1;
-        "~^GET:0:/__c(dn|du)/.*\.m3u8$$"    1;
+      # The containers' health check asks here.
+      http://127.0.0.1:{$$HEALTH_PORT:8195} {
+      	respond /healthz 200
       }
 
-      # ---- 4. Live HLS: one provider session per channel.
-      # ---- Many providers start a NEW session every time a channel's address is
-      # ---- asked, and a new session ends the one before it. A player refreshes
-      # ---- that address every few seconds, and several players or a recording may
-      # ---- be on the same channel. So the proxy remembers where the provider sent
-      # ---- a channel and keeps everyone on that session: the pieces keep the same
-      # ---- addresses from one refresh to the next, and nobody ends anyone else's
-      # ---- stream. When the remembered session is gone, it is replaced once.
-      proxy_cache_path /var/cache/nginx/hls levels=1 keys_zone=hls:1m max_size=16m inactive=1m use_temp_path=off;
+      import /run/iptv-proxy/providers/*.caddy
 
-      server {                                  # the memory itself; reachable only from this container
-        listen 127.0.0.1:8195;
-        access_log off;
-        location = /healthz { return 200; }     # the container's health check
-        location / {
-          set $$cdn "";
-          set $$cdn_up "../";
-          set $$sess "-";                       # (these keep the config valid when no provider is set up)
-          set $$pscheme http;
-          proxy_redirect off;
-          proxy_buffering on;                   # needed to remember an answer; this one is only a redirect
-          proxy_cache hls;
-          proxy_cache_key "$$http_x_hls_provider$$uri";   # the channel address; a query string never names another channel
-          proxy_cache_valid 301 302 303 307 308 365d;  # only the "it is over there" answer is remembered, for as long as the channel is in use
-          proxy_cache_lock on;                  # opens arriving together wait for the first one
-          proxy_cache_lock_timeout 20s;         # ...for as long as a slow provider may take to answer; with a shorter
-          proxy_cache_lock_age 20s;             # wait, the later opens went to the provider too and ended the first session
-          proxy_cache_bypass $$http_x_hls_renew; # asked to replace a session that is gone
-          proxy_ignore_headers Cache-Control Expires Set-Cookie Vary X-Accel-Expires;
-          add_header X-Hls-Sess $$upstream_cache_status always;
-          proxy_pass $$hls_provider_to;
-        }
-      }
-
-      # ---- PROVIDERS: one server block per provider is built at start from
-      # ---- .env (see "entrypoint" above) and shares provider-locations below.
-
-  # Shared by every provider block (one per provider in .env).
-  provider-locations:
+  # The block written once for each provider in .env (the @...@ words are filled in at start).
+  provider-block:
     content: |
-      access_log /dev/stdout masked;
-      access_log /var/run/video-servers.seen vs if=$$vs_note;   # see "Video servers" above
-      set $$sess   "-";
-      set $$cdn    "";
-      set $$cdn_up "../";                     # "../" in a playlist stays "../" unless a channel-folder playlist says otherwise (see part 3)
-      set $$chmode "";
-      set $$pbase  "";
-      set $$easy_user "${PLAYER_USER}";       # for the status page, which asks each provider for its account details
-      set $$easy_pass "${PLAYER_PASSWORD}";
+      # ---- One provider: @NAME@ on port @PORT@ (written at start from .env; see "entrypoint")
+      :@PORT@ {
+      	# One line per request, written when the request ends (a live stream: when the player stops it), in local
+      	# time: who asked, which provider, what kind of request ("k"), the answer's status, its size in bytes, how
+      	# long it took in seconds, and for anything fetched from a server the provider uses, which server answered
+      	# ("server") and how many milliseconds it took to start answering ("wait_ms"). The address asked for is
+      	# left out: Xtream addresses contain the login.
+      	log {
+      		output stdout
+      		format filter {
+      			wrap console {
+      				time_local
+      				time_format wall_milli
+      			}
+      			request>uri delete
+      			request>headers delete
+      			request>tls delete
+      			request>remote_port delete
+      			request>client_ip delete
+      			request>proto delete
+      			request>host delete
+      			resp_headers delete
+      			bytes_read delete
+      			user_id delete
+      		}
+      	}
+      	log_append provider @NAME@
 
-      # ---- The address the player asked for. Normally that is the request
-      # ---- itself. A live HLS channel is handed its own folder, /__ch/<the
-      # ---- channel's address>/ (see part 4), so there the channel's address is
-      # ---- taken back out of the request.
-      set $$orig $$request_uri;
-      if ($$request_uri ~ "^(?<rp>[^?]*)(?<rq>\?.*)?$$") { set $$chmode ""; }
-      if ($$request_uri ~ "^/__ch(?<co>/.*?\.m3u8)/(?<cn>[^?]*)(?<cq>\?.*)?$$") { set $$orig $$co; set $$chmode piece; }
-      if ($$request_uri ~ "^/__ch(?<cop>/.*?\.m3u8)/__index\.m3u8(?<cqp>\?.*)?$$") { set $$orig "$$cop$$cqp"; set $$chmode playlist; }
+      	route {
+      		respond /healthz 200
 
-      # ---- 5. One easy login for everything behind this proxy. A request that
-      # ---- logs in as PLAYER_USER is sent on with the provider account of its
-      # ---- port; any other login is passed on untouched (and refused by the provider).
-      # ---- $$up_uri is the address sent to the provider: the player's own address,
-      # ---- byte for byte, with only the login swapped. $$acct_user / $$acct_pass are
-      # ---- already percent-encoded (see "entrypoint"), so any character is safe.
-      set $$up_uri $$orig;
-      # (named pieces, not $$1 $$2: nginx re-encodes numbered ones when the address contains %XX)
-      if ($$orig ~ "^/+(?<pa>live|movie|series|timeshift)/+${PLAYER_USER}/+${PLAYER_PASSWORD}/+(?<pb>.*)$$") { set $$up_uri "/$$pa/$$acct_user/$$acct_pass/$$pb"; }
-      if ($$orig ~ "^/+${PLAYER_USER}/+${PLAYER_PASSWORD}/+(?<pc>[^/?]+(\?.*)?)$$") { set $$up_uri "/$$acct_user/$$acct_pass/$$pc"; }
-      if ($$up_uri ~ "^(?<qa>[^?]*\?(.*&)?)username=${PLAYER_USER}(?<qb>(&.*)?)$$") { set $$up_uri "$${qa}username=$$acct_user$$qb"; }
-      if ($$up_uri ~ "^(?<qc>[^?]*\?(.*&)?)password=${PLAYER_PASSWORD}(?<qd>(&.*)?)$$") { set $$up_uri "$${qc}password=$$acct_pass$$qd"; }
+      		# The relay reads this start's notes (what was found in .env) from here, for the status page.
+      		@notes {
+      			path /__status.json
+      			remote_ip 127.0.0.1
+      		}
+      		handle @notes {
+      			rewrite * /status.json
+      			file_server {
+      				root /run/iptv-proxy
+      			}
+      		}
 
-      # ---- 3b. A playlist a player asks for goes to the relay to have its addresses
-      # ---- pointed back at this proxy (see "Who does this rewriting" above). If the
-      # ---- relay is not running, nginx does it itself, as it always has.
-      recursive_error_pages on;                 # so that @pl_relay can step on to @pl_plain
-      error_page 418 = @pl_relay;
-      if ($$pl_via) { return 418; }
-      location @pl_relay {
-        sub_filter_types application/x-nothing;   # the relay's answer is finished: the rules above must not run over it again,
-        chunked_transfer_encoding on;             # and the player's connection stays open for the next refresh
-        proxy_intercept_errors off;
-        proxy_redirect off;
-        proxy_set_header Connection "";
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Hls-Provider "";
-        proxy_set_header X-Hls-Renew "";
-        proxy_set_header X-Relay-Orig $$request_uri;
-        proxy_set_header X-Relay-Port $$server_port;
-        proxy_connect_timeout 2s;
-        proxy_read_timeout 35s;                   # a little longer than the relay itself waits for a playlist; then nginx does it alone
-        proxy_set_header X-Relay-Provider "";
-        proxy_set_header X-Relay-Uri "";
-        proxy_set_header X-Relay-User "";
-        proxy_set_header X-Relay-Pass "";
-        error_page 502 504 = @pl_plain;
-        set $$pl_to http://127.0.0.1:8197/pl;   # (written this way because nginx wants it so in a named location)
-        proxy_pass $$pl_to;
-      }
-      location @pl_plain {
-        sub_filter_types application/x-nothing;   # rewritten once already, by the request this one hands on to
-        chunked_transfer_encoding on;
-        proxy_intercept_errors off;
-        proxy_redirect off;
-        proxy_set_header Connection "";
-        proxy_set_header Host $$http_host;
-        proxy_set_header X-Hls-Provider "";
-        proxy_set_header X-Hls-Renew "";
-        proxy_bind 127.0.0.3;
-        proxy_pass http://127.0.0.1:$$server_port$$request_uri;
-      }
-      location = /healthz { access_log off; return 200; }
-      location / { proxy_pass $$provider_to$$up_uri; }
+      		# ---- 5. One easy login for everything behind this proxy. A request that logs in as
+      		# ---- PLAYER_USER is sent on with this provider's account; any other login is passed on
+      		# ---- untouched (and refused by the provider).
+      		@login_path path_regexp login_path ^/+(live|movie|series|timeshift)/+@PU@/+@PP@/+(.*)$$
+      		rewrite @login_path /{re.login_path.1}/{env.IPTV_@NAME@_U}/{env.IPTV_@NAME@_P}/{re.login_path.2}?{query}
+      		@login_short path_regexp login_short ^/+@PU@/+@PP@/+([^/]+)$$
+      		rewrite @login_short /{env.IPTV_@NAME@_U}/{env.IPTV_@NAME@_P}/{re.login_short.1}?{query}
+      		@login_user query username=@PU@
+      		uri @login_user query username {env.IPTV_@NAME@_RU}
+      		@login_pass query password=@PP@
+      		uri @login_pass query password {env.IPTV_@NAME@_RP}
+      		vars up {uri}
+      		# A live channel's own folder (part 4): the channel's address in it, with the login swapped.
+      		@ch_any path_regexp ch_any ^/__ch(/.+?\.m3u8)/
+      		vars @ch_any up {re.ch_any.1}
+      		@ch_login path_regexp ch_login ^/__ch(/+(?:live/+)?)@PU@/+@PP@/+(.+?\.m3u8)/
+      		vars @ch_login up {re.ch_login.1}{env.IPTV_@NAME@_U}/{env.IPTV_@NAME@_P}/{re.ch_login.2}
 
-      # The guide and the API are text, often large. Let the provider compress
-      # them if the app asks (as it would directly), and keep the framing that
-      # lets the app notice a download that was cut short.
-      location = /xmltv.php {
-        proxy_read_timeout 300s;
-        chunked_transfer_encoding on;
-        proxy_set_header Connection "";
-        proxy_set_header Accept-Encoding $$http_accept_encoding;
-        proxy_set_header X-Hls-Provider "";
-        proxy_set_header X-Hls-Renew "";
-        proxy_pass $$provider_to$$up_uri;
-      }
-      # The provider's lists (channels, movies, series). They give logos and
-      # posters as full addresses, usually on other sites. Those addresses are
-      # pointed back at this proxy, so the player fetches the pictures through
-      # the VPN too. For that the list has to arrive as plain text; it is
-      # compressed again for the app if the app asks.
-      location = /player_api.php {
-        proxy_read_timeout 300s;
-        chunked_transfer_encoding on;
-        proxy_set_header Connection "";
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Hls-Provider "";
-        proxy_set_header X-Hls-Renew "";
-        gzip on;
-        gzip_types application/json text/plain;
-        gzip_proxied any;
-        gzip_min_length 1024;
-        sub_filter_types *;
-        sub_filter_once off;
-        sub_filter '"https:\/\/' '"http://$$http_host/__cdn/https/';
-        sub_filter '"http:\/\/'  '"http://$$http_host/__cdn/http/';
-        sub_filter '"https://'   '"http://$$http_host/__cdn/https/';
-        sub_filter '"http://'    '"http://$$http_host/__cdn/http/';
-        proxy_pass $$provider_to$$up_uri;
-      }
+      		# A provider's ready-made M3U playlist lists every stream at the provider's own address with
+      		# the real login, so a player using it would skip the VPN. Refused on purpose.
+      		respond /get.php 403
 
-      # ---- The status page: what is set up, what is wrong, where the VPN comes out.
-      # ---- Drawn by the relay; the few lines that hand it over are written at start
-      # ---- (see "entrypoint" above).
-      include /etc/nginx/status.inc;
+      		# ---- The status page, drawn by the relay.
+      		handle /status {
+      			reverse_proxy 127.0.0.1:@RELAY@ {
+      				header_up X-Relay-Port {http.request.local.port}
+      				header_up X-Relay-User @PU@
+      				header_up X-Relay-Pass @PP@
+      				import relay_headers
+      			}
+      		}
 
-      # ---- 6. Live MPEG-TS: one provider connection per channel here as well.
-      # ---- Part 4 keeps every HLS reader of a channel on one provider session. A
-      # ---- request for a live channel as MPEG-TS (".ts", which many recorders
-      # ---- use) would open another one, and with a provider that allows one per
-      # ---- channel the readers then end each other over and over: the picture
-      # ---- freezes every few seconds and a recording is cut to pieces.
-      # ---- Live ".ts" requests are handed to the relay (the small Python program
-      # ---- beside nginx; its text is at the bottom of this file). What it does
-      # ---- with them is set for each provider by its NAME_LIVE_TV line in .env.
-      # ---- There is no default, because the two choices suit different homes:
-      # ----   ..._LIVE_TV=hls  Your players use HLS. A ".ts" reader is given the
-      # ----                channel's HLS video, joined end to end: the relay
-      # ----                fetches the same playlist and pieces the players get,
-      # ----                from this proxy, so everyone is on one provider
-      # ----                session. Watching and recording a channel at once
-      # ----                works whichever started first. That stream is the HLS
-      # ----                one: a few seconds further behind live than the
-      # ----                provider's MPEG-TS.
-      # ----   ..._LIVE_TV=ts   Your players use MPEG-TS. The first reader of a channel
-      # ----                makes the relay open it at the provider, and every
-      # ----                reader of that channel is given the provider's own
-      # ----                bytes. The provider sees one connection however many
-      # ----                readers there are, one leaving does not disturb the
-      # ----                rest, and the connection is dropped the moment the
-      # ----                last one leaves. The one who opens a channel gets the
-      # ----                stream from its first byte; one who joins starts 10
-      # ----                seconds behind (worked out from how fast that
-      # ----                channel's video comes), on a whole packet, and is
-      # ----                handed that cushion at playing speed, so it has
-      # ----                something in hand. Opening a channel as
-      # ----                HLS while it is being read as MPEG-TS still ends one
-      # ----                of the two: that is the provider's rule, and turning
-      # ----                MPEG-TS into HLS is beyond this proxy.
-      # ---- One more thing the relay does for MPEG-TS: if the provider ends a
-      # ---- stream while people are watching, the relay asks for it again at once
-      # ---- and carries on, so the players do not each have to notice and ask
-      # ---- again by themselves. (Only for a stream that had run 30 seconds.)
-      # ---- For nginx these are ordinary proxied requests: it passes the bytes on
-      # ---- and, when the player hangs up, closes its connection to the relay,
-      # ---- which is how the relay knows a reader has gone.
-      location ~ "^/+live/+${PLAYER_USER}/+${PLAYER_PASSWORD}/+[^/]+\.ts$$" {
-        proxy_intercept_errors off;
-        proxy_read_timeout 100s;
-        proxy_set_header Connection "";
-        proxy_set_header Range "";                       # a live stream has no ranges
-        proxy_set_header X-Hls-Provider "";
-        proxy_set_header X-Hls-Renew "";
-        proxy_set_header X-Relay-Provider $$provider;    # which provider (the relay accepts only those in .env)
-        proxy_set_header X-Relay-Uri $$up_uri;           # the channel's address there, with the provider's login
-        proxy_set_header X-Relay-Orig $$orig;            # the address as the player sent it
-        proxy_set_header X-Relay-Port $$server_port;
-        proxy_set_header X-Relay-User "";
-        proxy_set_header X-Relay-Pass "";
-        proxy_connect_timeout 2s;
-        error_page 502 = @ts_plain;                      # the relay is not running: the provider directly
-        proxy_pass http://127.0.0.1:8197/$$live_tv;
-      }
-      # the short forms of a live address (no "/live/", with or without ".ts")
-      location ~ "^/+${PLAYER_USER}/+${PLAYER_PASSWORD}/+[0-9]+(\.ts)?$$" {
-        proxy_intercept_errors off;
-        proxy_read_timeout 100s;
-        proxy_set_header Connection "";
-        proxy_set_header Range "";                       # a live stream has no ranges
-        proxy_set_header X-Hls-Provider "";
-        proxy_set_header X-Hls-Renew "";
-        proxy_set_header X-Relay-Provider $$provider;    # which provider (the relay accepts only those in .env)
-        proxy_set_header X-Relay-Uri $$up_uri;           # the channel's address there, with the provider's login
-        proxy_set_header X-Relay-Orig $$orig;            # the address as the player sent it
-        proxy_set_header X-Relay-Port $$server_port;
-        proxy_set_header X-Relay-User "";
-        proxy_set_header X-Relay-Pass "";
-        proxy_connect_timeout 2s;
-        error_page 502 = @ts_plain;                      # the relay is not running: the provider directly
-        proxy_pass http://127.0.0.1:8197/$$live_tv;
-      }
-      location @ts_plain { proxy_pass $$provider_to$$up_uri; }
+      		# ---- 6. Live MPEG-TS: one provider connection per channel, shared by every reader (the relay).
+      		@live_ts vars_regexp {http.request.orig_uri.path} ^/+(live/+@PU@/+@PP@/+[^/]+\.ts|@PU@/+@PP@/+[0-9]+(\.ts)?)$$
+      		handle @live_ts {
+      			log_append k media
+      			rewrite * /@MODE@
+      			reverse_proxy 127.0.0.1:@RELAY@ {
+      				header_up X-Relay-Provider @URL@
+      				header_up X-Relay-Uri {vars.up}
+      				header_up X-Relay-Orig {http.request.orig_uri}
+      				header_up X-Relay-Port {http.request.local.port}
+      				header_up -Range
+      				import relay_headers
+      				flush_interval -1
+      				transport http {
+      					read_timeout 100s
+      				}
+      			}
+      		}
 
-      # A provider's ready-made M3U playlist lists every stream at the
-      # provider's own address with the real login, so a player using it would
-      # skip the VPN. Refused on purpose: use the Xtream login instead.
-      location = /get.php { return 403; }
+      		# ---- 3 and 4. HLS playlists and live channels' folders (the relay keeps one session per channel
+      		# ---- and points every address in a playlist back at this proxy).
+      		# (The relay's own fetch of a playlist on a video server comes back through here so that it uses the
+      		# connection Caddy keeps open to that server: from inside this container, marked X-Relay-Fetch, it is
+      		# passed straight on below instead of being handed to the relay again.)
+      		@playlist {
+      			vars_regexp {http.request.orig_uri.path} (?i)(\.m3u8$$|^/__ch/)
+      			not {
+      				remote_ip 127.0.0.1
+      				header X-Relay-Fetch 1
+      			}
+      		}
+      		handle @playlist {
+      			log_append k hls
+      			rewrite * /hl
+      			reverse_proxy 127.0.0.1:@RELAY@ {
+      				header_up X-Relay-Provider @URL@
+      				header_up X-Relay-Uri {vars.up}
+      				header_up X-Relay-Orig {http.request.orig_uri}
+      				header_up X-Relay-Port {http.request.local.port}
+      				import relay_headers
+      				transport http {
+      					read_timeout 60s
+      				}
+      			}
+      		}
 
-      # (Order matters below: nginx tries these patterns from top to bottom, so the
-      # two for a channel's own folder come before the general ".m3u8" one.)
+      		# ---- The provider's lists: logos and posters in them are pointed back at this proxy (the relay).
+      		handle /player_api.php {
+      			log_append k api
+      			rewrite * /api
+      			reverse_proxy 127.0.0.1:@RELAY@ {
+      				header_up X-Relay-Provider @URL@
+      				header_up X-Relay-Uri {vars.up}
+      				header_up X-Relay-Host {http.request.hostport}
+      				import relay_headers
+      				flush_interval -1
+      				transport http {
+      					read_timeout 330s
+      				}
+      			}
+      		}
 
-      # ---- Live HLS, the channel's playlist (the player arrives here from "the start", further down). Fetch the remembered
-      # ---- session's playlist. The player always asks the same address and always
-      # ---- gets the same session.
-      location ~ ^/__ch/.+\.m3u8/__index\.m3u8$$ {
-        chunked_transfer_encoding on;         # a playlist keeps the connection open, as the provider's own server does
-        if ($$chmode != playlist) { return 404; }
-        sub_filter_types *;
-        proxy_redirect off;
-        proxy_intercept_errors on;
-        recursive_error_pages on;
-        proxy_set_header Connection "";
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Hls-Provider $$provider;
-        proxy_set_header X-Hls-Renew "";
-        error_page 301 302 303 307 308 = @hls;
-        proxy_pass http://127.0.0.1:8195$$up_uri;
-      }
-      location @hls {
-        chunked_transfer_encoding on;         # a playlist keeps the connection open, as the provider's own server does
-        sub_filter_types *;
-        proxy_intercept_errors on;
-        recursive_error_pages on;
-        proxy_read_timeout 25s;               # long enough for a channel that is slow to start, short enough to replace one that hangs
-        set $$sess $$upstream_http_x_hls_sess;
-        set $$next $$upstream_http_location;
-        if ($$next ~ "^//") { set $$next "$$pscheme:$$next"; }        # "//server/path"
-        if ($$next ~ "^/[^/]") { set $$next "$$provider$$next"; }     # "/some/path" with no server name
-        if ($$next ~* "^https?://(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$$)|\[|[^/]*[@%])") { return 403; }
-        if ($$next ~* "^(https?)://([^/]+)") { set $$cdn "/__cdn/$$1/$$2"; }
-        if ($$next ~* "^(?<us>https?)://(?<uh>[^/?]+)(?<ud>/([^?]*/)?)") { set $$cdn_up "/__cdu/$$us/$$uh/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__top$$ud../"; }   # the playlist's real folder, for "../" lines
-        error_page 400 401 403 404 410 429 500 502 503 504 509 520 521 522 523 524 = @hls_renew;   # the remembered session is gone
-        proxy_pass $$next_to;
-      }
-      location @hls_renew {                   # open the channel again, once, and remember the new session
-        chunked_transfer_encoding on;         # a playlist keeps the connection open, as the provider's own server does
-        proxy_redirect off;
-        proxy_intercept_errors on;
-        recursive_error_pages on;
-        proxy_set_header Connection "";
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Hls-Provider $$provider;
-        proxy_set_header X-Hls-Renew 1;
-        error_page 301 302 303 307 308 = @hls_renewed;
-        proxy_pass http://127.0.0.1:8195$$up_uri;
-      }
-      location @hls_renewed {                 # whatever this one answers goes to the player
-        chunked_transfer_encoding on;         # a playlist keeps the connection open, as the provider's own server does
-        sub_filter_types *;
-        proxy_read_timeout 25s;
-        set $$cdn_up "../";                   # not the folder of the session that was just replaced
-        set $$sess $$upstream_http_x_hls_sess;
-        set $$next $$upstream_http_location;
-        if ($$next ~ "^//") { set $$next "$$pscheme:$$next"; }
-        if ($$next ~ "^/[^/]") { set $$next "$$provider$$next"; }
-        if ($$next ~* "^https?://(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$$)|\[|[^/]*[@%])") { return 403; }
-        if ($$next ~* "^(https?)://([^/]+)") { set $$cdn "/__cdn/$$1/$$2"; }
-        if ($$next ~* "^(?<us>https?)://(?<uh>[^/?]+)(?<ud>/([^?]*/)?)") { set $$cdn_up "/__cdu/$$us/$$uh/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__top$$ud../"; }   # the playlist's real folder, for "../" lines
-        proxy_pass $$next_to;
+      		# ---- 2. Everything a provider pointed at: video pieces, MPEG-TS, movies, catch-up, the guide.
+      		# ---- /__cdn/<http or https>/<server>/<path>. Never this machine or a home network.
+      		@cdn_forbidden path_regexp (?i)^/__cdn/https?/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$$)|\[|[^/]*[@%])
+      		respond @cdn_forbidden 403
+      		@cdn_other {
+      			path /__cdn/*
+      			not method GET HEAD
+      		}
+      		respond @cdn_other 405
+      		@cdn_https path_regexp cdn ^/__cdn/https/([^/?]+)(?:/(.*))?$$
+      		handle @cdn_https {
+      			log_append k cdn
+      			# Where the server's name really leads is checked first (the relay looks it up; see /check there).
+      			forward_auth 127.0.0.1:@RELAY@ {
+      				uri /check
+      				header_up X-Relay-Check {re.cdn.1}
+      			}
+      			log_append server {re.cdn.1}
+      			log_append wait_ms {http.reverse_proxy.upstream.latency_ms}
+      			map {re.cdn.1} {dial} {
+      				~^(.+:[0-9]+)$$ $${1}
+      				~^(.+)$$ $${1}:443
+      			}
+      			rewrite * /{re.cdn.2}?{query}
+      			reverse_proxy {dial} {
+      				header_up Host {re.cdn.1}
+      				import upstream https {re.cdn.1}
+      				transport http {
+      					compression off
+      					keepalive 20s
+      					tls
+      					tls_insecure_skip_verify
+      					read_timeout 60s
+      				}
+      			}
+      		}
+      		@cdn_http path_regexp cdn ^/__cdn/http/([^/?]+)(?:/(.*))?$$
+      		handle @cdn_http {
+      			log_append k cdn
+      			# Where the server's name really leads is checked first (the relay looks it up; see /check there).
+      			forward_auth 127.0.0.1:@RELAY@ {
+      				uri /check
+      				header_up X-Relay-Check {re.cdn.1}
+      			}
+      			log_append server {re.cdn.1}
+      			log_append wait_ms {http.reverse_proxy.upstream.latency_ms}
+      			map {re.cdn.1} {dial} {
+      				~^(.+:[0-9]+)$$ $${1}
+      				~^(.+)$$ $${1}:80
+      			}
+      			rewrite * /{re.cdn.2}?{query}
+      			reverse_proxy {dial} {
+      				header_up Host {re.cdn.1}
+      				import upstream http {re.cdn.1}
+      				transport http {
+      					compression off
+      					keepalive 20s
+      					read_timeout 60s
+      				}
+      			}
+      		}
+      		respond /__cdn/* 404
+      		respond /__cdu/* 404
+
+      		# ---- The guide: large, and slow for some providers to start.
+      		handle /xmltv.php {
+      			log_append k guide
+      			log_append wait_ms {http.reverse_proxy.upstream.latency_ms}
+      			reverse_proxy @URL@ {
+      				@HOSTHDR@
+      				import upstream @SCHEME@ @HOSTPORT@
+      				transport http {
+      					compression off
+      					keepalive 20s
+      					@TLS@
+      					read_timeout 300s
+      				}
+      			}
+      		}
+
+      		# ---- Everything else (movies, series, catch-up, account): straight to the provider.
+      		handle {
+      			log_append k media
+      			log_append wait_ms {http.reverse_proxy.upstream.latency_ms}
+      			reverse_proxy @URL@ {
+      				@HOSTHDR@
+      				import upstream @SCHEME@ @HOSTPORT@
+      				transport http {
+      					compression off
+      					keepalive 20s
+      					@TLS@
+      					read_timeout 60s
+      				}
+      			}
+      		}
+      	}
       }
 
-      # ---- Live HLS, the pieces: anything else asked inside a channel's folder is a
-      # ---- piece (or a further playlist) that the channel's playlist named with
-      # ---- no server and no folder. It lives next to that playlist, so fetch it
-      # ---- from the folder the channel's session is in.
-      location ~ ^/__ch/ {
-        chunked_transfer_encoding on;         # a further playlist in the channel's folder keeps the connection open too (pieces carry their length and are not affected)
-        if ($$chmode != piece) { return 404; }
-        limit_except GET HEAD { deny all; }
-        proxy_redirect off;
-        proxy_intercept_errors on;
-        recursive_error_pages on;
-        proxy_set_header Connection "";
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Hls-Provider $$provider;
-        proxy_set_header X-Hls-Renew "";
-        error_page 301 302 303 307 308 = @hls_piece;
-        proxy_pass http://127.0.0.1:8195$$up_uri;
+  # At every start: check .env, write one block per provider, start Caddy.
+  caddy-start:
+    content: |
+      # At every start: build one Caddy site per provider found in .env (any NAME with NAME_URL, NAME_PORT,
+      # NAME_USER, NAME_PASSWORD and NAME_LIVE_TV), then start Caddy. A provider with a missing or unusable
+      # line is skipped and named in the log; the others still start.
+      #
+      # Provider logins may contain ANY characters. Each one is percent-encoded for the address (letters,
+      # digits and - . _ ~ stay as they are; everything else becomes %XX) and handed to Caddy in its own
+      # variable, so the provider receives exactly the login it issued.
+      set -u
+      run=/run/iptv-proxy; rm -rf "$$run"; mkdir -p "$$run/providers"
+      relay="$${RELAY_PORT:-8197}"
+      enc() {
+        printf '%s' "$$1" | hexdump -v -e '1/1 "%02x\n"' | while read -r h; do
+          case "$$h" in
+            2d|2e|5f|7e|3[0-9]|4[1-9a-f]|5[0-9a]|6[1-9a-f]|7[0-9a]) printf "\\x$$h" ;;
+            *) printf '%%%s' "$$(echo "$$h" | tr a-f A-F)" ;;
+          esac
+        done
       }
-      location @hls_piece {
-        chunked_transfer_encoding on;
-        set $$sess $$upstream_http_x_hls_sess;
-        set $$next $$upstream_http_location;
-        if ($$next ~ "^//") { set $$next "$$pscheme:$$next"; }
-        if ($$next ~ "^/[^/]") { set $$next "$$provider$$next"; }
-        if ($$next ~* "^https?://(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$$)|\[|[^/]*[@%])") { return 403; }
-        set $$pdir "/";
-        if ($$next ~* "^https?://[^/?]+(?<nd>/[^?]*/)") { set $$pdir $$nd; }
-        if ($$next ~* "^(?<ns>https?)://(?<nh>[^/?]+)") { set $$cdn "/__cdn/$$ns/$$nh"; set $$pbase "$$ns://$$nh"; }
-        if ($$pbase = "") { return 502; }
-        set $$cn_dir "";                       # a further playlist in the channel's folder: its own real folder, for "../" lines
-        if ($$cn ~ "^(?<cnf>.*/)[^/]*$$") { set $$cn_dir $$cnf; }
-        set $$cdn_up "/__cdu/$$ns/$$nh/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__up/__top$$pdir$${cn_dir}../";
-        proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
-        proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$ns/$$1$$2;
-        proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;
-        proxy_pass $$pbase_to$$pdir$$cn$$cq;
+      ports="$${PROXY_PORTS:-8095-8096}"; stop=""
+      notes=/tmp/status-notes; rm -rf "$$notes"; mkdir -p "$$notes"; : > "$$notes/problems"; : > "$$notes/providers"
+      clean() { printf '%s' "$$1" | tr -d '"\\' | tr '\n\r\t' '   '; }
+      PLAYER_USER="$${PLAYER_USER:-}"; PLAYER_PASSWORD="$${PLAYER_PASSWORD:-}"
+      echo "$$ports" | grep -Eqx '[1-9][0-9]{0,4}(-[1-9][0-9]{0,4})?' || stop="PROXY_PORTS must be one port or a range like 8095-8099 (found: $$ports)"
+      [ -z "$$stop" ] && [ "$$(printf '%s' "$$PLAYER_USER$$PLAYER_PASSWORD$$ports" | wc -l)" != 0 ] && stop="PLAYER_USER, PLAYER_PASSWORD and PROXY_PORTS must each be on one line"
+      [ -z "$$stop" ] && { echo "$$PLAYER_USER" | grep -Eqx '[A-Za-z0-9_-]+' && echo "$$PLAYER_PASSWORD" | grep -Eqx '[A-Za-z0-9_-]+' || stop="PLAYER_USER and PLAYER_PASSWORD must be letters, digits, - or _ only (they are yours to choose)"; }
+      [ -z "$$stop" ] && case "$$PLAYER_USER" in live|movie|series|timeshift) stop="PLAYER_USER cannot be live, movie, series or timeshift";; esac
+      lo=$${ports%-*}; hi=$${ports#*-}; used=" "; first=""
+      [ -n "$$stop" ] && { echo "PROXY SETTINGS PROBLEM: $$stop"; printf '"%s."\n' "$$(clean "$$stop")" >> "$$notes/problems"; }
+      env | sed -n 's/^\([A-Za-z0-9_]*[a-z][A-Za-z0-9_]*\)_URL=.*/\1/p' | while read -r low; do echo "PROVIDER $$low SKIPPED: the name must be in CAPITALS"; printf '{"name":"%s","port":"","ok":false,"why":"the name must be in CAPITALS"}\n' "$$(clean "$$low")" >> "$$notes/providers"; done
+      for name in $$( [ -z "$$stop" ] && env | sed -n 's/^\([A-Z][A-Z0-9_]*\)_URL=.*/\1/p' | sort ); do
+        url=$$(printenv "$${name}_URL"); port=$$(printenv "$${name}_PORT" || true)
+        user=$$(printenv "$${name}_USER" || true); pass=$$(printenv "$${name}_PASSWORD" || true)
+        mode=$$(printenv "$${name}_LIVE_TV" || true)
+        bad=""
+        case "$$name" in PROXY|PLAYER|VPN|OPENVPN|WIREGUARD|SERVER|FIREWALL|DNS|RELAY|IPTV) bad="$$name is one of the proxy's own names; pick another";; esac
+        [ -z "$$bad" ] && { [ -n "$$url" ] && [ -n "$$port" ] && [ -n "$$user" ] && [ -n "$$pass" ] || bad="needs $${name}_URL, _PORT, _USER and _PASSWORD"; }
+        [ -z "$$bad" ] && { echo "$$port" | grep -Eqx '[1-9][0-9]{0,4}' && [ "$$port" -le 65535 ] || bad="port must be a number from 1 to 65535"; }
+        [ -z "$$bad" ] && { echo "$$url" | grep -Eqx 'https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?/?' || bad="address must be http://name or https://name, optionally :port, with nothing after it"; }
+        [ -z "$$bad" ] && case " 53 8000 $${HEALTH_PORT:-8195} $$relay 9999 " in *" $$port "*) bad="port $$port is used inside the VPN container itself";; esac
+        [ -z "$$bad" ] && case "$$used" in *" $$port "*) bad="port $$port is already used by another provider";; esac
+        [ -z "$$bad" ] && { [ "$$port" -ge "$$lo" ] && [ "$$port" -le "$$hi" ] || bad="port $$port is outside PROXY_PORTS ($$ports)"; }
+        [ -z "$$bad" ] && [ "$$(printf '%s' "$$url$$port$$user$$pass$$mode" | wc -l)" != 0 ] && bad="one of its lines is broken over two lines"
+        [ -z "$$bad" ] && case "$$mode" in hls|ts) ;; *) bad="needs the line $${name}_LIVE_TV=hls if your players use HLS, or $${name}_LIVE_TV=ts if they use MPEG-TS";; esac
+        [ -z "$$bad" ] && case "$$user$$pass" in */*) bad="its username or password contains a slash (/), which Caddy cannot pass on inside an address";; esac
+        if [ -n "$$bad" ]; then echo "PROVIDER $$name SKIPPED: $$bad"; printf '{"name":"%s","port":"","ok":false,"why":"%s"}\n' "$$name" "$$(clean "$$bad")" >> "$$notes/providers"; continue; fi
+        used="$$used$$port "
+        base="$${url%/}"; scheme="$${base%%://*}"; hostport="$${base#*://}"
+        export "IPTV_$${name}_U=$$(enc "$$user")" "IPTV_$${name}_P=$$(enc "$$pass")" "IPTV_$${name}_RU=$$user" "IPTV_$${name}_RP=$$pass"
+        tls=""; hosthdr="header_up Host {upstream_hostport}"   # (over https Caddy sends the provider its own name by itself)
+        [ "$$scheme" = https ] && { tls="tls_insecure_skip_verify"; hosthdr=""; }
+        sed -e "s|@NAME@|$$name|g" -e "s|@PORT@|$$port|g" -e "s|@URL@|$$base|g" -e "s|@SCHEME@|$$scheme|g" \
+            -e "s|@HOSTPORT@|$$hostport|g" -e "s|@MODE@|$$mode|g" -e "s|@PU@|$$PLAYER_USER|g" -e "s|@PP@|$$PLAYER_PASSWORD|g" \
+            -e "s|@RELAY@|$$relay|g" -e "s|@TLS@|$$tls|g" -e "s|@HOSTHDR@|$$hosthdr|g" /etc/caddy/provider.tmpl > "$$run/providers/$$name.caddy"
+        echo "PROVIDER $$name on port $$port -> $$base"
+        printf '{"name":"%s","port":"%s","ok":true,"mode":"%s"}\n' "$$name" "$$port" "$$mode" >> "$$notes/providers"
+        { [ -z "$$first" ] || [ "$$port" -lt "$$first" ]; } && first="$$port"
+      done
+      # With no provider running, one port still answers so the status page can say what is wrong, and the
+      # container reports itself unhealthy.
+      : > "$$run/problem"
+      if [ "$$used" = " " ]; then
+        echo "NO PROVIDERS STARTED. Caddy is running with none: fix .env and bring the stack up again."
+        echo "not set up" > "$$run/problem"
+        first=$$(echo "$$lo" | grep -Ex '[1-9][0-9]{0,4}' || echo 8095)
+        cat > "$$run/providers/none.caddy" <<EOF
+      :$$first {
+      	@notes {
+      		path /__status.json
+      		remote_ip 127.0.0.1
+      	}
+      	handle @notes {
+      		rewrite * /status.json
+      		file_server {
+      			root /run/iptv-proxy
+      		}
+      	}
+      	handle /status {
+      		reverse_proxy 127.0.0.1:$$relay {
+      			header_up X-Relay-Port $$first
+      			header_up -X-Relay-User
+      			header_up -X-Relay-Pass
+      		}
+      	}
+      	respond "The IPTV proxy is not set up yet. Open /status on this address in a web browser to see what is missing." 503
       }
-
-      # ---- Live HLS, the start: the channel is opened. Ask the memory where this
-      # ---- channel's session is. If the provider sends the channel to another
-      # ---- server (most do), give the channel a folder of its own on this proxy
-      # ---- and send the player there. A playlist may name its pieces with no
-      # ---- folder at all ("chunk_123.ts"); the player then asks for them inside
-      # ---- that same folder, and "the pieces" above knows which channel they belong to.
-      # ---- If the provider answers with the playlist itself, it is passed on as is.
-      location ~ \.m3u8$$ {
-        chunked_transfer_encoding on;         # a playlist keeps the connection open, as the provider's own server does
-        sub_filter_types *;                   # a playlist is rewritten whatever type the provider labels it
-        proxy_redirect off;
-        proxy_intercept_errors on;
-        recursive_error_pages on;
-        proxy_set_header Connection "";
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Hls-Provider $$provider;
-        proxy_set_header X-Hls-Renew "";
-        error_page 301 302 303 307 308 = @hls_open;
-        proxy_pass http://127.0.0.1:8195$$up_uri;
-      }
-      location @hls_open {
-        set $$sess $$upstream_http_x_hls_sess;
-        return 302 /__ch$$rp/__index.m3u8$$rq;
-      }
-
-      # Everything a provider pointed at: video pieces, MPEG-TS, movies, the guide.
-      location ^~ /__cdn/ {
-        set $$cdn $$cdn_prefix;
-        set $$cdn_s $$cdn_scheme;
-        if ($$cdn_forbidden) { return 403; }
-        if ($$cdn_target = "") { return 404; }
-        limit_except GET HEAD { deny all; }   # players only ever fetch
-        proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
-        proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$cdn_s/$$1$$2;
-        proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;   # "go to /some/path" on the same server
-        proxy_pass $$cdn_to;
-
-        # A playlist fetched from the other server: rewritten whatever type it is labelled.
-        location ~ \.m3u8$$ {
-          chunked_transfer_encoding on;         # a playlist keeps the connection open, as the provider's own server does
-          sub_filter_types *;
-          set $$cdn $$cdn_prefix;
-          set $$cdn_s $$cdn_scheme;
-          if ($$cdn_forbidden) { return 403; }
-          if ($$cdn_target = "") { return 404; }
-          limit_except GET HEAD { deny all; }
-          proxy_pass $$cdn_to;
-        }
-      }
-
-      # A "../" line from a live channel's playlist (see part 2b). The same as
-      # /__cdn/ above in every other way.
-      location ^~ /__cdu/ {
-        set $$cdn $$cdu_prefix;
-        set $$cdn_s $$cdu_scheme;
-        set $$cdu_to $$cdu_target;
-        if ($$cdu_forbidden) { return 403; }
-        if ($$cdu_target = "") { return 404; }
-        limit_except GET HEAD { deny all; }
-        proxy_redirect ~*^(https?)://([^/]+)(/.*)?$$ /__cdn/$$1/$$2$$3;
-        proxy_redirect ~^//([^/]+)(/.*)?$$ /__cdn/$$cdn_s/$$1$$2;
-        proxy_redirect ~^(/[^/].*)$$ $$cdn$$1;
-        if ($$cdu_fix = lost) { return 404; }
-        if ($$cdu_fix = over) { set $$cdu_to $$cdu_server; rewrite "(?i)^/__cdu/https?/[^/]+(/__up)*(?<dn>/.*)$$" $$dn break; }   # ".." as written, climbing too high: nginx's worked-out path, counted from the top folder
-        proxy_pass $$cdu_go;
-
-        location ~ \.m3u8$$ {
-          chunked_transfer_encoding on;
-          sub_filter_types *;
-          set $$cdn $$cdu_prefix;
-          set $$cdn_s $$cdu_scheme;
-          set $$cdu_to $$cdu_target;
-          if ($$cdu_forbidden) { return 403; }
-          if ($$cdu_target = "") { return 404; }
-          limit_except GET HEAD { deny all; }
-          if ($$cdu_fix = lost) { return 404; }
-          if ($$cdu_fix = over) { set $$cdu_to $$cdu_server; rewrite "(?i)^/__cdu/https?/[^/]+(/__up)*(?<dn>/.*)$$" $$dn break; }
-          proxy_pass $$cdu_go;
-        }
-      }
+      EOF
+      fi
+      printf '{"problems":[%s],"providers":[%s]}\n' "$$(paste -sd, "$$notes/problems")" "$$(paste -sd, "$$notes/providers")" > "$$run/status.json"
+      rm -rf "$$notes"
+      echo "STATUS PAGE: open http://<this machine's address>:$$first/status in a web browser"
+      # Caddy is given only what it needs: the logins it sends on (IPTV_...), not the rest of .env (VPN keys and so on).
+      for v in $$(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
+        case "$$v" in PATH|HOME|XDG_*|HEALTH_PORT|IPTV_*) ;; *) unset "$$v" ;; esac   # (not TZ: Caddy reads /etc/localtime)
+      done
+      exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 
   # The relay (see the "relay" service above). Plain Python, standard library only.
   relay:
     content: |
-      # The relay. One small program that does the jobs plain nginx settings cannot:
+      # The relay. One small program that does the jobs a plain reverse proxy cannot:
       #
       #   /ts      Share one provider MPEG-TS stream between every reader of a channel.
       #            The first reader of a channel makes the relay open it at the
@@ -1569,26 +1235,29 @@ configs:
       #   /hls     Give a reader that asks for MPEG-TS (many recorders do) the channel's
       #            HLS video instead, joined end to end, so that it shares the one HLS
       #            session your players are on and does not open a second one.
-      #   /pl      Point the addresses inside an HLS playlist back at this proxy, so the
-      #            player fetches every piece through the VPN. nginx fetches the
-      #            playlist (and keeps doing all the network work); the relay only
-      #            reads it line by line and rewrites the addresses.
+      #   /hl      HLS playlists: keep ONE provider session per live channel, and point
+      #            every address inside a playlist back at this proxy, so the player
+      #            fetches every piece through the VPN.
+      #   /api     The provider's lists (player_api.php): point the logos and posters in
+      #            them back at this proxy, so pictures come through the VPN too.
+      #   /check   Before Caddy connects to a server named in a /__cdn/ address, say
+      #            whether that name leads to this machine or a home network.
       #   /status  Draw the status page: what is set up, what is wrong, and where the
       #            VPN comes out.
       #
-      # nginx is the only thing that sends it requests (it listens on 127.0.0.1). It
+      # Caddy is the only thing that sends it requests (it listens on 127.0.0.1). It
       # connects to the providers named in .env and the servers they redirect to, to
-      # nginx in this stack, and, for the status page only, to ipinfo.io to learn
+      # Caddy in this stack, and, for the status page only, to ipinfo.io to learn
       # where the VPN comes out. It keeps the newest 15 seconds or so of each open channel in memory
       # (never less than 12 MB of it, never more than 64 MB).
-      import asyncio, html, http, ipaddress, json, os, re, signal, socket, ssl, sys, time
+      import asyncio, html, http, ipaddress, json, os, re, signal, socket, ssl, sys, time, zlib
       from collections import deque
       from urllib.parse import quote, urlsplit, urljoin
 
       if sys.version_info < (3, 12):   # older asyncio can lose a cancel inside wait_for and leave a provider connection open
           raise SystemExit('RELAY: needs Python 3.12 or newer')
 
-      PORT = 8197
+      PORT = int(os.environ.get('RELAY_PORT', '8197'))
       # A reader that joins a channel already open starts JOIN_SECONDS behind live: that much of the
       # newest video is its cushion, kept here and handed on at playing speed (see join), so it has
       # something in hand when the provider pauses, as a player on a connection of its own has from
@@ -1624,7 +1293,7 @@ configs:
       FAR_BEHIND = 64 * 1024 * 1024
       CONNECT_WAIT = 10             # seconds for a server to accept a connection
       HEADER_WAIT = 20              # seconds for a server to send each line of its answer's heading
-      PLAYLIST_WAIT = 30            # the same for a playlist asked of nginx: longer than nginx's own wait for the provider
+      PLAYLIST_WAIT = 30            # the same for a playlist
       START_WAIT = 60               # seconds a reader waits for a channel's first video
       QUIET_WAIT = 60               # seconds a stream may send nothing before it is given up on
       HEADER_LINES = 100            # an answer's heading may not be longer than this
@@ -1636,12 +1305,12 @@ configs:
       def say(msg):                 # the relay's log lines never hold an address or a login
           print('RELAY: ' + msg, flush=True)
 
-      # The providers this relay may connect to: the addresses nginx was given (see the service's
+      # The providers this relay may connect to: the addresses Caddy was given (see the service's
       # "command" in the compose file, which passes on those and nothing else from .env).
       PROVIDERS = set(u.rstrip('/') for u in os.environ.get('RELAY_PROVIDERS', '').split() if u.lower().startswith(('http://', 'https://')))
 
       TLS = ssl.create_default_context()
-      TLS.check_hostname = False    # certificates are not checked, the same as in nginx (see the notes there)
+      TLS.check_hostname = False    # certificates are not checked, the same as in Caddy (see the notes there)
       TLS.verify_mode = ssl.CERT_NONE
       CHECKED = ssl.create_default_context()   # for the status page's one lookup outside (where the VPN comes out)
 
@@ -1707,7 +1376,7 @@ configs:
                   shut(w)
                   onward = urljoin(url, headers['location'])
                   if stay and urlsplit(onward).netloc != u.netloc:
-                      raise Refused(502)                # (a fetch from nginx in this stack is never sent elsewhere)
+                      raise Refused(502)                # (a fetch from the proxy in this stack is never sent elsewhere)
                   return await fetch(onward, agent, hops + 1, guard, tls, None, True, stay, wait)
               return status, headers, r, w
           except ValueError:        # a line far too long to be an answer's heading
@@ -2051,8 +1720,8 @@ configs:
           return source
 
       # ---- where a /hls channel's video comes from: the channel's HLS pieces, one after another.
-      # Everything is fetched from nginx in this stack, at the same addresses the players use, so the
-      # reader shares the players' one provider session (see "session memory" in the nginx notes).
+      # Everything is fetched from the proxy in this stack, at the same addresses the players use, so the
+      # reader shares the players' one provider session (see "one provider session per live channel" below).
       class NotHls(Exception):
           pass
 
@@ -2262,13 +1931,13 @@ configs:
           return source
 
       # ---------------------------------------------------------------------------
-      # Requests from nginx
+      # Requests from Caddy
       # ---------------------------------------------------------------------------
       # What a player sent that is not passed on to the provider: what belongs to one connection, and this proxy's own notes.
       SKIP = re.compile(r'^(host|connection|keep-alive|proxy-.*|te|trailer|transfer-encoding|upgrade|content-length'
-                        r'|range|if-range|accept-encoding|x-relay-.*|x-hls-.*|x-real-ip|x-forwarded-.*)$$', re.I)
+                        r'|range|if-range|accept-encoding|via|x-relay-.*|x-hls-.*|x-real-ip|x-forwarded-.*)$$', re.I)
       HEAD_OK = b'HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n'
-      OPEN = set()                                      # every connection from nginx that is open now
+      OPEN = set()                                      # every connection from Caddy that is open now
 
       def answer(w, status, text=b'', kind='text/plain', more=''):
           try:
@@ -2291,93 +1960,334 @@ configs:
           return path + ' ' + provider + ' ' + '/'.join(parts)
 
       # ---------------------------------------------------------------------------
-      # HLS playlists: every address in one is pointed back at this proxy
+      # HLS: playlists, and ONE provider session per live channel
       # ---------------------------------------------------------------------------
-      # nginx fetches the playlist from the provider exactly as before (same session, same connections).
-      # Asked from the address RAW below, it hands the playlist over as the provider wrote it, with three
-      # notes saying where this playlist's addresses lead:
-      #   X-Pl-Cdn   this proxy's address for the server the playlist came from     (for "/path")
-      #   X-Pl-Rel   the same, for an address written without http or https         (for "//server/path")
-      #   X-Pl-Up    this proxy's address for the playlist's own folder, one level up (for "../path")
-      # A full address (http://server/path) needs no note. An address with none of these beginnings is
-      # next to the playlist itself and is left as it is.
-      RAW = '127.0.0.2'
+      # Every address inside a playlist is pointed back at this proxy as /__cdn/<http or https>/<server>/<path>,
+      # worked out the way a player works it out (relative to where the playlist really came from), so the
+      # player fetches every piece through the VPN and Caddy passes those requests on.
+      #
+      # Many providers start a NEW session every time a live channel's address is asked, and a new session ends
+      # the one before it. A player asks again every few seconds, and several players or a recording may be on
+      # one channel. So the first time a channel is opened, the relay remembers where the provider sent it, and
+      # hands the player a folder of its own on this proxy, /__ch/<the channel's address>/__index.m3u8. Every
+      # later look at that playlist goes to the remembered session; the provider is not asked again. If the
+      # remembered session has gone (an error, or no answer), the channel is opened again ONCE and the new session
+      # remembered. A channel nobody has asked about for a minute is forgotten.
       URI_IN_TAG = re.compile(r'(URI=")([^"]*)(")', re.I)
+      SESSION_IDLE = 60                                 # seconds a remembered session is kept after its last use
+      SESSION_LOCK_WAIT = 20                            # how long later opens of a channel wait for the first one
+      RENEW_ON = {400, 401, 403, 404, 410, 429, 500, 502, 503, 504, 509, 520, 521, 522, 523, 524}
+      SESSIONS = {}                                     # channel -> {'loc': where the provider sent it, 'final': the playlist's real address, 'used': ...}
+      LOCKS = {}
 
-      def rewrite_playlist(text, cdn, rel, up):
+      def cdn_address(url):
+          """This proxy's address for a full http(s) address; None for anything else."""
+          u = urlsplit(url)
+          if u.scheme not in ('http', 'https') or not u.netloc:
+              return None
+          return '/__cdn/%s/%s%s%s' % (u.scheme, u.netloc, u.path or '/', '?' + u.query if u.query else '')
+
+      HOME = 'http://home.invalid'                     # stands for "this proxy, at the address the player asked"
+
+      def rewrite_playlist(text, base, home=None):
+          """Every address in the playlist, made absolute against base, then pointed back at this proxy.
+          With home (the player's own path), a playlist the provider answered directly: an address on the
+          provider's own server is resolved against the player's path instead, so it goes back through this
+          proxy with the easy login (swapped on the way out) and the real login is never written into it."""
+          origin = urlsplit(base)[:2]
           def move(u):
-              start = u[:8].lower()
-              if start.startswith('https://'):
-                  return '/__cdn/https/' + u[8:]
-              if start.startswith('http://'):
-                  return '/__cdn/http/' + u[7:]
-              if u.startswith('//'):
-                  return rel + '/' + u[2:]
-              if u.startswith('/'):
-                  return cdn + u
-              if u.startswith('../'):
-                  return up + u[3:]
-              return u
+              full = urljoin(base, u.strip())
+              if home is not None and urlsplit(full)[:2] == origin and not re.match(r'(?i)^[a-z][a-z0-9+.-]*:', u.strip()):
+                  mine = urlsplit(urljoin(HOME + home, u.strip()))
+                  return (mine.path or '/') + ('?' + mine.query if mine.query else '')
+              full = cdn_address(full)
+              return full if full else u
           def in_tags(line):
               return URI_IN_TAG.sub(lambda m: m.group(1) + move(m.group(2)) + m.group(3), line)
           out = []
           for number, line in enumerate(text.split('\n')):
-              core = line.lstrip(' \t')
-              if number == 0 or not core.strip():
+              core = line.strip()
+              if number == 0 or not core:
                   out.append(line)
               elif core.startswith('#'):                # a tag: addresses sit in URI="..."
                   out.append(in_tags(line))
               else:                                     # a line that is an address
-                  moved = move(core)
-                  out.append(in_tags(moved if moved != core else line))   # (a line that is not moved is left exactly as it was)
+                  out.append(move(core) + ('\r' if line.endswith('\r') else ''))
           return '\n'.join(out)
 
-      # What is passed between player and server on a playlist, either way: everything except what belongs
-      # to one connection and this proxy's own notes.
-      PL_SKIP = re.compile(r'^(host|connection|keep-alive|proxy-.*|te|trailer|transfer-encoding|upgrade|content-length'
-                           r'|range|if-range|content-range|accept-ranges|x-accel-.*|server|date|x-relay-.*|x-hls-.*|x-pl-.*)$$', re.I)
+      # What is passed between player and server on a playlist, either way: everything except what belongs to
+      # one connection and this proxy's own notes.
+      PL_SKIP = re.compile(r'^(host|connection|keep-alive|proxy-.*|te|trailer|transfer-encoding|upgrade|content-length|content-encoding'
+                           r'|range|if-range|content-range|accept-ranges|accept-encoding|x-accel-.*|server|date|via'
+                           r'|x-relay-.*|x-hls-.*|x-pl-.*|x-real-ip|x-forwarded-.*)$$', re.I)
       HLS_SEEN = {}                                     # channels whose playlist a player has just asked for (for the status page)
 
-      async def playlist(w, h, raw):
-          port, orig = h.get('x-relay-port', ''), h.get('x-relay-orig', '')
-          if not port.isdigit() or not orig.startswith('/'):
-              return answer(w, 400)
-          asked = [nv for nv in raw if not PL_SKIP.match(nv[0])]
-          status, headers, r, up = await fetch('http://127.0.0.1:%s%s' % (port, orig), asked, guard=False, source=RAW, follow=False, wait=PLAYLIST_WAIT)
-          if headers.get('content-encoding', '').strip().lower() not in ('', 'identity'):
-              shut(up)
-              raise OSError('compressed')               # it cannot be read here: with no answer from here, nginx serves it by its own rules
+      def is_private_url(url):
+          host = urlsplit(url).hostname or ''
+          try:
+              return private(host)
+          except ValueError:
+              return host.lower() == 'localhost'
+
+      async def fetch_to_end(url, agent, guard=True, wait=HEADER_WAIT):
+          """fetch(), following redirects here, and saying where the answer really came from."""
+          for hop in range(10):
+              if guard and is_private_url(url):
+                  raise Refused(403)
+              status, headers, r, w = await fetch(url, agent, hops=1, guard=guard, follow=False, wait=wait)
+              if status in (301, 302, 303, 307, 308) and headers.get('location'):
+                  shut(w)
+                  url = urljoin(url, headers['location'])
+                  continue
+              return status, headers, r, w, url
+          raise Refused(502)
+
+      def real_address(local):
+          """The real address behind this proxy's /__cdn/<scheme>/<server>/<path> (None for anything else)."""
+          m = re.match(r'^/__cdn/(https?)/([^/?]+)(/[^?]*)?(\?.*)?$$', urlsplit(local).path + ('?' + urlsplit(local).query if urlsplit(local).query else ''), re.I)
+          return '%s://%s%s%s' % (m.group(1).lower(), m.group(2), m.group(3) or '/', m.group(4) or '') if m else None
+
+      async def fetch_via_proxy(url, agent, port, wait=PLAYLIST_WAIT):
+          """A playlist on a video server, fetched through Caddy at /__cdn/..., so it rides on the connection Caddy
+          keeps open to that server (a new encrypted connection for every look at a live playlist, every few seconds,
+          is what makes players stutter). The address is checked here first, name looked up, exactly as a direct
+          fetch would be. Returns what fetch_to_end returns, with the real address of where the answer came from."""
+          for hop in range(10):
+              u = urlsplit(url)
+              if u.scheme not in ('http', 'https') or not u.hostname or '@' in u.netloc or is_private_url(url):
+                  raise Refused(403)
+              try:
+                  ipaddress.ip_address(u.hostname)
+              except ValueError:                        # a name: where it really leads must not be this machine or a home network
+                  found = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(u.hostname, u.port or (443 if u.scheme == 'https' else 80), type=socket.SOCK_STREAM), CONNECT_WAIT)
+                  if any(private(f[4][0]) for f in found):
+                      raise Refused(403)
+              status, headers, r, w = await fetch('http://127.0.0.1:%s%s' % (port, cdn_address(url)), agent + [('X-Relay-Fetch', '1')],
+                                                  guard=False, follow=False, wait=wait)
+              if status in (301, 302, 303, 307, 308) and headers.get('location'):
+                  shut(w)
+                  nxt = urljoin('http://127.0.0.1:%s%s' % (port, cdn_address(url)), headers['location'])
+                  url = real_address(urlsplit(nxt).path + ('?' + urlsplit(nxt).query if urlsplit(nxt).query else '')) if urlsplit(nxt).netloc == '127.0.0.1:%s' % port else nxt
+                  if not url:
+                      raise Refused(502)
+                  continue
+              return status, headers, r, w, url
+          raise Refused(502)
+
+      async def read_small(r, headers, w, limit=4 * 1024 * 1024, wait=PLAYLIST_WAIT):
           try:
               data = b''
-              async for piece in body(r, headers, PLAYLIST_WAIT):
+              async for piece in body(r, headers, wait):
                   data += piece
-                  # Not a playlist after all (some providers serve other things at a playlist's address), or
-                  # too big to be handled here: step aside. With no answer from here, nginx serves it itself.
-                  if len(data) > 1024 * 1024 or (status == 200 and len(data) >= 1024 and b'#EXTM' not in data[:1024]):
-                      raise OSError('not a playlist for the relay')
+                  if len(data) > limit:
+                      raise OSError('too large')
+              return data
           finally:
-              shut(up)
-          if b'#EXTM' in data[:1024]:
-              if data.count(b'\n') > 20000:
-                  raise OSError('too many lines')
-              # latin-1 both ways, so every byte outside an address comes out as it went in
-              text = rewrite_playlist(data.decode('latin-1'), headers.get('x-pl-cdn', ''), headers.get('x-pl-rel', '/__cdn/https'),
-                                      headers.get('x-pl-up', '../'))
-              if status == 200:
-                  m = re.match(r'^/__ch(/.+?\.m3u8)/', orig)
-                  if m:
-                      HLS_SEEN[port + m.group(1)] = time.monotonic()
-                      if len(HLS_SEEN) > 300:
-                          for k in [k for k, t in HLS_SEEN.items() if time.monotonic() - t > 30]:
-                              del HLS_SEEN[k]
-              data = text.encode('latin-1')
+              shut(w)
+
+      def send(w, status, headers, data, kind=None):
           try:
               reason = http.HTTPStatus(status).phrase
           except ValueError:
               reason = 'Status'
-          lines = ['HTTP/1.1 %d %s' % (status, reason)] + ['%s: %s' % nv for nv in headers.all if not PL_SKIP.match(nv[0])]
+          lines = ['HTTP/1.1 %d %s' % (status, reason)]
+          lines += ['%s: %s' % nv for nv in (headers.all if headers is not None else []) if not PL_SKIP.match(nv[0])
+                    and not (kind and nv[0].lower() == 'content-type')]
+          if kind:
+              lines.append('Content-Type: ' + kind)
           lines += ['Content-Length: %d' % len(data), 'Connection: close', '', '']
           w.write('\r\n'.join(lines).encode('latin-1', 'replace') + data)
+
+      def serve_playlist(w, status, headers, data, base, home=None):
+          """A playlist is rewritten; anything else that came back is passed on as it is."""
+          if b'#EXTM' in data[:1024]:
+              # latin-1 both ways, so every byte outside an address comes out as it went in
+              data = rewrite_playlist(data.decode('latin-1'), base, home).encode('latin-1', 'replace')
+          send(w, status, headers, data)
+
+      def forget_idle():
+          now = time.monotonic()
+          for k in [k for k, s in SESSIONS.items() if now - s['used'] > SESSION_IDLE]:
+              del SESSIONS[k]
+          for k in [k for k, lock in LOCKS.items() if k not in SESSIONS and not lock.locked()]:
+              del LOCKS[k]
+
+      async def open_channel(key, target, agent, renew_from=None):
+          """Ask the provider for the channel once and remember where it was sent. Returns the session, or a
+          tuple (status, headers, data) when the provider answered with something else (passed on as is)."""
+          lock = LOCKS.setdefault(key, asyncio.Lock())
+          try:
+              await asyncio.wait_for(lock.acquire(), SESSION_LOCK_WAIT)
+          except asyncio.TimeoutError:
+              raise Refused(504)
+          try:
+              s = SESSIONS.get(key)
+              if s and (renew_from is None or s['loc'] != renew_from):
+                  s['used'] = time.monotonic()          # opened (or renewed) by someone else meanwhile
+                  return s
+              status, headers, r, w = await fetch(target, agent, follow=False, wait=PLAYLIST_WAIT)
+              if status in (301, 302, 303, 307, 308) and headers.get('location'):
+                  shut(w)
+                  loc = urljoin(target, headers['location'])
+                  if is_private_url(loc) or urlsplit(loc).scheme not in ('http', 'https'):
+                      raise Refused(403)
+                  s = SESSIONS[key] = {'loc': loc, 'final': loc, 'used': time.monotonic()}
+                  say('a live HLS channel was %s at the provider' % ('opened again' if renew_from else 'opened'))
+                  return s
+              return status, headers, await read_small(r, headers, w)
+          finally:
+              lock.release()
+
+      async def hls(w, h, raw):
+          provider, uri, orig = h.get('x-relay-provider', '').rstrip('/'), h.get('x-relay-uri', ''), h.get('x-relay-orig', '')
+          port = h.get('x-relay-port', '')
+          if provider not in PROVIDERS or not uri.startswith('/') or not orig.startswith('/') or not port.isdigit():
+              return answer(w, 403, 'Not a request from the proxy.\n')
+          forget_idle()
+          agent = [nv for nv in raw if not PL_SKIP.match(nv[0])]
+          opath, _, oquery = orig.partition('?')
+
+          # A playlist on a server the provider sent the player to: fetched there and rewritten.
+          m = re.match(r'^/__cdn/(https?)/([^/?]+)(/[^?]*)?$$', opath, re.I)
+          if m:
+              target = '%s://%s%s%s' % (m.group(1).lower(), m.group(2), m.group(3) or '/', '?' + oquery if oquery else '')
+              status, headers, r, up, final = await fetch_via_proxy(target, agent, port)
+              return serve_playlist(w, status, headers, await read_small(r, headers, up), final)
+
+          # A live channel's own folder: /__ch/<the channel's address>/<__index.m3u8 or a piece named next to it>
+          m = re.match(r'^/__ch(/.+?\.m3u8)/(.*)$$', opath)
+          chan_orig = m.group(1) if m else opath
+          key = provider + ' ' + uri.split('?')[0]      # the channel (the provider's address for it, without any query)
+          target = provider + uri + ('?' + oquery if m and oquery and '?' not in uri else '')
+          s = SESSIONS.get(key)
+          if s is None:
+              s = await open_channel(key, target, agent)
+              if isinstance(s, tuple):                  # the provider answered without sending the channel elsewhere
+                  status, headers, data = s
+                  return serve_playlist(w, status, headers, data, target, chan_orig)
+          s['used'] = time.monotonic()
+          if not m:                                     # the player opened the channel: give it the channel's folder
+              return answer(w, 302, '', 'text/plain', 'Location: /__ch%s/__index.m3u8%s\r\n' % (opath, '?' + oquery if oquery else ''))
+          if m.group(2) != '__index.m3u8':              # a piece named next to the playlist: where it really is
+              there = cdn_address(urljoin(s['final'], m.group(2) + ('?' + oquery if oquery else '')))
+              return answer(w, 302 if there else 404, '', 'text/plain', 'Location: %s\r\n' % there if there else '')
+          for attempt in (1, 2):
+              try:
+                  status, headers, r, up, final = await fetch_via_proxy(s['loc'], agent, port, wait=25)
+                  data = await read_small(r, headers, up, wait=25)
+              except (OSError, asyncio.TimeoutError, Refused, ValueError) as e:
+                  if attempt == 2:
+                      raise
+                  status, headers, data, final = (e.status if isinstance(e, Refused) else 502), None, b'', s['loc']
+              if status not in RENEW_ON or attempt == 2:
+                  break
+              s = await open_channel(key, target, agent, renew_from=s['loc'])   # the remembered session is gone
+              if isinstance(s, tuple):
+                  status, headers, data = s
+                  return serve_playlist(w, status, headers, data, target, chan_orig)
+          s['final'] = final
+          if status == 200:
+              HLS_SEEN[port + chan_orig] = time.monotonic()
+              if len(HLS_SEEN) > 300:
+                  for k in [k for k, t in HLS_SEEN.items() if time.monotonic() - t > 30]:
+                      del HLS_SEEN[k]
+          serve_playlist(w, status, headers, data, final)
+
+      # ---------------------------------------------------------------------------
+      # Where a /__cdn/ address really leads (asked by Caddy before it connects)
+      # ---------------------------------------------------------------------------
+      # Caddy refuses /__cdn/ addresses that name this machine or a home network with numbers, but it cannot
+      # look a server's name up before it connects. So for every /__cdn/ request it asks here first: the name is
+      # looked up (through the tunnel's DNS, like everything else) and refused if it leads to this machine, a
+      # home or private network, or a link-local address. Answers are kept for a minute, so a channel's pieces
+      # cost one lookup a minute, not one each. (A name that changes its answer between this lookup and Caddy's
+      # own, inside that moment, is not covered.)
+      CHECKS = {}
+      CHECK_KEEP = 60
+
+      async def where_it_leads(w, h):
+          netloc = h.get('x-relay-check', '')       # the server named in the /__cdn/ address, as Caddy read it
+          try:
+              host = urlsplit('//' + netloc).hostname or ''
+          except ValueError:
+              host = ''
+          if not host:
+              return answer(w, 403, 'No server named.\n')
+          now = time.monotonic()
+          had = CHECKS.get(host)
+          if had and now - had[0] < CHECK_KEEP:
+              ok = had[1]
+          else:
+              try:
+                  ok = not private(host)                # written as numbers
+              except ValueError:
+                  try:
+                      found = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, 443, type=socket.SOCK_STREAM), CONNECT_WAIT)
+                      ok = bool(found) and not any(private(f[4][0]) for f in found)
+                  except (OSError, asyncio.TimeoutError, ValueError):
+                      ok = True                         # no answer: Caddy's own lookup fails the same way, and nothing is reached
+              if len(CHECKS) > 2000:
+                  CHECKS.clear()
+              CHECKS[host] = (now, ok)
+          answer(w, 200 if ok else 403, 'ok\n' if ok else 'That address leads to this machine or a home network.\n')
+
+      # ---------------------------------------------------------------------------
+      # The provider's lists (player_api.php): logos and posters are pointed back at this proxy
+      # ---------------------------------------------------------------------------
+      # The lists give pictures as full addresses, usually on other sites. Each "http://... or "https://... (also
+      # written with \/ as JSON allows) becomes "http://<this proxy>/__cdn/<http or https>/..., so the player
+      # fetches the pictures through the VPN too. Read and rewritten piece by piece: a movie list can be 150 MB.
+      API_LINK = re.compile(rb'"(https?):(?:\\/\\/|//)')
+      API_WAIT = 300                                    # seconds a provider may take to start a big list, and between its pieces
+
+      async def api(w, h, raw):
+          provider, uri = h.get('x-relay-provider', '').rstrip('/'), h.get('x-relay-uri', '')
+          home = re.sub(r'[^A-Za-z0-9.:\[\]-]', '', h.get('x-relay-host', ''))
+          if provider not in PROVIDERS or not uri.startswith('/') or not home:
+              return answer(w, 403, 'Not a request from the proxy.\n')
+          agent = [nv for nv in raw if not SKIP.match(nv[0])]
+          status, headers, r, up, final = await fetch_to_end(provider + uri, agent, wait=API_WAIT)
+          try:
+              if headers.get('content-encoding', '').strip().lower() not in ('', 'identity'):
+                  raise Refused(502)                    # (asked for plain text; a server that compresses anyway cannot be read)
+              gz = 'gzip' in h.get('accept-encoding', '').lower()
+              z = zlib.compressobj(1, zlib.DEFLATED, 31) if gz else None
+              try:
+                  reason = http.HTTPStatus(status).phrase
+              except ValueError:
+                  reason = 'Status'
+              lines = ['HTTP/1.1 %d %s' % (status, reason)] + ['%s: %s' % nv for nv in headers.all if not PL_SKIP.match(nv[0])]
+              lines += (['Content-Encoding: gzip', 'Vary: Accept-Encoding'] if gz else []) + ['Connection: close', '', '']
+              w.write('\r\n'.join(lines).encode('latin-1', 'replace'))
+              link = b'"http://' + home.encode() + b'/__cdn/'
+              try:
+                  await _api_stream(w, r, headers, link, z)
+              except BaseException:
+                  shut(w)                               # cut off: the app must see a broken answer, not a short complete one
+                  raise
+          finally:
+              shut(up)
+
+      async def _api_stream(w, r, headers, link, z):
+          """The list itself, rewritten piece by piece (see api)."""
+          tail = b''
+          async for data in body(r, headers, API_WAIT):
+              data = tail + data
+              cut = data.rfind(b'"')                # every link starts with a quote: hold back a quote near the end
+              if cut >= 0 and len(data) - cut < 12:
+                  data, tail = data[:cut], data[cut:]
+              else:
+                  tail = b''
+              data = API_LINK.sub(lambda m: link + m.group(1) + b'/', data)
+              out = z.compress(data) if z else data
+              if out:
+                  w.write(out)
+                  await w.drain()
+          data = API_LINK.sub(lambda m: link + m.group(1) + b'/', tail)
+          out = (z.compress(data) + z.flush()) if z else data
+          if out:
+              w.write(out)
+              await w.drain()
 
       # ---------------------------------------------------------------------------
       # The status page
@@ -2443,7 +2353,7 @@ configs:
                   s.close()
           return sorted(times)[len(times) // 2] if times else None
 
-      async def account(port, user, password):          # the provider's own account page, asked through nginx with the easy login
+      async def account(port, user, password):          # the provider's own account page, asked through the proxy with the easy login
           async def ask():
               url = 'http://127.0.0.1:%s/player_api.php?username=%s&password=%s' % (port, quote(user, safe=''), quote(password, safe=''))
               status, data = await get(url, '', 1 << 20)
@@ -2525,7 +2435,7 @@ configs:
       async def status_page(w, h):
           port = h.get('x-relay-port', '')
           host = (h.get('host', '') or 'this-machine').rsplit(':', 1)[0] if port.isdigit() else 'this-machine'
-          info = {'problems': ['The proxy could not read its own start-up notes. Look at the log: docker logs iptv-nginx'], 'providers': []}
+          info = {'problems': ['The proxy could not read its own start-up notes. Look at the log: docker logs iptv-caddy'], 'providers': []}
           if port.isdigit():
               try:
                   status, data = await asyncio.wait_for(get('http://127.0.0.1:%s/__status.json' % port, '', 1 << 20), 5)
@@ -2623,7 +2533,7 @@ configs:
                    % ('Nothing.' if not playing else '<br>'.join(playing)))
 
           o.append('<div class="card"><h2>Still stuck?</h2>Each of the three containers keeps a log. Run the command on the machine this stack runs on.<ul>'
-                   '<li><code>docker logs iptv-nginx</code><br>The proxy. At the top it lists every provider it found, and any it left out and why. After that, one line for every request.</li>'
+                   '<li><code>docker logs iptv-caddy</code><br>The proxy. At the top it lists every provider it found, and any it left out and why. After that, one line for every request.</li>'
                    '<li><code>docker logs iptv-relay</code><br>The Python relay. It says when a live channel is opened and closed, how long the provider took to send the first video, and anything that went wrong with a channel.</li>'
                    '<li><code>docker logs iptv-vpn</code><br>The VPN. It says whether the tunnel is up and where it comes out.</li>'
                    '<li>The instructions: <a href="https://github.com/mackid1993/iptv-vpn-proxy">github.com/mackid1993/iptv-vpn-proxy</a></li>'
@@ -2652,8 +2562,12 @@ configs:
                   return answer(w, 200, 'ok\n')
               if path == '/status':
                   return await status_page(w, h)
-              if path == '/pl':
-                  return await playlist(w, h, raw)
+              if path == '/check':
+                  return await where_it_leads(w, h)
+              if path == '/hl':
+                  return await hls(w, h, raw)
+              if path == '/api':
+                  return await api(w, h, raw)
               if path == '/stat':
                   return answer(w, 200, '%d %d\n' % (len(CHANNELS), sum(len(c.readers) for c in CHANNELS.values())))
               provider, uri = h.get('x-relay-provider', '').rstrip('/'), h.get('x-relay-uri', '')
@@ -2721,7 +2635,7 @@ configs:
               rd = ch.join(first)
               rd.w = w
               came, why = time.monotonic(), 'the player hung up'
-              gone = asyncio.ensure_future(r.read(1))   # completes when nginx (so the player) hangs up
+              gone = asyncio.ensure_future(r.read(1))   # completes when Caddy (so the player) hangs up
               gone.add_done_callback(lambda f: f.cancelled() or f.exception())   # a reset here is expected; keep it out of the log
               try:
                   wait = asyncio.ensure_future(ch.ready.wait())
@@ -2788,6 +2702,11 @@ configs:
               finally:
                   gone.cancel()
                   say('a reader left after %d s: %s (%d still on its channel)' % (time.monotonic() - came, why, max(0, len(ch.readers) - 1)))
+          except Refused as e:                          # (hls and api refuse before they have written anything)
+              try:
+                  answer(w, e.status, e.text, e.kind or 'text/plain')
+              except Exception:
+                  pass
           except (OSError, ValueError, asyncio.TimeoutError, asyncio.IncompleteReadError):
               pass
           except Exception as e:
@@ -2857,11 +2776,14 @@ use that one. If it offers both and you have no reason to prefer one, use
 
 **Remove a provider.** Delete its five lines and run `docker compose up -d`.
 
-**Logins with odd characters.** Provider logins can contain anything. You do
-not get to choose them, so the proxy takes whatever you were given. One rule
-for the `.env` file: if a username or password has anything besides letters
-and digits, put it between single quotes. Without them, a `$` or `#` is read
-as something else and part of the login is silently lost.
+**Logins with odd characters.** Provider logins can contain almost anything.
+You do not get to choose them, so the proxy takes whatever you were given,
+with one exception: a slash (`/`). Caddy cannot pass a slash on inside an
+address, so a provider whose username or password contains one is skipped at
+start, and the log and the status page say why. One rule for the `.env` file:
+if a username or password has anything besides letters and digits, put it
+between single quotes. Without them, a `$` or `#` is read as something else
+and part of the login is silently lost.
 
 **More providers than ports.** Widen `PROXY_PORTS` (for example `8095-8099`)
 and run `docker compose up -d`. This one restarts the VPN too.
@@ -2871,14 +2793,15 @@ and run `docker compose up -d`. This one restarts the VPN too.
 set up, where the VPN comes out, each provider's account, and how many live
 channels are playing. For more detail, each container has a log:
 
-- `docker logs iptv-nginx` has the providers found at the last start, then one
-  line per request.
+- `docker logs iptv-caddy` has the providers found at the last start, then one
+  line per request, with the time first.
 - `docker logs iptv-relay` has a line each time a live MPEG-TS channel
-  (shared, or fed from HLS) is opened or closed, how long the provider took to send the first video, and anything
-  that went wrong with a channel.
+  (shared, or fed from HLS) is opened or closed, how long the provider took to
+  send the first video, a line each time a live HLS channel is opened at the
+  provider, and anything that went wrong with a channel.
 - `docker logs iptv-vpn` is the VPN tunnel's own log.
 
-Addresses are never logged by nginx or the relay, because they contain logins.
+Addresses are never logged by Caddy or the relay, because they contain logins.
 
 ## With a playlist manager
 
@@ -2921,7 +2844,8 @@ front of it and treats the manager as the provider.
 The first arrangement is the one this was built and tested with. The second
 is the same mechanism but has not been run on this version. In particular,
 live HLS through a hosted manager adds one more redirect on the way to the
-video, and whether a channel's session is still shared across it has not been
+video. The relay remembers the first redirect a channel is given, and whether
+a channel's session is still shared when a second one follows has not been
 tested.
 
 In either arrangement, see the note on pictures under
@@ -2940,11 +2864,11 @@ and the last is there to help you. Engineers will find the details under
    the VPN. Without this the player would go to that server directly.
 2. **Playlists and picture addresses are pointed back at the proxy.** An HLS
    playlist is a list of video pieces, and a provider's channel lists name a
-   logo or poster for each entry. The proxy rewrites those addresses for the
+   logo or poster for each entry. The relay rewrites those addresses for the
    same reason.
 3. **One session per live HLS channel.** Described [above](#why-this-exists).
-   When the provider ends a session, the proxy opens a new one once and
-   carries on.
+   The relay remembers where the provider sent each channel. When the
+   provider ends a session, the relay opens a new one once and carries on.
 4. **One easy login.** You choose a simple username and password for your
    players. The proxy swaps it for the provider's real login on the way out,
    so the real logins are typed in one place only.
@@ -2952,69 +2876,142 @@ and the last is there to help you. Engineers will find the details under
    proxy fetch from the machine it runs on or from private addresses.
 6. **Connections are kept open and reused.** A player connected directly keeps
    its connection to a server open and sends one request after another over
-   it. The proxy does the same on both sides. A playlist answer leaves the
-   player's connection open for the next refresh, and the proxy keeps its own
-   connections to the provider's video servers open instead of setting one up
-   for every playlist refresh and every video piece. Setting up an encrypted
-   connection takes time, and one slow setup can use up a player's small live
-   buffer and show as a stutter.
+   it. The proxy does the same. It leaves the player's connection open for
+   the next request, and Caddy keeps its own connections to the provider's
+   servers open, so a video piece or the next part of a movie does not wait
+   for a new connection to be set up. Setting up an encrypted connection
+   takes time, and one slow setup can use up a player's small live buffer and
+   show as a stutter. Playlist refreshes ride on the same kept-open
+   connections: the relay fetches each one through Caddy. A connection that
+   has been idle for 20 seconds is let go.
 7. **One provider connection per live channel for MPEG-TS too.** This is the
-   relay's main job. With `NAME_LIVE_TV=ts`, the first reader of a channel
-   makes the relay open it at the provider, and everyone else on that channel
-   is given the same video. With `NAME_LIVE_TV=hls`, a reader that asks for
-   MPEG-TS (many recorders do) is given the channel's HLS video joined end to
-   end, so it shares the session your players are on.
+   relay's other main job. With `NAME_LIVE_TV=ts`, the first reader of a
+   channel makes the relay open it at the provider, and everyone else on that
+   channel is given the same video. With `NAME_LIVE_TV=hls`, a reader that
+   asks for MPEG-TS (many recorders do) is given the channel's HLS video
+   joined end to end, so it shares the session your players are on.
 8. **A status page.** The relay draws a page that shows what is set up, what
    is wrong, where the VPN comes out and what is playing.
 
 Your settings are read once, when the proxy starts. A short shell loop turns
-each provider block in `.env` into its own listener on its own port.
+each provider block in `.env` into its own Caddy block, listening on its own
+port.
 
 No video server is named anywhere in the two files, because a provider can
-move to other servers at any time. The proxy learns them instead:
+move to other servers at any time. Caddy needs no list of them: it keeps
+connections open to whichever servers it fetches from, by itself. (The nginx
+version had to learn each server, keep a list of them in a Docker volume and
+reload nginx to use it. None of that exists any more.)
 
-- It notes the name of each server that video or a playlist really came from.
-- A second short loop gives each name it has not seen a place on its list of
-  servers to keep connections open to. It waits about 20 seconds for channel
-  changes to settle, then has nginx re-read its settings once for all the
-  names it collected.
-- Until then, a server it has not seen works the plain way, with a connection
-  set up for each request.
-- The list is kept in a small Docker volume and loaded at every start, so a
-  server is learned once. It is capped at 200 names, far more than a provider
-  uses.
-- Only video servers reached by name over HTTPS on the standard port are
-  learned. Any other server, and one that only hands out pictures, works the
-  plain way.
-- A plain `http://` request to a server with no port is sent with `:80`
-  written out, so it never uses a learned server's entry, which connects to
-  port 443. A provider can use the same name for both.
-
-nginx runs as a single worker, so every stream shares the same set of open
-connections.
-
-If the relay is not running, TV still plays. nginx passes live MPEG-TS to the
-provider itself, each reader on a connection of its own, and rewrites
-playlists itself. Only the sharing in point 7 and the status page are missing
-until the relay is back.
+The relay is now in the path of live TV, playlists and the provider's lists.
+If it is not running, those do not work until it is back. Movies, series,
+catch-up and the guide do not go through it. Most players need the provider's
+lists to log in, so in practice expect nothing to play until the relay is
+running again. Docker starts it again if it stops.
 
 ## What was tested, and how
 
 The goal is parity with direct credentials, and no gap has been seen so far
-on the real setup it was run on. Some of that was confirmed against real providers and some only
-against simulated ones, so here is which is which.
+on the real setup it was run on. Some of that was confirmed against real
+providers and some only against simulated ones, so here is which is which.
 
-**The relay is newer than the rest.** Its parts (MPEG-TS sharing, the
-HLS-to-MPEG-TS bridge, playlist rewriting by the relay, the status page) were
-run on one real setup on November 14, 2026, and against simulated providers.
-On the real setup: three
+**The Caddy version (November 20, 2026).** Run on one real setup, against
+two real providers through the VPN, and against a simulated provider. Caddy
+was at version 2.11.9 at the time.
+Against the real providers:
+
+- The account check.
+- Channel categories and channel lists (40,036 and 25,215 channels), the same
+  byte for byte as from the nginx version apart from the port number.
+- Every logo pointed back at the proxy (33,668 and 25,215), and one logo
+  fetched through it.
+- Lists compressed with gzip when the player asked.
+- The movie list (274,171 movies, 89 MB) and the series list (39,099).
+- A movie and a series episode, with skipping, including a jump to the
+  middle.
+- Live MPEG-TS on both providers, 25 seconds each, at 720p 30 frames a second
+  and 1080p 59.94: no gap between frames longer than 100 ms.
+- Live HLS on both providers, the same, with no gaps. Each channel was opened
+  at the provider once while its playlist was refreshed many times.
+- After that it was put to use on the real setup, and a recorder reconnected
+  through it by itself. After the fixes from an independent code review it
+  was put to use again and checked once more through the ports players use:
+  live HLS and MPEG-TS on both providers, 15 seconds each, no gaps, with the
+  playlist refreshes going through Caddy's kept-open connections.
+
+Against a simulated provider:
+
+- The login swap, in the address and in the query.
+- Redirects rewritten, including a redirect to a server with no path.
+- Playlist addresses in every form rewritten: a bare file name, `../`,
+  `/path`, `//server/path`, a full address and a `URI="..."` key.
+- Session memory: a second open of a channel used the remembered session,
+  and the provider was asked once.
+- A piece named next to a channel's playlist, inside the channel's folder.
+- Picture addresses in the provider's lists in both JSON forms, with gzip.
+- One live MPEG-TS channel shared by two readers.
+- Refusal of `127.0.0.1`, `192.168.x`, `10.x`, an address with `user@` in
+  front of the server, `get.php`, and a `POST`, and of a playlist on a
+  server whose name leads to this machine (answered 403).
+- A provider that answers a channel with the playlist itself: the playlist's
+  own pieces come back on the address the player used, with the easy login,
+  so the real login is never written into it.
+- The provider sees no `Via` and no `X-Forwarded-For`, also on the requests
+  the relay makes for live channels and lists.
+- Caddy's environment after start: the providers' logins and its own
+  settings, and no VPN key.
+- Provider logins with `! space + @ # & = % ? ; \ " ' { } $ ,` in them,
+  in the address and in the query: the provider received each one exactly.
+  A login with a slash (`/`) is split by Caddy, which is why such a provider
+  is now skipped at start.
+- No login in any log line, including an error.
+- An adversarial run with a hostile player and a hostile provider: a private
+  or loopback address in 20 disguises (leading zeros, short forms, IPv6,
+  `user@`, capitals, an encoded colon, `0.0.0.0`, the cloud metadata
+  address, one long decimal, hex, and a name that leads to `127.0.0.1`),
+  the relay's own notes forged by a player, request smuggling, `TRACE` and
+  `CONNECT`, a 100 KB address and a 2 MB header, and a provider sending a
+  poisoned playlist, a redirect to this machine, endless redirects, a header
+  pasted into a redirect and lists full of private addresses. Every one was
+  refused or ignored, a stand-in for a control page inside the stack was
+  never reached, no secret reached a log, and normal playback worked
+  afterwards.
+
+Speed was compared on the real setup: the same requests through both
+versions, taking turns, middle value of 4 rounds. It is a short sample, so
+read it as a direction only. Time to the first byte of a movie was 184 ms
+with Caddy and 235 ms with nginx; after a jump to the middle, 130 ms against
+239 ms, and the next 2 MB took 0.16 s against 0.78 s. The first 32 MB of a
+movie took 1.35 s against 1.17 s, which the provider's own speed decides
+more than the proxy. A channel list took 0.32 s against 0.27 s, and the
+account check 78 ms against 65 ms; both now go through the relay.
+
+**Not run on the Caddy version:**
+
+- The guide (`xmltv.php`) against the real providers. It was run only against
+  the simulated one, including a redirect to a server with no path.
+- Catch-up and time shift against the real providers.
+- The HLS-to-MPEG-TS bridge (`/hls`) since the change.
+- A hosted playlist manager in front (see
+  [With a playlist manager](#with-a-playlist-manager)).
+- The [platform notes](#platform-notes) other than plain Linux with Docker
+  Compose. They are written from each platform's documentation.
+
+**Earlier results, on the nginx version.** Everything from here to the end
+of this section was run on the nginx version, before November 20, 2026. It
+is kept as history. Where it describes how the proxy worked, it describes
+the nginx version.
+
+The relay's parts (MPEG-TS sharing, the HLS-to-MPEG-TS bridge, playlist
+rewriting by the relay, the status page) were run on one real setup on
+November 14, 2026, and against simulated providers. On the real setup: three
 players shared one MPEG-TS channel on one provider connection, joining and
 leaving without disturbing each other; HLS played with playlists rewritten by
 the relay; and an MPEG-TS reader was fed from a channel's HLS session while an
 HLS player watched the same channel. That is hours of use, not weeks. The
 lists below describe the proxy as it was before the relay was added.
 
-**Confirmed against real providers:**
+**Confirmed against real providers (nginx version):**
 
 - Live TV over HLS and over MPEG-TS
 - Movies, including skipping around in them
@@ -3033,7 +3030,7 @@ lists below describe the proxy as it was before the relay was added.
   being reused for playlists and video pieces
 - The learned servers still being known after the proxy was restarted
 
-Connection reuse was measured on a real provider by reading the proxy's log
+Connection reuse was measured on a real provider by reading the nginx log
 while live channels played. About 99 percent of requests reused an open
 connection, and the rest connected in a few hundredths of a second, with no
 visible stutter over a long viewing session. Without reuse, every playlist
@@ -3041,10 +3038,10 @@ refresh and every video piece set up its own encrypted connection, and an
 occasional one took about a second, which was enough to empty the player's
 live buffer and show as a stutter.
 
-**Confirmed against simulated providers only.** These are behaviors a provider
-could have that the real ones used for testing did not, so a stand-in was
-built for each. All of them pass, but none has been seen against a real
-service:
+**Confirmed against simulated providers only (nginx version).** These are
+behaviors a provider could have that the real ones used for testing did not,
+so a stand-in was built for each. All of them passed, but none has been seen
+against a real service:
 
 - Playlists that name their pieces by bare file name (`chunk_123.ts`),
   including a further playlist in a sub-folder
@@ -3054,15 +3051,13 @@ service:
   https)
 - Playlist lines written as `../folder/file` in a live channel's playlist,
   with a player that works the `..` out itself and with one that sends it as
-  written. A few rarer forms are not handled there: `./../x`,
-  `folder/../../x`, a bare `..`, and a line that climbs more than 32 folders
-  above the server's top folder.
+  written. The nginx version did not handle a few rarer forms there:
+  `./../x`, `folder/../../x`, a bare `..`, and a line that climbs more than
+  32 folders above the server's top folder. The Caddy version works every
+  address out the way a player does, so these no longer need special rules.
 - Playlists labeled with an unusual content type
 - Logins full of special characters (`@ # % & + = ? / " $ ; { } \`, an
   apostrophe, non-English letters)
-
-**Not run:** the [platform notes](#platform-notes) other than plain Linux
-with Docker Compose. They are written from each platform's documentation.
 
 ## Trade-offs and things to know
 
@@ -3105,22 +3100,20 @@ with Docker Compose. They are written from each platform's documentation.
   state it asks the provider, through the proxy, at most once every 15
   seconds and only while someone has the page open. The page shows no logins, but like
   the proxy ports it is open to anyone on your home network.
-- **If the relay stops, TV still plays.** nginx then passes live MPEG-TS to
-  the provider itself, each reader on a connection of its own, and rewrites
-  playlists itself. Sharing and the status page come back with the relay.
-- **Your logins are in `.env` in plain text**, and the session memory
-  (below) holds them too. Keep the folder private.
-- **A video server is learned the first time it is used.** Until the proxy
-  has seen a video server, each request to it sets up its own connection, as
-  a plain proxy would. About 20 seconds after the channel changes settle, the
-  proxy re-reads its settings once so it can keep connections to that server
-  open, and that makes the player reconnect once. After that the server is
-  remembered, across restarts too.
-- **Kept-open connections cover video servers reached by name over HTTPS on
-  the standard port.** That is how most providers serve video. A provider
-  that serves it over plain HTTP, on another port, or from a bare number
-  address still plays: each request to such a server sets up its own
-  connection, as a plain proxy would.
+- **If the relay stops, playback stops with it.** Live channels, playlists
+  and the provider's lists all go through the relay, and Caddy asks the
+  relay where a server's name leads before it fetches from any server the
+  provider sent a player to (video pieces, a movie after the provider's
+  redirect, pictures). There is no fallback for any of those. Docker starts
+  the relay again if it stops.
+- **Restarting the relay opens playing HLS channels afresh.** The session
+  memory is kept in the relay's memory, not on disk, so a channel that is
+  playing when the relay restarts is opened at the provider again. That can
+  show as a short buffering.
+- **Your logins are in `.env` in plain text.** Keep the folder private. The
+  session memory holds channel addresses with your real login in them too,
+  but only in the relay's memory while a channel is in use; nothing with a
+  login is written to disk.
 - **A slow provider is still slow.** If a provider's server falls behind, the
   proxy cannot make up the difference. See
   [When something is wrong](#when-something-is-wrong) for how to tell that
@@ -3130,35 +3123,14 @@ with Docker Compose. They are written from each platform's documentation.
 
 ## What it stores, updating, removing
 
-**What it stores.** Besides the two files you put there, two small Docker
-volumes. Docker creates and manages them; there is no folder for you to make
-or look after.
-
-`<folder>_hls-memory` (for example `iptv-vpn_hls-memory` when the folder is
-named `iptv-vpn`) is the session memory:
-
-- For each live HLS channel being watched it holds one file of about 3 KB: the
-  provider's "this channel is on that server" answer. The file includes the
-  channel's address at the provider, **with your real login in it**.
-- A channel's file is dropped one minute after the last request for it.
-- It exists so that when the proxy container is recreated (you added a
-  provider, or updated), channels that are playing carry on with the same
-  session instead of being given a new one, which can show as buffering.
-
-`<folder>_video-servers` (for example `iptv-vpn_video-servers`) is the list of
-video servers the proxy has learned:
-
-- It holds one small text file with one line per server, 200 at most. The
-  lines contain server names only: no logins and no channel addresses.
-- It exists so that a server seen once is already known at every later start,
-  and the proxy does not have to re-read its settings while someone is
-  watching.
-- Nothing in it is needed to play. If it is removed, the proxy learns the
-  servers again as they are used.
+**What it stores.** Nothing of its own besides the two files you put there.
+The Caddy image declares two volumes of its own (`/data` and `/config`), so
+Docker creates two unnamed volumes for the `iptv-caddy` container. This stack
+keeps nothing it needs in them.
 
 The relay stores nothing on disk. It keeps the newest video of each open
-live channel in memory (about 15 seconds, between 12 MB and 64 MB a channel)
-and is capped at 512 MB in all.
+live channel in memory (about 15 seconds, between 12 MB and 64 MB a channel),
+and the session memory for live HLS channels, and is capped at 512 MB in all.
 
 **Updating.**
 
@@ -3166,13 +3138,18 @@ and is capped at 512 MB in all.
 - You replaced `compose.yaml` with a newer version: run
   `docker compose up -d --force-recreate`. A plain `up -d` can leave the proxy
   running its old configuration.
-- New versions of gluetun, nginx or Python: `docker compose pull`, then
+- New versions of gluetun, Caddy or Python: `docker compose pull`, then
   `docker compose up -d`. The images are not pinned to a version on purpose: a
   VPN client and a proxy should get their security fixes.
-- Coming from the two-container version: replace `compose.yaml`, add a
-  `NAME_LIVE_TV=hls` or `NAME_LIVE_TV=ts` line to every provider in `.env`
-  (a provider without it is skipped), then run
-  `docker compose up -d --force-recreate`.
+- Coming from the nginx version: replace `compose.yaml` and run
+  `docker compose up -d --remove-orphans --force-recreate`.
+  `--remove-orphans` removes the old `iptv-nginx` container. `.env` stays as
+  it is. The two volumes the nginx version used, `<folder>_hls-memory` and
+  `<folder>_video-servers`, are no longer used; remove them when you like
+  with `docker volume rm <folder>_hls-memory <folder>_video-servers`.
+- Coming from the two-container version: add a `NAME_LIVE_TV=hls` or
+  `NAME_LIVE_TV=ts` line to every provider in `.env` (a provider without it
+  is skipped), then do as for the nginx version above.
 
 **Removing.**
 
@@ -3180,8 +3157,8 @@ and is capped at 512 MB in all.
 docker compose down -v
 ```
 
-The `-v` matters: it removes both volumes too. A plain `down` leaves them
-behind. Then delete the folder.
+The `-v` matters: it removes the Caddy container's two unnamed volumes too.
+A plain `down` leaves them behind. Then delete the folder.
 
 ## Extras that need one more file
 
@@ -3233,21 +3210,24 @@ same everywhere; what differs is where they live and how you start them.
   whether each provider accepted its login. If no provider could be started
   at all, the first port of `PROXY_PORTS` still answers so the page can tell
   you what is missing.
-- **The status page says the relay is not answering.** Look at
-  `docker logs iptv-relay`. TV keeps playing meanwhile, without the sharing.
-- **A provider does not answer.** Read the `iptv-nginx` log from its last
-  start. It names each provider it found and each one it skipped, with the
-  reason. A provider with no `NAME_LIVE_TV` line is skipped.
+- **The status page does not open, with an error 502.** The relay is not
+  answering. Look at `docker logs iptv-relay`. Live TV and the provider's
+  lists do not work until it is back.
+- **A provider does not answer.** Read the `iptv-caddy` log from its last
+  start. Its first lines are plain text: they name each provider it found and
+  each one it skipped, with the reason. A provider with no `NAME_LIVE_TV`
+  line is skipped.
 - **Nothing answers.** Check that `iptv-vpn` is healthy. If the tunnel is
   down the proxy has no way out, by design.
 - **A login with odd characters is refused.** Put it between single quotes in
   `.env`.
 - **One channel buffers and the others are fine.** That is almost always the
-  provider's server for that channel, not the proxy. In the log, each line
-  shows how long the request took (the number after the size) and which
-  server it came from (`uh=`). Slow lines that all name one server, while
-  other channels are quick, point at that server. The same channel will be
-  just as slow with the provider's login typed straight into a player.
+  provider's server for that channel, not the proxy. In the `iptv-caddy` log,
+  each line shows how long the request took (`duration`) and what kind of
+  request it was (`k`). Slow video pieces (`"k":"cdn"`) on one channel, while
+  other channels are quick, point at that channel's server. The same channel
+  will be just as slow with the provider's login typed straight into a
+  player.
 - **Every channel buffers, on every device.** Suspect the VPN server before
   the provider. A VPN server you pick by host name can turn out to be a
   far-away entry point even when its exit shows a nearby city. A slow or
@@ -3259,156 +3239,195 @@ same everywhere; what differs is where they live and how you start them.
   provider's `NAME_LIVE_TV` matches the live format your players really use.
   With `ts`, a channel opened as HLS while it is playing or recording as
   MPEG-TS still ends one of the two: that is the provider's rule.
-- **Reading the nginx log.** `k=` is the kind of request. `s=` shows whether a
-  channel's session was reused (`HIT`), opened (`MISS`) or replaced
-  (`BYPASS`). `uh=` is the server the answer came from. `uct=` is how long
-  it took to connect to that server, in seconds; `0.000` means an open
-  connection was reused. One exception: on requests whose `uh=` is
-  `127.0.0.1:8197`, the playlists handed to the relay, `uct=` is a hop
-  inside the stack and says nothing about reuse (see "Playlist rewriting"
-  below). Reuse of the connections to the provider shows on video pieces
-  and on the relay's own playlist fetches, which are logged from
-  `127.0.0.2`.
+- **Reading the Caddy log.** After the start lines, Caddy writes one line per
+  request when the request ends (a live stream: when it is stopped), with
+  the date and time in your time zone first and the details after it. A
+  line looks like this:
+  ```
+  2026/11/20 23:31:05.123  INFO  http.log.access.log0  handled request  {"request": {"remote_ip": "192.168.1.60", "method": "GET"}, "duration": 0.08, "size": 1880000, "status": 200, "wait_ms": 41.2, "server": "video.provider.example", "k": "cdn", "provider": "PROVIDER1"}
+  ```
+  The fields that matter:
+  - `provider` is the provider's `NAME` from `.env`, which tells you the port
+    the request came in on.
+  - `k` is the kind of request: `media` (live MPEG-TS, movies, series,
+    catch-up and the account), `hls` (a playlist), `api` (the provider's
+    lists, `player_api.php`), `cdn` (anything fetched from a server the
+    provider sent the player to, such as video pieces and pictures) or
+    `guide`.
+  - `status` is the answer's status code, and `size` how many bytes were
+    sent.
+  - `duration` is how long the request took, in seconds. For a live stream
+    that is how long it was watched.
+  - `request.remote_ip` is the device that asked. `127.0.0.1` is the stack
+    itself: the relay fetching a playlist or reading a channel for a
+    recorder, or the status page checking an account.
+  - `server` (on `cdn` lines) is the server that answered, and `wait_ms`
+    (on lines that went to a provider's server) is how many milliseconds it
+    took to start answering. Slow lines that all name one server, while
+    other channels are quick, point at that server.
+
+  The address asked for and the request's headers are left out of every
+  line, because Xtream addresses contain the login. Caddy's own messages, in
+  the same log, are only about real errors (a server that could not be
+  reached, for example), and leave them out too. A player hanging up in the
+  middle of a stream is normal and is not reported.
 - **Reading the relay log.** Every line starts with `RELAY:`. It says when a
   channel was opened and closed and how many are open, how long the provider
   took to send the first video, when a reader joined or left and why, when a
   provider sent nothing for more than a few seconds and then carried on, and
   when a provider ended a channel that was being watched and the relay asked
-  for it again. A channel watched as plain HLS leaves no line here: nginx
-  serves it, and its requests are in the nginx log.
+  for it again. A live HLS channel leaves a line when the relay opens it at
+  the provider, and another when it opens it again because the remembered
+  session had gone. The playlist refreshes themselves are in the Caddy log
+  (`"k":"hls"`).
 
 ## How it works (technical)
 
 This part is for engineers. Everything in it is taken from `compose.yaml`,
-which holds the nginx configuration, the start script and the relay's source,
-each with comments. Where this page and the file disagree, the file is right.
+which holds Caddy's settings, the block written for each provider, the start
+script and the relay's source, each with comments. Where this page and the
+file disagree, the file is right.
 
 ### Three containers, one network namespace
 
 | Service | Container | Image | Job |
 |---|---|---|---|
 | `vpn` | `iptv-vpn` | `qmcgaw/gluetun` | Holds the tunnel and publishes the `PROXY_PORTS` range. |
-| `nginx` | `iptv-nginx` | `nginx:alpine` | All HTTP proxying. One listener per provider. |
-| `relay` | `iptv-relay` | `python:3-alpine` | Long-lived live streams, playlist rewriting, the status page. |
+| `caddy` | `iptv-caddy` | `caddy:alpine` | Every player connection. One listener per provider. The login swap, redirects, and all proxying that is not live TV, playlists or the provider's lists. |
+| `relay` | `iptv-relay` | `python:3-alpine` | Long-lived live streams, HLS session memory and playlist rewriting, picture addresses in the provider's lists, the status page. |
 
-- `nginx` and `relay` both run with `network_mode: "service:vpn"`. They have no
+- `caddy` and `relay` both run with `network_mode: "service:vpn"`. They have no
   network of their own: they share the gluetun container's interfaces,
   firewall and loopback. Anything they fetch leaves through the tunnel, and if
   the tunnel is down they have no other way out.
 - Because the loopback is shared, the pieces talk to each other on
   `127.0.0.1` with no Docker network between them. Those connections never
   reach a network card or the tunnel, so opening one costs a few
-  microseconds. That is why nginx opens a new one to the relay for every
-  playlist and the relay closes it after answering: it keeps the relay
-  simple, and keeping them open would save nothing measurable. (A Unix
-  socket was ruled out for the same reason, and because socket files in a
-  shared folder do not work on every Docker setup.) nginx reaches the relay on
-  `127.0.0.1:8197`, the relay reaches nginx on a provider's own port, and
-  nginx keeps its HLS session memory on `127.0.0.1:8195`. gluetun's control
-  server is held to `127.0.0.1:8000`. None of these is published.
+  microseconds. That is why the relay closes its connection from Caddy after
+  each answer: it keeps the relay simple, and keeping them open would save
+  nothing measurable. (A Unix socket was ruled out for the same reason, and
+  because socket files in a shared folder do not work on every Docker setup.)
+  Caddy reaches the relay on `127.0.0.1:8197`, the relay reaches Caddy on a
+  provider's own port, and Caddy answers its health check on
+  `127.0.0.1:8195`. gluetun's control server is held to `127.0.0.1:8000`.
+  None of these is published.
 - The only published ports are the `PROXY_PORTS` range, on the `vpn` service.
   A provider port may not be 53, 8000, 8195, 8197 or 9999, which are in use
   inside the namespace.
-- `nginx` and `relay` each wait for `vpn` to be healthy and are restarted with
+- `caddy` and `relay` each wait for `vpn` to be healthy and are restarted with
   it. Each one's health check also looks for a global-scope address. If the
   tunnel container was recreated underneath it, the container is left in a
   dead namespace; the check then waits 12 seconds and stops the main process,
   so Docker starts the container again inside the tunnel's new network.
-- `vpn` is given a fixed list of gluetun settings by name. `nginx` and `relay`
-  read the whole settings file (`.env`, or `stack.env` under Portainer), and
-  each one's start command strips the environment down before the real
-  program runs: nginx starts with `PATH` and `TZ` only, the relay with `PATH`
-  and a list of provider addresses.
+- `vpn` is given a fixed list of gluetun settings by name. `caddy` and `relay`
+  read the whole settings file (`.env`, or `stack.env` under Portainer). The
+  relay's start command strips the environment down before Python runs, to
+  `PATH` and a list of provider addresses. Caddy's start script does the same
+  before Caddy runs: what is left is `PATH`, `TZ`, Caddy's own folders and the
+  providers' logins (each provider's block reads its login from there when a
+  request comes in). The VPN keys and the rest of `.env` are not in Caddy's
+  environment.
 
-### What nginx does
+### What Caddy does
 
-**At start.** The entrypoint script finds every `NAME` that has `NAME_URL` in
-the environment and checks it: all five lines present, a port inside
+**At start.** The start script finds every `NAME` that has `NAME_URL` in the
+environment and checks it: all five lines present, a port inside
 `PROXY_PORTS` that is not reserved and not used twice, an address of the form
-`http(s)://name[:port]`, and `NAME_LIVE_TV` equal to `hls` or `ts`. For each
-good one it writes a `server` block with the listen port, the provider
-address, the percent-encoded login and the live format, and includes the
-shared locations. For each bad one it prints `PROVIDER NAME SKIPPED:` with the
-reason. The same findings are written to a small JSON file that nginx serves
-to loopback callers only, which is where the status page gets them. If no
-provider could be started, one listener on the first port of the range still
-serves `/status`, and the container reports itself unhealthy.
+`http(s)://name[:port]`, `NAME_LIVE_TV` equal to `hls` or `ts`, and no slash
+in the login (Caddy would split it). For each
+good one it fills in the provider block with the listen port, the provider
+address and the live format, and puts the provider's login, percent-encoded,
+in a variable of its own. For each bad one it prints `PROVIDER NAME SKIPPED:`
+with the reason. The same findings are written to a small JSON file that
+Caddy serves to loopback callers only, which is where the status page gets
+them. If no provider could be started, one listener on the first port of the
+range still serves `/status` (and answers everything else with 503), and the
+container reports itself unhealthy. Then the script starts Caddy.
 
-**Proxying.** HTTP/1.1 to the upstream, response buffering off so bytes are
-passed on as they arrive, a 10 second connect timeout and a 60 second limit
-on the gap between bytes (not on stream length). Upstream certificates are
-not verified, which is nginx's default: many players do not check them
-either, and some providers' servers carry expired or self-signed ones.
+**Settings.** Caddy's admin interface is off, so nothing can change its
+settings from outside; they come from the file only. Automatic HTTPS is off:
+players talk to it over plain HTTP/1.1, and it reaches each provider over
+whatever the provider's address says.
 
-**Redirects and addresses.** A `Location` naming another server is rewritten
-to `/__cdn/<scheme>/<host>/...` on the proxy, so the player comes back and the
-fetch goes through the tunnel. A `/__cdn/` target may not be `localhost`, a
-loopback, private, link-local or carrier-grade NAT address, a bracketed IPv6
-literal, a host containing `@` or `%`, or a numeric address written with
-leading zeros. The same list is applied to the redirect a live HLS channel is
-sent to. Picture addresses in `player_api.php` answers are rewritten to the
-same `/__cdn/` form. `get.php` is refused with 403.
+**Proxying.** Bytes are passed on as they arrive (`flush_interval -1`), so
+live video does not wait in a buffer. Toward a provider and the servers it
+sends players to, Caddy allows 60 seconds without data (300 seconds for the
+guide). Nothing about the player or the proxy is added to the request: the
+`X-Forwarded-*` and `Via` headers are removed, so the provider sees the
+player's own request, from the VPN. Compression is off in Caddy's transports,
+so the player's own `Accept-Encoding` goes through as it is and nothing is
+added or unpacked on the way. Upstream certificates are not verified
+(`tls_insecure_skip_verify`): many players do not check them either, and
+some providers' servers carry expired or self-signed ones.
 
-**The login swap.** A request that carries `PLAYER_USER` and `PLAYER_PASSWORD`
-in the path or the query string is sent upstream with the provider login of
-the port it arrived on. Nothing else in the address is changed. Any other
-login is passed on untouched and refused by the provider.
+**Connection reuse.** Caddy keeps its connections to every server it fetches
+from open and reuses them. This is built in and needs no settings: no server
+is named in the file, nothing is learned, and nothing is reloaded.
 
-**Session memory for live HLS.** An internal server on `127.0.0.1:8195` is an
-nginx proxy cache that stores only redirect answers, keyed by provider and
-channel path. Opening a channel asks that cache where the provider sent it,
-then hands the player a folder of its own, `/__ch/<channel address>/`. Every
-later refresh of the playlist, and every piece named by bare file name, is
-resolved against the remembered redirect, so all readers of a channel stay on
-one provider session. Opens that arrive together wait for the first one (cache
-lock, up to 20 seconds). An entry is dropped one minute after its last use.
-When the remembered session answers with an error, the channel is opened
-again once, bypassing the cache, and the new redirect is remembered. The
-cache directory is a Docker volume so that playing channels keep their
-session when the nginx container is recreated.
+**Where each request goes.** In this order:
 
-**Connection reuse and learned video servers.** nginx keeps upstream
-connections open only to servers it has an `upstream` block for, and no
-server is named in the file. So a log line is written to a small file for
-every request answered with 200 or 206 by a server reached by name on port
-443 with a video or playlist content type. A loop in the entrypoint reads
-that file every 5 seconds. When it sees a new name it waits 20 seconds for
-channel changes to settle, writes one `upstream` block per new server (8 idle
-connections, each let go after 20 seconds without use, `max_fails=0` so a server is never set
-aside), tests the configuration and reloads nginx once. The list is saved to
-a second Docker volume, read back at start through a strict pattern, and
-capped at 200 entries. nginx picks an `upstream` block for a variable
-`proxy_pass` by name alone when the address has no port, whatever its scheme,
-so every variable `proxy_pass` target that is `http://` with no port gets
-`:80` written out first (one `map` per target); `https://` targets are left
-alone and still use the learned blocks.
+| Request | Where it goes |
+|---|---|
+| `/get.php` | Refused with 403. |
+| `/status` | The relay (`/status`). |
+| A live `.ts` made with the easy login | The relay: `/ts` or `/hls`, according to that provider's `NAME_LIVE_TV`. |
+| An address ending in `.m3u8`, or under `/__ch/` | The relay (`/hl`). |
+| `/player_api.php` | The relay (`/api`). |
+| `/__cdn/<http or https>/<server>/<path>` | That server, if it is allowed (see below). |
+| `/xmltv.php` | The provider. |
+| Everything else (movies, series, catch-up, the account) | The provider. |
 
-**One worker.** The entrypoint sets `worker_processes 1`. The image default is
-one worker per CPU thread, and each worker has its own pool of upstream
-connections, so a stream that bounced between workers kept opening new ones.
-A home proxy carries a handful of streams, and one worker reuses the same
-connections for all of them.
+**Redirects and addresses.** A `Location` header in a provider's answer is
+rewritten to `/__cdn/<scheme>/<server>/<path>` on the proxy, in each of its
+three forms: a full address, `//server/path`, and `/path` (which gets the
+server that answered). So the player comes back and the fetch goes through
+the tunnel. A `/__cdn/` target may not be `localhost`, a loopback, private,
+link-local or carrier-grade NAT address, a bracketed IPv6 literal, a host
+containing `@` or `%`, or a numeric address written with leading zeros; such
+a request is refused with 403. Caddy cannot look a name up before it
+connects, so for every `/__cdn/` request it first asks the relay
+(`forward_auth` to `/check`): the relay looks the server's name up through
+the tunnel's DNS and answers 403 if it leads to this machine, a home or
+private network or a link-local address (a name such as `localtest.me`,
+which leads to `127.0.0.1`, or a number written as one long decimal).
+Answers are kept for a minute, so a channel's pieces cost one lookup a
+minute. A name that changes its answer between that lookup and Caddy's own
+is not covered. `/__cdn/` takes `GET` and `HEAD` only (405 for
+anything else). The `/__cdu/` addresses of the nginx version are gone and
+answer 404.
 
-**Logging.** One line per request with the port, status, sizes, timings, user
-agent, kind of request, session-memory result, upstream host and connect
-time. The request address is never logged, because Xtream addresses contain
-the login. nginx's error log is limited to critical messages for the same
-reason.
+**The login swap.** A request that carries `PLAYER_USER` and
+`PLAYER_PASSWORD` is sent upstream with the provider login of the port it
+arrived on. That covers the path forms `/live/`, `/movie/`, `/series/` and
+`/timeshift/` followed by the login, the short form `/user/pass/<id>`, and
+`username=` and `password=` in the query string. Nothing else in the address
+is changed. Any other login is passed on untouched and refused by the
+provider.
 
-**What it hands to the relay.** Three kinds of request are proxied to
-`127.0.0.1:8197`: a live MPEG-TS request made with the easy login (to `/ts`
-or `/hls`, according to that provider's `NAME_LIVE_TV`), a `GET` for a
-playlist under `/__ch/`, `/__cdn/` or `/__cdu/` (to `/pl`), and `/status`.
-nginx tells the relay what it needs in `X-Relay-*` request headers. On every
-request handed to the relay, nginx sets or blanks all of those headers
-itself, and the `X-Hls-*` ones used by the session memory are blanked on
-every request that does not use it. So the relay and the session memory
-never see a value sent by a player.
+**Logging.** One line per request on standard output, in Caddy's console
+format with the local time first. Caddy's own fields are trimmed to the
+player's address, method, status, size and duration, and the provider's
+`NAME`, the kind of request (`k`), and for requests to a provider's servers
+the server (`server`) and the time to the first byte from it (`wait_ms`) are
+added. The request address, the request headers and the response headers
+are removed from every line, because Xtream addresses contain the login.
+Caddy's own messages are limited to errors (a player hanging up mid-stream
+is logged by Caddy as a warning and so does not appear), and the address
+and headers are removed from those too.
+
+**What it hands to the relay.** Four kinds of request are proxied to
+`127.0.0.1:8197`, as listed above. Caddy tells the relay what it needs in
+`X-Relay-*` request headers: the provider's address, the address at the
+provider with the login already swapped in, the address as the player sent
+it, the port, and for the provider's lists the address the player used to
+reach the proxy. For every header the relay reads on a request, Caddy sets
+the value itself and replaces any value a player sent, so a player cannot
+steer the relay with them.
 
 ### What the relay does
 
-The relay is one asyncio program. It listens on `127.0.0.1:8197`, so nginx is
-its only caller. It has four endpoints that matter, plus `/healthz` for the
+The relay is one asyncio program. It listens on `127.0.0.1:8197`, so Caddy is
+its only caller. It has six endpoints that matter, plus `/healthz` for the
 container's health check and `/stat`, a one-line count of open channels and
 readers.
 
@@ -3416,17 +3435,18 @@ readers.
 |---|---|
 | `/ts` | Share one provider MPEG-TS stream between every reader of a channel. |
 | `/hls` | Give a reader that asks for MPEG-TS the channel's HLS video, joined end to end. |
-| `/pl` | Point the addresses inside an HLS playlist back at the proxy. |
+| `/hl` | Keep one provider session per live HLS channel, and point the addresses inside an HLS playlist back at the proxy. |
+| `/api` | Point the picture addresses in the provider's lists (`player_api.php`) back at the proxy. |
+| `/check` | Say whether a server named in a `/__cdn/` address leads to this machine or a home network, before Caddy connects to it. |
 | `/status` | Draw the status page. |
 
-For `/ts` and `/hls`, nginx sends the provider's address, the channel's
-address at the provider (with the provider login already swapped in), the
-address as the player sent it, and the port. The relay answers 403 unless the
-provider is one of the addresses it was started with. A `HEAD` request is
-answered with 200 on the spot, because asking the provider would open a
-connection. One channel has one key whichever form of its address a player
-uses (`/live/user/pass/1.ts`, `/user/pass/1.ts`, `/user/pass/1`). The relay
-serves at most 100 readers at once, all channels together.
+For `/ts`, `/hls`, `/hl` and `/api`, the relay answers 403 unless the
+provider Caddy names is one of the addresses it was started with. For `/ts`
+and `/hls`, a `HEAD` request is answered with 200 on the spot, because asking
+the provider would open a connection. One channel has one key whichever form
+of its address a player uses (`/live/user/pass/1.ts`, `/user/pass/1.ts`,
+`/user/pass/1`). The relay serves at most 100 readers at once, all channels
+together.
 
 ### MPEG-TS sharing (`/ts`)
 
@@ -3496,9 +3516,9 @@ With `NAME_LIVE_TV=hls`, a live `.ts` request does not go to the provider as
 MPEG-TS. The relay builds the address of the same channel as HLS on this
 proxy, `/__ch/<channel>.m3u8/__index.m3u8` on the provider's port, always in
 the `/live/user/pass/<id>` form whichever form the reader used, and reads
-it from nginx on loopback, exactly as a player would. That puts the reader on
-the session memory described above, so it shares the one provider session
-with every HLS player on the channel.
+it from Caddy on loopback, exactly as a player would. That puts the reader on
+the session memory described under `/hl` below, so it shares the one provider
+session with every HLS player on the channel.
 
 - It reads the playlist, follows a list of qualities to the highest
   `BANDWIDTH` on offer, and starts near the newest video (the last three
@@ -3539,56 +3559,99 @@ with every HLS player on the channel.
 
 The bridged stream is the HLS one, and the queue keeps up to about one piece
 in hand, so it runs a few seconds further behind live than the provider's own
-MPEG-TS would.
+MPEG-TS would. The bridge has not been run against a real provider since the
+change to Caddy (see [What was tested, and how](#what-was-tested-and-how)).
 
-### Playlist rewriting (`/pl`)
+### HLS sessions and playlist rewriting (`/hl`)
 
-nginx has always rewritten playlists with text rules (`sub_filter`). Those
-rules are still there, and the relay now does the job first because it reads
-a playlist line by line, the way a player does, and so copes with forms that
-text matching would miss.
+Caddy hands the relay every request for an address ending in `.m3u8` and
+every request under a channel's own folder, `/__ch/`. The relay fetches from
+the provider itself, through the tunnel, and handles three cases.
 
-1. A player's `GET` for a playlist is handed to the relay with the original
-   address and port.
-2. The relay asks nginx for that same address from the source address
-   `127.0.0.2`. For that one caller nginx fetches the playlist from the
-   provider as usual (same session, same kept connections) but its text rules
-   put back exactly what they found, so the playlist arrives as the provider
-   wrote it. nginx adds three response headers that say where this
-   playlist's addresses lead: the proxy path for the server it came from, the
-   same for scheme-relative addresses, and the proxy path for the playlist's
-   own folder one level up.
-3. The relay rewrites every address line and every `URI="..."` inside a tag:
-   full `http://` and `https://` addresses, `//server/path`, `/path` and
-   `../path`. An address with none of those beginnings sits next to the
-   playlist and is left as it is. Bytes outside addresses come out as they
-   went in. The player's request headers and the server's response headers
-   are passed through, apart from per-connection ones, range headers,
-   `Server` and `Date` (nginx adds its own), and the proxy's own notes.
-4. nginx strips those three headers from anything an upstream sends, so only
-   nginx can set them and a server cannot use them to point a player
-   somewhere else.
+**Opening a channel** (`/live/user/pass/1.m3u8` and the like, on the
+provider's own address):
 
-**The fallback.** If the relay does not answer (it is not running, or it
-steps aside because the body is not a playlist, is over 1 MB or has more than
-20,000 lines), nginx gets a failed upstream and serves the request itself: it
-re-requests the same address from `127.0.0.3`, a caller for which the text
-rules work as they always did. A playlist that arrives compressed, which
-should not happen because nginx asks for plain text, cannot be read by the
-relay. It steps aside in the same way and nginx serves the playlist itself,
-as it came.
+1. The relay asks the provider for the channel once, without following the
+   answer, and remembers where the provider sent it. The redirect must lead
+   to `http` or `https` and not to a private address. The memory is keyed by
+   provider and the channel's address at the provider.
+2. It sends the player to the channel's own folder on the proxy,
+   `/__ch/<channel address>/__index.m3u8`.
+3. Opens of the same channel that arrive together wait for the first one, up
+   to 20 seconds, and then use what it found.
+4. If the provider answers with the playlist itself instead of a redirect,
+   that playlist is rewritten and passed on, and nothing is remembered.
+
+**The channel's folder** (`/__ch/<channel address>/...`):
+
+- `__index.m3u8` is fetched from the remembered session, following any
+  further redirects (each one checked the same way), and rewritten against
+  the address it really came from. The provider is not asked to open the
+  channel again.
+- If the remembered session answers with an error (such as 403, 404, 410,
+  429, or a 5xx) or does not answer, the channel is opened again once, the
+  new session is remembered, and the playlist is fetched from it.
+- Any other name in the folder is a piece named next to the playlist. It is
+  answered with a redirect to its real `/__cdn/` address, worked out from
+  where the playlist really came from.
+- A channel nobody has asked about for 60 seconds is forgotten.
+- The memory is in the relay's memory only. A restart of the relay forgets
+  every channel, and the next look at each one opens it afresh.
+
+**A playlist on another server** (`/__cdn/<scheme>/<server>/...m3u8`, for
+example a quality listed in a channel's playlist): fetched from that server,
+following redirects, each one checked against private addresses, and
+rewritten against the address it really came from.
+
+**The rewriting itself.** Every address line and every `URI="..."` inside a
+tag is resolved against the address the playlist really came from, the way a
+player resolves it, and then written as `/__cdn/<scheme>/<server>/<path>`.
+So bare file names, `./`, `../` at any depth, `/path`, `//server/path` and
+full addresses are all handled the same way. Bytes outside addresses come
+out as they went in, line endings included. An answer that is not a playlist
+(no `#EXTM3U` near its start) is passed on unchanged, and a playlist larger
+than 4 MB is refused. The player's request headers and the server's response headers
+are passed through, apart from per-connection ones, range and compression
+headers, `Server`, `Date`, `Via` and the proxy's own notes. Because the
+relay does not pass on `Accept-Encoding`, the provider sends the playlist as
+plain text.
+
+A playlist on a video server is fetched through Caddy, at its `/__cdn/`
+address, so every refresh rides on the connection Caddy keeps open to that
+server, the same as the video pieces. (A new encrypted connection for every
+look at a live playlist, every few seconds, is what made players stutter
+before connections were kept open.) The request comes from inside the
+container with a mark that tells Caddy to pass it straight on instead of
+handing it to the relay again; Caddy removes the mark before the request
+leaves, and a player cannot use it, because it only counts from inside the
+container. The relay still looks the server's name up first and refuses a
+private address. Only the first open of a channel, and a renewal, go to the
+provider directly.
+
+### The provider's lists (`/api`)
+
+`player_api.php` answers are the provider's channel, movie and series lists,
+and a movie list can be very large (89 MB in the tests). The relay fetches
+the answer from the provider, following redirects, and rewrites it piece by
+piece as it streams through, without holding the whole list. Every
+`"http://...` or `"https://...` (also in JSON's `\/` form) becomes
+`"http://<the address the player used>/__cdn/<http or https>/...`, so the
+player fetches logos and posters through the VPN. The relay asks the
+provider for plain text; when the player's app asks for gzip, the relay
+compresses the answer itself, at level 1. A provider that compresses anyway
+cannot be read, and the request fails with 502.
 
 ### The status page (`/status`)
 
-nginx proxies `/status` on any provider port to the relay, with the port and
+Caddy proxies `/status` on any provider port to the relay, with the port and
 the easy login in headers. The relay then:
 
-- reads the start-up notes from nginx (what was found, what was skipped and
+- reads the start-up notes from Caddy (what was found, what was skipped and
   why)
 - asks `https://ipinfo.io/json` for the public address, through the tunnel,
   with certificate checking on, at most once every 5 minutes (once a minute
   while the lookup is failing)
-- asks each provider for its account details through nginx, with the easy
+- asks each provider for its account details through Caddy, with the easy
   login, so the request takes the same path a player's would. This happens when
   someone views the page, at most once every 15 seconds, and the page waits up
   to 6 seconds for the answer so that what it shows is current. Each answer is
@@ -3610,14 +3673,20 @@ settings problem, and 503 otherwise. It shows no logins.
 
 ### When the relay is not running
 
-| Request | What nginx does instead |
-|---|---|
-| Live MPEG-TS | Passes it to the provider directly, each reader on a connection of its own. |
-| A playlist | Rewrites it with its own text rules. |
-| `/status` | Answers 503 with one line that says to look at the relay's log. |
+There is no fallback any more. Caddy answers what it would have handed to
+the relay with an error (502):
 
-Everything else (the API, the guide, movies, series, catch-up, HLS pieces,
-the session memory, the login swap) never goes through the relay.
+| Request | What happens |
+|---|---|
+| Live MPEG-TS | Error. |
+| An HLS playlist, or a live channel's folder | Error. |
+| `player_api.php` (the account and the lists) | Error. Most players cannot log in. |
+| `/status` | Error 502 from Caddy, with no text of its own. |
+| `/__cdn/...` (video pieces, a movie or catch-up after the provider's redirect, pictures) | Error: Caddy cannot ask where the server's name leads, so it does not fetch. |
+
+The guide, and a movie, series or catch-up that the provider serves without
+sending the player to another server, do not touch the relay.
+Docker starts the relay again if it stops.
 
 ### How the relay is fenced in
 
@@ -3625,19 +3694,21 @@ As written in `compose.yaml`:
 
 - **Network.** It shares the tunnel's namespace and listens on loopback only.
   It connects to the providers named in `.env` and the servers they redirect
-  to, to nginx in this stack, and to `ipinfo.io` for the status page. Before
+  to, to Caddy in this stack, and to `ipinfo.io` for the status page. Before
   it follows a redirect it looks the name up itself, refuses a private,
   loopback, link-local or carrier-grade NAT address, and connects to the very
-  address it checked. Its fetches from nginx are never allowed to be
+  address it checked. Its fetches from Caddy are never allowed to be
   redirected to another host.
 - **What it is given from `.env`.** The start command works out which
-  providers are set up, using the main checks nginx uses (the name, the
-  address form, the lines being present, `hls` or `ts`), and starts Python
-  with a cleared environment holding only `PATH` and the list of those
+  providers are set up, using the main checks Caddy's start script uses (the
+  name, the address form, the lines being present, `hls` or `ts`), and starts
+  Python with a cleared environment holding only `PATH` and the list of those
   providers' addresses. No login, password or VPN key is in the program's
-  environment. It does see a provider's login when nginx hands it a live
-  channel's address, and the easy login when the status page is drawn; it
-  keeps neither on disk.
+  environment. It does see a provider's login when Caddy hands it a live
+  channel's, a playlist's or a list's address, and the easy login when the
+  status page is drawn. The session memory holds channel addresses with the
+  provider's login in them while a channel is in use; nothing is kept on
+  disk.
 - **User.** It runs as `65534:65534` (nobody), with no added capabilities and
   no volumes.
 - **Memory.** `mem_limit: 512m`, a ceiling in case a provider misbehaves.
@@ -3645,25 +3716,39 @@ As written in `compose.yaml`:
   tunnel's namespace, and `/healthz` on `127.0.0.1:8197` must answer.
 - **Logs.** Its log lines never contain an address or a login.
 - **Dependencies.** None. The script uses only the Python standard library
-  and refuses to start on a Python older than 3.12.
+  (gzip is done with its `zlib` module) and refuses to start on a Python
+  older than 3.12.
 
-### Why Python, and why not inside nginx
+### Why Caddy, and why Python beside it
 
-The design rule is that nginx keeps doing what it is good at, which is HTTP
-proxying, and nothing else is added unless plain nginx settings cannot do the
-job. Four things could not be done with settings, or not well enough:
-fanning one upstream stream out to several readers, joining HLS pieces into
-one stream, reading a playlist line by line, and drawing a status page.
+The design rule is that the proxy keeps doing what it is good at, which is
+HTTP proxying, and nothing else is added unless plain settings cannot do the
+job.
 
-The first attempt, which was never published, did the stream work inside
-nginx with its JavaScript module (njs). Measured on real streams, it either
-grew in memory for as long as video flowed through it, or, when that was
-worked around, corrupted the stream. Neither is acceptable in the video
-path. So the long-lived stream handling moved out to a small asyncio program:
-one process, standard library only, in the official Python image, with its
-source inline in the compose file like the nginx settings. nginx still
-terminates every player connection and still does all proxying to providers
-for everything that is not a shared live stream.
+The nginx version followed that rule but needed a lot of custom
+configuration to do it: a cache used as session memory, text rules for
+playlists and lists, a list of learned video servers with a loop and reloads
+to keep connections to them open, and maps to work around how nginx picks
+those. Each part was something an nginx update could break. Caddy keeps
+connections to any server open by itself, so its settings are much shorter
+and the proxy can take every security update. It is still the stock image,
+with settings only, no plugins and no custom build.
+
+The jobs that settings cannot do well live in the relay: fanning one
+upstream stream out to several readers, joining HLS pieces into one stream,
+remembering one session per live channel, reading a playlist line by line,
+rewriting a large list as it streams, and drawing a status page.
+
+Before the relay existed, a first attempt, which was never published, did
+the stream work inside nginx with its JavaScript module (njs). Measured on
+real streams, it either grew in memory for as long as video flowed through
+it, or, when that was worked around, corrupted the stream. Neither is
+acceptable in the video path. So the long-lived stream handling moved out to
+a small asyncio program: one process, standard library only, in the official
+Python image, with its source inline in the compose file like the proxy
+settings. Caddy terminates every player connection and still does all
+proxying to providers for movies, series, catch-up, the guide and every video
+piece.
 
 ### Limits, stated plainly
 
@@ -3672,19 +3757,24 @@ for everything that is not a shared live stream.
   about 10 seconds in hand. If a provider pauses for longer than a player has
   buffered, that player stalls, as it would on a direct connection.
 - **HLS is the recommended setting where a provider offers it.** With HLS the
-  player fetches finished pieces and keeps its own buffer, nginx's session
-  memory survives a recreate of the nginx container, and a recorder that
-  wants MPEG-TS is still served through the bridge.
+  player fetches finished pieces and keeps its own buffer, and a recorder
+  that wants MPEG-TS is still served through the bridge.
 - **With `ts`, HLS and MPEG-TS do not mix on one channel.** Opening a channel
   as HLS while it is being read as MPEG-TS still ends one of the two. That is
   the provider's rule, and turning MPEG-TS into HLS is beyond this proxy.
 - **The bridge needs plain HLS.** Encrypted or byte-range playlists, and ones
   with an `EXT-X-MAP` line, are not bridged.
-- **Recreating the relay container ends the live streams that run through
-  it.** That happens when `.env` changes or the stack is updated.
-- **Certificates of providers are not verified**, by nginx or by the relay,
+- **The relay is in the path of live TV.** Recreating the relay container
+  ends the live streams that run through it and forgets the HLS session
+  memory. That happens when `.env` changes or the stack is updated. While it
+  is not running, live TV and the provider's lists do not work.
+- **A playlist is recognized by its address.** Only addresses ending in
+  `.m3u8`, and a live channel's folder, are handed to the relay to be
+  rewritten.
+- **Certificates of providers are not verified**, by Caddy or by the relay,
   for the reason given above.
-- **The relay's parts are newer than the rest.** See
+- **The Caddy version is new.** Some parts have not been run against a real
+  provider since the change. See
   [What was tested, and how](#what-was-tested-and-how).
 
 ## Support
@@ -3696,6 +3786,6 @@ page. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE). gluetun, nginx and Python are separate projects with their own
+[MIT](LICENSE). gluetun, Caddy and Python are separate projects with their own
 licenses. This repository contains configuration for them and one small
 Python program, and does not distribute any of the three.
