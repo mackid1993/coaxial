@@ -2214,6 +2214,9 @@ configs:
       	mu.Lock()
       	ch := channels[key]
       	first := ch == nil
+      	if !first { // moving onto a channel already open: an HLS builder this device left goes too
+      		releaseFor(provider, whoIs(r), key)
+      	}
       	if first {
       		// Changing channel: the hang-up on the old one and this request arrive in either order. Channels of
       		// this provider nobody reads go now; a hang-up just behind gets 30 ms; the provider gets dropGap to see it.
@@ -3411,6 +3414,7 @@ configs:
       	discSeq                      int
       	longest                      float64            // the longest piece so far: TARGETDURATION never goes down
       	players                      map[string]float64 // device -> its last request
+      	waiting                      map[string]int     // device -> its playlist requests still waiting for pieces
       }
 
       var segmenters = map[string]*segmenter{} // TS channel key -> its HLS builder
@@ -3438,9 +3442,19 @@ configs:
       	}
       	tsURI := strings.TrimSuffix(chURI, ".m3u8") + ".ts"
       	key := channelKey("/ts", provider, tsURI)
-      	sg, err := segmenterFor(r.Context(), key, provider, tsURI, who, port, id, r.Header)
-      	if err != nil {
+      	var sg *segmenter
+      	if m[2] != "__index.m3u8" { // a piece comes only from a running builder: asking for one never opens the channel
+      		mu.Lock()
+      		sg = segmenters[key]
+      		mu.Unlock()
+      		if sg == nil {
+      			answer(w, 404, "", "")
+      			return true, nil
+      		}
+      	} else if s, err := segmenterFor(r.Context(), key, provider, tsURI, who, port, id, r.Header); err != nil {
       		return true, err
+      	} else {
+      		sg = s
       	}
       	mu.Lock()
       	sg.asked = mono()
@@ -3474,6 +3488,17 @@ configs:
       		return true, nil
       	}
       	deadline := time.After(segWait * time.Second) // the playlist: wait for the first pieces
+      	mu.Lock()
+      	sg.waiting[who]++ // (a device waiting here is not quiet: releaseFor leaves its builder alone)
+      	mu.Unlock()
+      	defer func() {
+      		mu.Lock()
+      		if sg.waiting[who]--; sg.waiting[who] <= 0 {
+      			delete(sg.waiting, who)
+      		}
+      		sg.players[who] = mono()
+      		mu.Unlock()
+      	}()
       wait:
       	for {
       		mu.Lock()
@@ -3532,11 +3557,17 @@ configs:
       func segmenterFor(ctx context.Context, key, provider, tsURI, who, port, id string, rh http.Header) (*segmenter, error) {
       	mu.Lock()
       	if sg := segmenters[key]; sg != nil && !sg.over {
+      		if sg.players[who] == 0 { // a device new to this builder has left any builder of its own
+      			releaseFor(provider, who, key)
+      		}
       		mu.Unlock()
       		return sg, nil
       	}
       	ch := channels[key]
       	first := ch == nil
+      	if !first { // moving onto a channel already open: an HLS builder this device left goes too
+      		releaseFor(provider, who, key)
+      	}
       	if first {
       		lastOpen[provider] = opened{mono(), key}
       		releaseFor(provider, who, key)
@@ -3575,7 +3606,8 @@ configs:
       	// frozen after a pause), and a new builder's first piece is marked as not following on from the last.
       	now := int(time.Now().Unix())
       	sg := &segmenter{key: key, provider: provider, who: who, port: port, id: id, ch: ch, rd: rd, asked: mono(),
-      		grew: make(chan struct{}), next: now, discSeq: now, players: map[string]float64{}}
+      		grew: make(chan struct{}), next: now, discSeq: now, players: map[string]float64{who: mono()},
+      		waiting: map[string]int{}}
       	segmenters[key] = sg
       	mu.Unlock()
       	if first {
@@ -3752,8 +3784,8 @@ configs:
       		return nil // (every piece starts with its own copy)
       	case pid == c.pmtPID && pusi:
       		c.pmt = append([]byte(nil), pkt...)
-      		if c.avPID < 0 {
-      			c.avPID = pickStream(tableStart(body))
+      		if s := pickStream(tableStart(body)); s >= 0 { // (read at every PMT: a stream asked for again may use new PIDs)
+      			c.avPID = s
       		}
       		return nil
       	case pid == 0 || pid == c.pmtPID:
@@ -3845,15 +3877,16 @@ configs:
       }
 
       // releaseFor: a device that opens another channel of a provider has left its old one. A builder only that
-      // device was using lets go now, so its provider connection is free at once (one-connection accounts). (mu held)
+      // device was using, or one every device has stopped asking for, lets go now, so its provider connection is
+      // free at once (one-connection accounts). (mu held)
       func releaseFor(provider, who, key string) {
       	for k, sg := range segmenters {
-      		if sg.provider != provider || k == key || sg.players[who] == 0 {
+      		if sg.provider != provider || k == key {
       			continue
       		}
       		alone := true
       		for p, t := range sg.players { // (a player asks about once per target duration)
-      			alone = alone && (p == who || mono()-t > 3*sg.target())
+      			alone = alone && (p == who || (mono()-t > 3*sg.target() && sg.waiting[p] == 0))
       		}
       		if alone {
       			delete(segmenters, k)
