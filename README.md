@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/coaxial-wordmark-dark.svg">
+    <img src="assets/coaxial-wordmark-light.svg" alt="coaxial" width="420">
+  </picture>
+</p>
+
 # iptv-vpn-proxy
 
 Put all of your IPTV behind one VPN, on every device, without installing a VPN
