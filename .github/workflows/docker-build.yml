@@ -1,12 +1,22 @@
-name: Build and Push the Relay Image
+name: Build and Push the Coaxial Image
 
 on:
   schedule:
     # Rebuild on the 1st of every month at midnight Eastern Time (5:00 UTC)
-    # to pick up Go and Alpine updates.
+    # to pick up Go, Alpine and VPN client updates.
     - cron: '0 5 1 * *'
-  # Manual builds from the Actions tab. Pushes never build.
+  # Manual builds, from the Actions tab or with: gh workflow run docker-build.yml --ref <branch>
+  # Pushes never build.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish (the build's version tag is always added too)
+        type: string
+        default: latest
+      fresh:
+        description: Build without the cache (the monthly build always does)
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -21,15 +31,25 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       image: ${{ steps.v.outputs.image }}
+      tag: ${{ steps.v.outputs.tag }}
     steps:
+      # The version is the build time in UTC, vYYYY.MM.DD.HHMM, stamped once here so that both
+      # architectures and the image tag carry the same one. (A build made by hand with docker build
+      # stamps itself the same way: see coaxial/bump-version.sh.)
       - name: Generate version and lowercase image name
         id: v
+        env:
+          WANTED_TAG: ${{ inputs.tag }}
         run: |
-          VERSION=$(date +'%Y.%m.%d')-${{ github.run_number }}
+          VERSION=v$(date -u +'%Y.%m.%d.%H%M')
           IMAGE="${{ env.REGISTRY }}/${GITHUB_REPOSITORY,,}"
+          # The tag asked for when the build was started by hand; "latest" otherwise (and for the monthly build).
+          TAG=$(printf '%s' "${WANTED_TAG:-latest}" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9._-' '-' | cut -c1-120)
+          [ -n "${TAG}" ] || TAG=latest
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "Version ${VERSION}, image ${IMAGE}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Version ${VERSION}, image ${IMAGE}:${TAG}"
 
   # Each architecture builds natively (no QEMU), then a manifest joins them.
   build:
@@ -63,10 +83,16 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: relay
+          context: coaxial
+          build-args: |
+            STAMP=${{ needs.prepare.outputs.version }}
           platforms: ${{ matrix.platform }}
           pull: true
-          no-cache: true
+          # The monthly build starts from nothing, so it always takes in the newest Go, Alpine and gluetun.
+          # A build started by hand reuses GitHub's cache unless "fresh" is ticked.
+          no-cache: ${{ github.event_name == 'schedule' || inputs.fresh == true }}
+          cache-from: type=gha,scope=coaxial-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=coaxial-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -116,9 +142,9 @@ jobs:
         run: |
           IMAGE="${{ needs.prepare.outputs.image }}"
           docker buildx imagetools create \
-            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${{ needs.prepare.outputs.tag }}" \
             -t "${IMAGE}:${{ needs.prepare.outputs.version }}" \
             $(printf "${IMAGE}@sha256:%s " *)
 
       - name: Inspect
-        run: docker buildx imagetools inspect "${{ needs.prepare.outputs.image }}:latest"
+        run: docker buildx imagetools inspect "${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.tag }}"
