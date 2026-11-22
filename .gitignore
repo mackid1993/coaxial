@@ -3,3 +3,6 @@
 stack.env
 compose.override.yaml
 *.ovpn
+
+# the settings folder of the example compose file (logins and the VPN key)
+config/
