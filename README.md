@@ -27,37 +27,84 @@ a provider port can open the status page on it and can try the player login.
 
 ## Run it
 
-Put [`compose.yaml`](compose.yaml) and [`.env.example`](.env.example) in a folder, copy `.env.example` to `.env`, and
-start it with `docker compose up -d`. The service is short:
+Put the two files below in a folder, name the second one `.env`, and start it with `docker compose up -d`. Both are
+also in this repository as [`compose.yaml`](compose.yaml) and [`.env.example`](.env.example).
+
+<details>
+<summary><code>compose.yaml</code></summary>
 
 ```yaml
+# Coaxial: IPTV through a VPN, in one container.
+# Providers and VPN settings are entered in the web page and kept in config/settings.json.
+# The ports Docker opens are set in .env, next to this file. You never edit ports here.
 services:
   coaxial:
     image: ghcr.io/mackid1993/coaxial:latest
+    container_name: coaxial
+    restart: unless-stopped
     cap_add:
-      - NET_ADMIN
+      - NET_ADMIN                     # the built-in VPN needs it
     devices:
-      - /dev/net/tun:/dev/net/tun
+      - /dev/net/tun:/dev/net/tun     # the built-in VPN needs it
     volumes:
-      - ./config:/config
+      - ./config:/config              # the one bind mount: settings.json and the VPN's files
     ports:
+      # Twenty slots, PORT_1 to PORT_20, filled from .env. A slot left out of .env opens nothing new
+      # (it falls back to PORT_1, which is already open). To add a provider port, add one PORT_n line
+      # to .env. Any free port, in any order.
       - "${PORT_1}:${PORT_1}"
-      # ... PORT_2 to PORT_20, and UI_PORT
+      - "${PORT_2:-${PORT_1}}:${PORT_2:-${PORT_1}}"
+      - "${PORT_3:-${PORT_1}}:${PORT_3:-${PORT_1}}"
+      - "${PORT_4:-${PORT_1}}:${PORT_4:-${PORT_1}}"
+      - "${PORT_5:-${PORT_1}}:${PORT_5:-${PORT_1}}"
+      - "${PORT_6:-${PORT_1}}:${PORT_6:-${PORT_1}}"
+      - "${PORT_7:-${PORT_1}}:${PORT_7:-${PORT_1}}"
+      - "${PORT_8:-${PORT_1}}:${PORT_8:-${PORT_1}}"
+      - "${PORT_9:-${PORT_1}}:${PORT_9:-${PORT_1}}"
+      - "${PORT_10:-${PORT_1}}:${PORT_10:-${PORT_1}}"
+      - "${PORT_11:-${PORT_1}}:${PORT_11:-${PORT_1}}"
+      - "${PORT_12:-${PORT_1}}:${PORT_12:-${PORT_1}}"
+      - "${PORT_13:-${PORT_1}}:${PORT_13:-${PORT_1}}"
+      - "${PORT_14:-${PORT_1}}:${PORT_14:-${PORT_1}}"
+      - "${PORT_15:-${PORT_1}}:${PORT_15:-${PORT_1}}"
+      - "${PORT_16:-${PORT_1}}:${PORT_16:-${PORT_1}}"
+      - "${PORT_17:-${PORT_1}}:${PORT_17:-${PORT_1}}"
+      - "${PORT_18:-${PORT_1}}:${PORT_18:-${PORT_1}}"
+      - "${PORT_19:-${PORT_1}}:${PORT_19:-${PORT_1}}"
+      - "${PORT_20:-${PORT_1}}:${PORT_20:-${PORT_1}}"
+      - "${UI_PORT:-8195}:${UI_PORT:-8195}"   # the settings and status page
 ```
+
+</details>
+
+<details>
+<summary><code>.env</code></summary>
+
+```
+# Coaxial: the ports Docker opens for it. Copy this file to .env, change or add a line,
+# then run: docker compose up -d
+# Provider logins and VPN settings are NOT here: they are entered in the web page.
+
+# ---- Ports for IPTV providers -------------------------------------------------
+# One line per port: PORT_1, PORT_2, ... up to PORT_20. Any free port on this
+# machine, in any order; they need not be next to each other. To add a provider,
+# add the next PORT_n line, run docker compose up -d, then pick that port for it
+# in the web page.
+PORT_1=8095
+PORT_2=8096
+
+# ---- Port for the settings and status page -------------------------------------
+UI_PORT=8195
+```
+
+</details>
 
 That is one service and one bind mount. The container is given the `NET_ADMIN` capability and the `/dev/net/tun`
 device for the VPN.
 
-The ports are set in `.env`, never in the compose file:
-
-```
-PORT_1=8095
-PORT_2=8096
-UI_PORT=8195
-```
-
-Each provider needs a port of its own. To add one, add the next `PORT_n` line (up to `PORT_20`), run
-`docker compose up -d` again, and pick that port for the provider in the web page. Any free port will do, in any order.
+The ports are set in `.env`, never in the compose file. Each provider needs a port of its own. To add one, add the
+next `PORT_n` line (up to `PORT_20`), run `docker compose up -d` again, and pick that port for the provider in the web
+page. Any free port will do, in any order.
 
 Open `http://<this machine>:8195`. Enter your VPN and provider settings and save. In each player, add an Xtream login
 with the address `http://<this machine>:<the provider's port>` and the player login you chose.
@@ -70,9 +117,10 @@ playing right now, and the Coaxial and gluetun versions. **Settings** has:
 - **Providers.** Add them, remove them, and reorder them with the up and down arrows. A new port is tried before
   saving: Coaxial listens on it for 8 seconds and the page tries to reach it from your browser. If that fails, Docker
   is not publishing the port, and the page does not save.
-- **VPN.** The service, WireGuard or OpenVPN, the WireGuard key and addresses, and server countries and cities. The
-  service, countries and cities are drop-downs filled from gluetun's own server lists. You can also type.
-  `Refresh server list` has gluetun fetch a new list now, which needs the VPN to be running.
+- **VPN.** The service and the connection type. WireGuard takes a private key and addresses. OpenVPN takes a username
+  and a password. Then where to connect: countries, cities, regions, and single servers by hostname or by name. All of
+  these are drop-downs filled from gluetun's own server lists, and the server lists narrow to the places you picked.
+  You can also type. `Refresh server list` has gluetun fetch a new list now, which needs the VPN to be running.
 - **Extra VPN variables.** Free-form names and values for any other gluetun variable.
 - **Player login**, and the port of the web page.
 
@@ -115,7 +163,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
 | `vpn.update_hours` | How often gluetun refreshes its list of your VPN service's servers (its `UPDATER_PERIOD`). 24 if left out, 0 for never. |
 | `vpn.gluetun_version` | Which gluetun program runs: `latest` (also when left out), a tag of gluetun's image such as `v3.41.3` to stay on one version, or `builtin` to fetch nothing and run the one in this image. |
-| `vpn.extra` | Any other gluetun variable under its own name, such as `OPENVPN_USER`. It is applied last, so it wins over the settings above. |
+| `vpn.extra` | Any other gluetun variable under its own name, such as `OPENVPN_PROTOCOL`. It is applied last, so it wins over the settings above. |
 
 gluetun keeps its server lists in `gluetun/servers` in the mounted folder, so they survive a restart.
 
