@@ -5,7 +5,8 @@
 Coaxial carries two small functions from [ah4c](https://github.com/sullrich/ah4c), unchanged: `copyFlush` (a copy that
 pushes every piece out as soon as it is written) and `readWithDeadline` (a read that gives up on a source that has gone
 quiet). They are in `coaxial/passthrough.go`, under ah4c's notice, and do the copying whenever Coaxial passes a movie, a
-series episode, catch-up, the guide or a video piece from a provider to a player.
+series episode, catch-up, the guide or a video piece from a provider to a player. The script that stamps the version
+at build time, `coaxial/bump-version.sh`, is also ah4c's, unchanged apart from one added comment line.
 
 ah4c was originally written by Aman Karmani ([tmm1](https://github.com/tmm1)), and has since been
 developed and maintained by Scott Ullrich ([sullrich](https://github.com/sullrich)), Scott Ueland
@@ -42,6 +43,38 @@ in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## flag-icons
+
+The country flag that the web page shows next to the VPN's exit country is from
+[flag-icons](https://github.com/lipis/flag-icons) by Panayiotis Lipiridis ([lipis](https://github.com/lipis)). The
+files in `coaxial/ui/flags/` are its 4x3 set, unchanged. flag-icons is under the MIT license.
+
+flag-icons' license, word for word:
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2013 Panayiotis Lipiridis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.

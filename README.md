@@ -167,6 +167,30 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 
 gluetun keeps its server lists in `gluetun/servers` in the mounted folder, so they survive a restart.
 
+## Choosing the VPN server
+
+If you name a server in the settings, Coaxial uses that one and leaves it alone. If you pick a city and leave both
+server boxes empty, Coaxial chooses the server for you:
+
+- **A city is required.** With only a country or a region picked, nothing is tried and gluetun picks a server at random,
+  as it always has. A country can hold hundreds of servers.
+- **Up to 8 servers are tried per run**, a different handful each time when the city has more. Only servers that fit
+  your settings are tried: the connection type, and any gluetun `..._ONLY` setting that is on. Secure core, Tor, free
+  and multihop servers are left out unless your settings ask for them.
+- **Trying a server means connecting to it.** The VPN reconnects once for each one, about 2 seconds each, and a short
+  test file is downloaded from Cloudflare through the VPN to measure it. Coaxial stays on the fastest.
+- **The choice and its speed are saved** in `gluetun/pick.json` in the mounted folder. When the container starts, it
+  goes straight to that server. Nothing is tried at start, so you can watch right away.
+- **In quiet times it checks, it does not shop around.** Once nothing has played or recorded for 10 minutes, Coaxial
+  waits an hour, then measures the server in use without reconnecting, and again every hour until someone plays. The
+  other servers are tried again only if no server is chosen yet for your settings, or if the one in use has become
+  slow: under 50 Mbit/s, or under a fifth of the speed it was chosen at. A server that is fast but no longer the very
+  fastest is kept, because trying the others takes the VPN down for about a minute and a recording that starts in
+  that minute would be missed. If someone starts playing in the middle of a run, it stops where it is.
+- **`Find the fastest server`** on the Status view runs it now. It asks first, because anything playing or recording
+  stops for a minute or two.
+- If the chosen server stops connecting for 2 minutes, Coaxial drops its choice and lets gluetun pick.
+
 ## VPN client updates
 
 gluetun is published only as a container image, and its program is one file in that image. So that a new gluetun does
@@ -184,10 +208,15 @@ not need a new Coaxial image, Coaxial fetches that file itself.
   be reached, a check fails or the new program does not run, Coaxial uses the last good copy, or else the program built
   into the image. The look-up and download get two minutes at most.
 - **While it runs**, Coaxial asks the registry once an hour whether a newer build is out, and the Status view says so.
-  `Check for updates` asks at once. Neither installs anything: Coaxial never restarts a running VPN to update it.
-- **`Update now`** appears when a newer build is out. It asks you first, because the VPN reconnects and anything
-  playing stops. A newer build is also taken whenever the container starts again. A VPN restart caused by a settings
-  change asks the registry again only if six hours have passed since it was last asked.
+  `Check for updates` asks at once. Checking never touches the VPN.
+- **A newer build installs by itself, but only when nothing is playing.** Once no one has watched or recorded anything
+  for 10 minutes, Coaxial restarts the VPN with the new build. It never does this while something is playing.
+- **If the VPN does not connect** within 2 minutes on the new build, Coaxial puts the build before it back and leaves
+  the new one alone until a different build is published or you ask for it by hand.
+- **`Update now`** appears when a newer build is out, for when you do not want to wait. It asks you first, because the
+  VPN reconnects and anything playing stops. A newer build is also taken whenever the container starts again.
+- **To stay on one version**, set `vpn.gluetun_version` to a tag such as `v3.41.3`, or to `builtin`. Then nothing is
+  ever installed by itself.
 
 The downloaded program runs with the VPN's privileges, like the one in the image. Every start of the VPN logs which
 program runs and why, on a line containing `VPN program:`. Only gluetun's own program is fetched. The system tools it
