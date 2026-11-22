@@ -28,6 +28,15 @@ on any of them.
 - **A device joining a channel already playing starts on a whole picture.**
   Its first video begins at the program table just before a keyframe, so its
   player does not throw away up to a second of video it cannot decode.
+- **Recorders and media servers get a steady stream.** A client that records
+  live TV or passes it on to other devices, and that is watched at its own
+  live edge, used to receive the provider's batches as they came; a device
+  watching at that edge stalled whenever the provider paused longer than
+  usual. Such a client is now sent each channel at playing speed, timed by
+  the stream's own clock, with the provider's opening burst held as a
+  reserve. By default this is any client on the machine the proxy runs on
+  (`STEADY_CLIENTS` in `.env` adds others or turns it off). Players are not
+  affected.
 - **A player that hangs up and asks again while tuning keeps its full start.**
   A channel nobody is on any more is opened for the next request as for
   the first one: everything the provider sent so far, at once. Before, the
@@ -519,6 +528,14 @@ PLAYER_PASSWORD=choose-a-password
 ##############################################################################
 PROXY_PORTS=8095-8096
 
+# Optional. Clients that record live TV or pass it on to other devices (a
+# DVR, a media server, a restreamer) are sent each channel at playing speed,
+# so a device watching them at their live edge does not stall when the
+# provider pauses between batches. Players are sent video as it comes.
+# "local" means anything running on this same machine; add the address of a
+# recorder elsewhere (STEADY_CLIENTS=local,192.168.1.50), or set "none".
+# STEADY_CLIENTS=local
+
 
 ##############################################################################
 # 4. YOUR PROVIDERS
@@ -836,7 +853,8 @@ services:
         target: /src/go.mod
     # Of everything in .env, the relay is given only the addresses of the
     # providers that are set up (checked the way Caddy's start checks them). No login,
-    # no password and no VPN key is kept in its environment. It is built once at
+    # no password and no VPN key is kept in its environment (only the provider
+    # addresses and STEADY_CLIENTS, see .env). It is built once at
     # start (no network needed: standard library only) and then runs on its own.
     command:
       - sh
@@ -852,7 +870,7 @@ services:
           list="$$list $$(printenv "$${n}_URL")"
         done
         cd /src && CGO_ENABLED=0 GOCACHE=/tmp/gocache GOFLAGS=-trimpath GOTOOLCHAIN=local go build -p 4 -o /tmp/relay . || exit 1
-        exec env -i PATH="$$PATH" GOMEMLIMIT=384MiB RELAY_PROVIDERS="$$list" RELAY_PORT="$${RELAY_PORT:-8197}" /tmp/relay
+        exec env -i PATH="$$PATH" GOMEMLIMIT=384MiB RELAY_PROVIDERS="$$list" RELAY_PORT="$${RELAY_PORT:-8197}" RELAY_STEADY="$${STEADY_CLIENTS:-local}" /tmp/relay
     # Healthy = still inside the tunnel container's network AND answering. As
     # with Caddy: if the tunnel was restarted underneath it, it stops so that
     # Docker starts it again inside the tunnel's new network. (start_period
@@ -1651,6 +1669,117 @@ configs:
       	return start
       }
 
+      // Steady delivery. A client that records a channel or passes it on to other devices (a DVR, a media
+      // server, a restreamer) may be watched at its own live edge. A provider sends live TV in batches with
+      // seconds of silence between them; a direct player rides those on the provider's opening burst, but a
+      // device at such a client's edge has nothing in hand and stalls at every long silence. So a steady
+      // client is sent the channel at playing speed, timed by the stream's own clock (PCR): the opening burst
+      // is held here as a reserve that covers the provider's silences, and the client's file grows evenly.
+      // Which clients: RELAY_STEADY, a list of addresses and/or "local" (a client on the machine the proxy
+      // runs on, the usual place for a recorder or media server); "none" turns it off.
+      var steadyLocal, steadyAddrs = func() (bool, map[string]bool) {
+      	local, addrs := false, map[string]bool{}
+      	for _, w := range strings.FieldsFunc(os.Getenv("RELAY_STEADY"), func(r rune) bool { return r == ',' || r == ' ' }) {
+      		switch w = strings.ToLower(strings.TrimSpace(w)); {
+      		case w == "local":
+      			local = true
+      		case w == "none":
+      			return false, map[string]bool{}
+      		default:
+      			if ip, err := netip.ParseAddr(w); err == nil {
+      				addrs[ip.Unmap().String()] = true
+      			}
+      		}
+      	}
+      	return local, addrs
+      }()
+
+      // steadyFor: whether a request gets steady delivery. "local" means the client's address is the address it
+      // reached the proxy on (another program on this machine), a loopback, or a container network on it.
+      func steadyFor(r *http.Request) bool {
+      	ip, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Relay-Client")))
+      	if err != nil {
+      		return false
+      	}
+      	ip = ip.Unmap()
+      	if steadyAddrs[ip.String()] {
+      		return true
+      	}
+      	if !steadyLocal {
+      		return false
+      	}
+      	host := r.Host
+      	if h, _, err := net.SplitHostPort(host); err == nil {
+      		host = h
+      	}
+      	if h, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil && h.Unmap() == ip {
+      		return true
+      	}
+      	return ip.IsLoopback() || netip.MustParsePrefix("172.16.0.0/12").Contains(ip)
+      }
+
+      type steady struct {
+      	pid          int
+      	p0, w0, last float64 // the clock and wall time it is timed from, and the newest clock sent
+      	on           bool
+      }
+
+      // lastPCR: the last program clock reference in b on the given stream (-1: the first one that carries one).
+      func lastPCR(b []byte, want int) (int, float64, bool) {
+      	start := -1
+      	for i := 0; i+376 < len(b); i++ {
+      		if b[i] == 0x47 && b[i+188] == 0x47 && b[i+376] == 0x47 {
+      			start = i
+      			break
+      		}
+      	}
+      	pid, v, ok := want, 0.0, false
+      	for i := start; start >= 0 && i+188 <= len(b) && b[i] == 0x47; i += 188 {
+      		p := b[i : i+188]
+      		id := int(p[1]&0x1f)<<8 | int(p[2])
+      		if p[3]&0x20 == 0 || p[4] < 7 || p[5]&0x10 == 0 || (pid >= 0 && id != pid) {
+      			continue
+      		}
+      		pid = id
+      		v = float64(int64(p[6])<<25|int64(p[7])<<17|int64(p[8])<<9|int64(p[9])<<1|int64(p[10])>>7) / 90000
+      		ok = true
+      	}
+      	return pid, v, ok
+      }
+
+      func steadyNote(rd *reader) string {
+      	if rd.steady != nil {
+      		return ", steady delivery"
+      	}
+      	return ""
+      }
+
+      // wait: seconds until item may go to a steady client (0: now, and its clock is counted as sent).
+      func (st *steady) wait(item []byte, now float64) float64 {
+      	pid, pcr, ok := lastPCR(item, st.pid)
+      	if !ok {
+      		return 0 // (no clock in this piece: it goes with its neighbours)
+      	}
+      	if !st.on || pcr < st.last-1 || pcr > st.last+10 { // the first clock, or a jump (a reopened stream, a wrap)
+      		w := now
+      		if st.on {
+      			w = math.Max(now, st.w0+(st.last-st.p0))
+      		}
+      		st.pid, st.p0, st.w0, st.last, st.on = pid, pcr, w, pcr, true
+      		return 0
+      	}
+      	d := st.w0 + (pcr - st.p0) - now
+      	if d > 30 { // (a clock far ahead of time is not trusted: timed afresh from here)
+      		st.p0, st.w0, st.last = pcr, now, pcr
+      		return 0
+      	}
+      	if d > 0.005 {
+      		return d
+      	}
+      	st.last = pcr
+      	return 0
+      }
+
       type pace struct{ have, credit, at, guess float64 } // a joiner's cushion, allowance, when counted, speed guessed
 
       type reader struct {
@@ -1663,7 +1792,8 @@ configs:
       	came                float64
       	written             atomic.Int64
       	pace                *pace
-      	cut                 func() // cuts its connection
+      	steady              *steady // steady delivery (see steadyFor), or nil
+      	cut                 func()  // cuts its connection
       }
 
       func (rd *reader) signal() {
@@ -1834,12 +1964,12 @@ configs:
       		ch.ring = ch.ring[1:]
       	}
       	for rd := range ch.readers {
-      		if rd.n <= behind+rd.given { // (what a joiner was handed at the start is not "falling behind")
+      		if rd.n <= behind+rd.given || (rd.steady != nil && rd.n <= 2*farBehind) { // (what a joiner was handed at the start, and a steady client's reserve, are not "falling behind")
       			rd.behindAt = 0
       		} else if rd.behindAt == 0 {
       			rd.behindAt = now
       		}
-      		if rd.n > farBehind+rd.given || (rd.behindAt != 0 && now-rd.behindAt > behindSeconds) {
+      		if rd.n > farBehind+rd.given && (rd.steady == nil || rd.n > 2*farBehind) || (rd.behindAt != 0 && now-rd.behindAt > behindSeconds) {
       			say("a reader was too slow to keep up with its channel and was disconnected")
       			rd.end(true)
       			delete(ch.readers, rd)
@@ -2302,6 +2432,9 @@ configs:
       	rd := ch.join(first)
       	rd.who, rd.id, rd.port, rd.came = whoIs(r), channelID(uri), r.Header.Get("X-Relay-Port"), mono()
       	rd.kind = map[string]string{"/ts": "MPEG-TS", "/hls": "MPEG-TS fed from HLS"}[path]
+      	if steadyFor(r) { // timed by the stream's clock instead (see steady)
+      		rd.pace, rd.steady = nil, &steady{pid: -1}
+      	}
       	mu.Unlock()
       	why, started := "the player hung up", false
       	defer func() {
@@ -2350,9 +2483,9 @@ configs:
       	mu.Unlock()
       	started = true
       	if first {
-      		say("%s started channel %s (%s), first video in %.1f s", rd.who, rd.id, hostOf(provider), born-asked)
+      		say("%s started channel %s (%s), first video in %.1f s%s", rd.who, rd.id, hostOf(provider), born-asked, steadyNote(rd))
       	} else {
-      		say("%s joined channel %s (%s)", rd.who, rd.id, hostOf(provider))
+      		say("%s joined channel %s (%s)%s", rd.who, rd.id, hostOf(provider), steadyNote(rd))
       	}
       	for {
       		mu.Lock()
@@ -2383,6 +2516,19 @@ configs:
       				continue
       			}
       			p.credit -= float64(len(rd.q[0]))
+      		}
+      		if len(rd.q) > 0 && rd.steady != nil {
+      			if d := rd.steady.wait(rd.q[0], mono()); d > 0 {
+      				mu.Unlock()
+      				t := time.NewTimer(secs(math.Min(d, 1)))
+      				select {
+      				case <-gone:
+      					t.Stop()
+      					return
+      				case <-t.C:
+      				}
+      				continue
+      			}
       		}
       		if len(rd.q) > 0 {
       			data := rd.q[0]
@@ -5188,6 +5334,31 @@ together.
   body of its answer are passed to the player. A reader waits up to 60
   seconds for a channel's first video.
 
+### Steady delivery for recorders and media servers
+
+Some clients do not play a channel themselves but record it or pass it on to
+other devices: a DVR, a media server, a restreamer. A device watching such a
+client at its live edge has nothing in hand. A provider sends live TV in
+batches, with seconds of silence between them; a player connected to the
+proxy rides those out on the provider's opening burst, but a device at a
+recorder's live edge stalls at every silence longer than its own small buffer.
+
+So a client named in `STEADY_CLIENTS` (default `local`) is sent each channel
+at playing speed, timed by the stream's own clock (PCR), instead of as the
+batches arrive. The provider's opening burst stays in the relay as a reserve
+that covers its silences, and the client's file grows evenly. A clock that
+jumps (a stream asked for again, a wrap) is timed afresh from there.
+
+- **Who.** `local` is any client whose address is the address it used to
+  reach the proxy (another program on the same machine), a loopback address,
+  or a container network on it (`172.16.0.0/12`). Other addresses can be
+  listed; `none` turns it off.
+- **Cost.** The client runs a few seconds further behind live (the size of
+  the provider's opening burst), which a recording does not notice. Its
+  reserve is not counted as falling behind, up to 128 MB.
+- **Players are unchanged.** A player on another device gets the channel as
+  before: the opener everything at once, a joiner its paced cushion.
+
 ### The HLS-to-MPEG-TS bridge (`/hls`)
 
 With `NAME_LIVE_TV=hls`, a live `.ts` request does not go to the provider as
@@ -5427,7 +5598,8 @@ As written in `compose.yaml`:
   providers are set up, using the main checks Caddy's start script uses (the
   name, the address form, the lines being present, `hls` or `ts`), builds the
   relay, and starts it with a cleared environment holding only `PATH`, a
-  memory target and the list of those providers' addresses. No login, password or VPN key is in the program's
+  memory target, the list of those providers' addresses and the steady
+  delivery list (`STEADY_CLIENTS`). No login, password or VPN key is in the program's
   environment. It does see a provider's login when Caddy hands it a live
   channel's, a playlist's or a list's address, and the easy login when the
   status page is drawn. The session memory holds channel addresses with the
