@@ -493,10 +493,17 @@ func keptPrograms(bin string) []string {
 }
 
 // tidy: the copy in use and the one before it stay; older ones, and files left by a broken download, go.
+// The one before is the build the VPN last connected with, when that is known: a newer build it never
+// connected with is undone to that one, and must not be the copy kept in its place.
 func tidy(bin, using string) {
-	n := 1
+	n, good := 1, connected(bin)
+	if _, err := os.Stat(filepath.Join(bin, strings.TrimPrefix(good, "sha256:"))); good == "" || good == using || err != nil {
+		good = ""
+	} else {
+		n++
+	}
 	for _, d := range keptPrograms(bin) {
-		if d == using {
+		if d == using || d == good {
 			continue
 		}
 		if n++; n > keepPrograms {
@@ -520,6 +527,9 @@ func fetchProgram(ctx context.Context, client *http.Client, reg registry, tag, a
 	data, digest, err := f.manifest(tag)
 	if err != nil {
 		return none, f, err
+	}
+	if digest == skipped(bin) { // (left alone after an update it did not connect with: not downloaded again)
+		return none, f, errSkipped
 	}
 	if p, err := cached(bin, digest, arch); err == nil {
 		p.Source, p.Tag = "cached", tag
@@ -659,40 +669,13 @@ func (l *launcher) chooseProgram(tag string) program {
 		why = fmt.Sprintf("the last look-up failed %d minutes ago (tried again after %d)", int(age.Minutes()), int(retryAfter.Minutes()))
 	}
 	if why == "" || lastOK {
-		ctx, cancel := context.WithTimeout(context.Background(), fetchLimit)
-		client, start := fetchClient(), time.Now()
-		var fails []string
-		var got program
-		for _, reg := range registries {
-			p, f, err := fetchProgram(ctx, client, reg, tag, arch, bin)
-			if err == nil && !usable(p) {
-				os.RemoveAll(filepath.Dir(p.Path))
-				err = errors.New("its program does not run here")
-			}
-			if err != nil {
-				fails = append(fails, reg.name+": "+plain(err))
-				continue
-			}
-			got = p
-			if p.Source == "downloaded" {
-				why = fmt.Sprintf("%s at %s is new here; %.1f MB downloaded in %.1f s and checked against the registry's checksums",
-					tag, reg.name, float64(f.bytes)/1e6, time.Since(start).Seconds())
-				noteCurrent(bin, p)
-			} else {
-				why = fmt.Sprintf("%s at %s is still this one; nothing downloaded", tag, reg.name)
-			}
-			break
-		}
-		cancel()
-		l.mu.Lock()
-		l.progAsked, l.progTag, l.progOK, l.progDigest = time.Now(), tag, got.Path != "", got.Digest
-		l.mu.Unlock()
+		got, fetched := l.askRegistries(tag, usable)
 		if got.Path != "" {
 			os.Chtimes(filepath.Dir(got.Path), time.Now(), time.Now())
 			tidy(bin, got.Digest)
-			return pick(got, why)
+			return pick(got, fetched)
 		}
-		why = "the newest could not be fetched (" + strings.Join(fails, "; ") + ")"
+		why = fetched
 	}
 	var good []program // the copies kept, the most recently used first; one fetched for this tag before the others
 	for _, d := range keptPrograms(bin) {
@@ -713,6 +696,50 @@ func (l *launcher) chooseProgram(tag string) program {
 	return pick(builtinProgram, why+" and no usable copy is cached")
 }
 
+// askRegistries asks the registries what the tag is now and returns its program (cached, or downloaded and
+// checked) with why; got.Path is "" when none could be had. What came of it is noted for chooseProgram.
+func (l *launcher) askRegistries(tag string, usable func(program) bool) (got program, why string) {
+	bin, arch := binDir(l.dir), runtime.GOARCH
+	ctx, cancel := context.WithTimeout(context.Background(), fetchLimit)
+	defer cancel()
+	client, start := fetchClient(), time.Now()
+	var fails []string
+	for _, reg := range registries {
+		p, f, err := fetchProgram(ctx, client, reg, tag, arch, bin)
+		if err == nil && !usable(p) {
+			os.RemoveAll(filepath.Dir(p.Path))
+			err = errors.New("its program does not run here")
+		}
+		if errors.Is(err, errSkipped) { // the other registry would name the same build
+			fails = append(fails, reg.name+": "+plain(err))
+			break
+		}
+		if err != nil {
+			fails = append(fails, reg.name+": "+plain(err))
+			continue
+		}
+		got = p
+		if p.Source == "downloaded" {
+			why = fmt.Sprintf("%s at %s is new here; %.1f MB downloaded in %.1f s and checked against the registry's checksums",
+				tag, reg.name, float64(f.bytes)/1e6, time.Since(start).Seconds())
+			noteCurrent(bin, p)
+		} else {
+			why = fmt.Sprintf("%s at %s is still this one; nothing downloaded", tag, reg.name)
+		}
+		break
+	}
+	l.mu.Lock()
+	l.progAsked, l.progTag, l.progOK, l.progDigest = time.Now(), tag, got.Path != "", got.Digest
+	if got.Path != "" { // (what the registry names now is the newest: an older answer would offer the build left behind)
+		l.updDigest, l.updAt, l.updErr = got.Digest, time.Now(), ""
+	}
+	l.mu.Unlock()
+	if got.Path == "" {
+		why = "the newest could not be fetched (" + strings.Join(fails, "; ") + ")"
+	}
+	return got, why
+}
+
 // ---------------------------------------------------------------------------
 // Is there a newer VPN program? Asked once an hour and when the page asks. Taking it means starting the VPN
 // again, which cuts what is playing. So it is installed by itself only after nothing has played for a while,
@@ -721,17 +748,27 @@ func (l *launcher) chooseProgram(tag string) program {
 
 const (
 	updateEvery = time.Hour
-	idleMinutes = 10              // nothing playing for this long before an update is installed unasked
-	updateWait  = 2 * time.Minute // the VPN must be up again within this, or the update is undone
+	idleMinutes = 10 // nothing playing for this long before an update is installed unasked
 )
+
+var updateWait = 2 * time.Minute // the VPN must be up again within this, or the update is undone (a variable for the tests)
+
+// errSkipped: the newest build is the one left alone (see skipped).
+var errSkipped = errors.New("the newest build is the one left alone after an update it did not connect with")
 
 // skipped: the build that did not connect after an update ("" if none). Kept in a file, so a restart of the
 // container does not walk into it again.
-func skipped(bin string) string {
+func skipped(bin string) string { return noted(bin, "skip.json") }
+
+// connected: the build the VPN last connected with ("" if none yet), kept in a file for the same reason:
+// after a restart, a newer build the VPN never comes up with can still be told from one it did.
+func connected(bin string) string { return noted(bin, "good.json") }
+
+func noted(bin, file string) string {
 	var note struct {
 		Digest string `json:"digest"`
 	}
-	data, _ := os.ReadFile(filepath.Join(bin, "skip.json"))
+	data, _ := os.ReadFile(filepath.Join(bin, file))
 	json.Unmarshal(data, &note)
 	if !digestRe.MatchString(note.Digest) {
 		return ""
@@ -742,16 +779,51 @@ func skipped(bin string) string {
 // nothingPlaying: the proxy part answers and says no one is watching or recording.
 func nothingPlaying() bool {
 	var in struct{ Playing []any }
-	data, ok := askProxy("/status", 8*time.Second)
+	data, ok := askProxy("/playing", 8*time.Second)
 	return ok && json.Unmarshal(data, &in) == nil && len(in.Playing) == 0
 }
 
-// restartForProgram starts the VPN again so that it takes whichever program chooseProgram now picks.
+// restartForProgram starts the VPN again so that it takes whichever program chooseProgram now picks. The
+// registry is asked first, through the VPN that still runs: gluetun leaves its firewall and its name server
+// (127.0.0.1) behind when it stops, so nothing can be fetched from the moment the VPN is stopped until it is up
+// again. The start that follows takes what was found from the cache.
 func (l *launcher) restartForProgram(why string) {
 	l.mu.Lock()
-	l.progAsked, l.vpnKey = time.Time{}, why
+	s := l.set
+	l.mu.Unlock()
+	if s != nil {
+		if tag, _ := s.gluetunVersion(); tag != "builtin" {
+			l.work.Lock() // (not while a start is choosing one)
+			got, found := l.askRegistries(tag, func(p program) bool { return tryProgram(p.Path) == nil })
+			if got.Path != "" { // (as a start does: the newest, the one the VPN last connected with, and no third)
+				tidy(binDir(l.dir), got.Digest)
+			}
+			l.work.Unlock()
+			say("VPN program: asked before the VPN is stopped: %s", found)
+		}
+	}
+	l.mu.Lock()
+	l.vpnKey = why
 	l.mu.Unlock()
 	l.apply()
+}
+
+// askBeforeStop: a start of the VPN that will want the registry (another tag, or the last look-up is old) asks
+// it now, while the VPN still runs, for the reason given at restartForProgram; the start then takes the answer
+// from the cache. Without it, a gluetun_version changed in the settings was never fetched. (l.work held)
+func (l *launcher) askBeforeStop(tag string) {
+	l.mu.Lock()
+	up, last, lastTag, lastOK := l.vpnUp, l.progAsked, l.progTag, l.progOK
+	l.mu.Unlock()
+	age := time.Since(last)
+	if !up || tag == "builtin" || lastTag == tag && (lastOK && age < recheckAfter || !lastOK && age < retryAfter) {
+		return
+	}
+	got, found := l.askRegistries(tag, func(p program) bool { return tryProgram(p.Path) == nil })
+	if got.Path != "" {
+		tidy(binDir(l.dir), got.Digest)
+	}
+	say("VPN program: asked before the VPN is stopped: %s", found)
 }
 
 // autoUpdate installs the newer program found, watches the VPN come back, and undoes it if it does not.
@@ -771,6 +843,9 @@ func (l *launcher) autoUpdate() {
 	}
 	l.mu.Lock()
 	got := l.prog.Digest
+	if got != want { // (not fetched: tried again when a newer one is named, or from the web page)
+		l.updFailed = want
+	}
 	l.mu.Unlock()
 	if up {
 		if got == want {
@@ -862,9 +937,14 @@ func (l *launcher) programUpdate() map[string]any {
 func (l *launcher) watchProgram() {
 	time.Sleep(20 * time.Second)
 	var asked, quietSince, downSince, pickNext time.Time
+	bin := binDir(l.dir)
+	good := connected(bin)
 	for ; ; time.Sleep(20 * time.Second) {
 		l.mu.Lock()
-		up, trying := l.vpnUp, l.pickBusy
+		up, trying, works := l.vpnUp, l.pickBusy, "" // works: the build the VPN is connected with
+		if up && l.vpn != nil && l.vpn.ever {
+			works = l.vpn.prog
+		}
 		l.mu.Unlock()
 		if trying { // servers are being tried: the tunnel comes and goes, and nothing here should read that as trouble
 			downSince, quietSince = time.Time{}, time.Time{}
@@ -875,13 +955,18 @@ func (l *launcher) watchProgram() {
 			asked = time.Now()
 		}
 		l.mu.Lock()
-		pending := l.updDigest != "" && l.updDigest != l.prog.Digest
+		pending := l.updDigest != "" && l.updDigest != l.prog.Digest && l.updDigest != l.updFailed
 		want, named := l.updDigest, l.pick.Env != "" || l.pickTry != ""
 		l.mu.Unlock()
 		if !up {
-			// A server chosen earlier that no longer connects is dropped: gluetun picks for itself again.
+			// A server chosen earlier that no longer connects is dropped: gluetun picks for itself again. And a
+			// build the VPN never connected with here, taken at a start (a newer one was published, or the
+			// container was restarted in the middle of an update), is undone like a failed update.
 			if downSince.IsZero() {
 				downSince = time.Now()
+			} else if l.undoBuild(good, time.Since(downSince)) {
+				downSince = time.Time{}
+				continue
 			} else if named && time.Since(downSince) > 2*time.Minute {
 				say("VPN server: the VPN has not connected for 2 minutes on the server chosen; letting gluetun choose")
 				l.mu.Lock()
@@ -895,6 +980,10 @@ func (l *launcher) watchProgram() {
 			continue
 		}
 		downSince = time.Time{}
+		if works != "" && works != good {
+			writeWhole(filepath.Join(bin, "good.json"), map[string]string{"digest": works})
+			good = works
+		}
 		if !nothingPlaying() {
 			quietSince = time.Time{}
 			continue
@@ -919,6 +1008,23 @@ func (l *launcher) watchProgram() {
 			l.pickDue()
 		}
 	}
+}
+
+// undoBuild: the VPN has been down this long on the build in use. If that is a build it never connected with
+// here (good: the one it last did), and for updateWait, the build is left alone (skip.json) and the VPN started
+// again, on the one before. (watchProgram)
+func (l *launcher) undoBuild(good string, down time.Duration) bool {
+	l.mu.Lock()
+	running := l.prog.Digest
+	l.mu.Unlock()
+	if running == "" || good == "" || running == good || down <= updateWait {
+		return false
+	}
+	writeWhole(filepath.Join(binDir(l.dir), "skip.json"), map[string]string{"digest": running})
+	say("VPN program: the VPN has not connected for %d minutes on gluetun %s, which it never connected with here; going back to %s and leaving that build alone",
+		int(updateWait.Minutes()), short(running), short(good))
+	l.restartForProgram("(build undone)")
+	return true
 }
 
 // apiProgramCheck: "check now".
@@ -949,5 +1055,6 @@ func (l *launcher) apiProgramUpdate(w http.ResponseWriter, r *http.Request) {
 	l.mu.Lock()
 	p := l.prog
 	l.mu.Unlock()
-	writeJSON(w, 200, map[string]any{"ok": true, "program": map[string]string{"version": p.Version, "source": p.Source, "digest": short(p.Digest)}, "update": l.checkProgram("after the update")})
+	// (the registry was asked just before the VPN stopped; it cannot be asked again until the VPN is back up)
+	writeJSON(w, 200, map[string]any{"ok": true, "program": map[string]string{"version": p.Version, "source": p.Source, "digest": short(p.Digest)}, "update": l.programUpdate()})
 }

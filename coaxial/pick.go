@@ -43,6 +43,9 @@ type picked struct {
 	OFO  float64 `json:"out_of_order"`
 	Of   int     `json:"of"` // how many were tried
 	At   string  `json:"at"`
+	// Unfinished: someone started playing before all of them were tried. The server is used (on a restart
+	// too); the next quiet time tries them again.
+	Unfinished bool `json:"unfinished,omitempty"`
 }
 
 type candidate struct{ name, env string }
@@ -285,7 +288,7 @@ func pickScore(mbps, ofo float64) float64 { return mbps }
 // proxy part is not running, and then nobody can be).
 func someonePlaying() bool {
 	var in struct{ Playing []any }
-	data, ok := askProxy("/status", 8*time.Second)
+	data, ok := askProxy("/playing", 8*time.Second)
 	return ok && json.Unmarshal(data, &in) == nil && len(in.Playing) > 0
 }
 
@@ -306,8 +309,14 @@ func (l *launcher) waitUp(d time.Duration) bool {
 // as soon as someone starts playing.
 func (l *launcher) pickServer(why string, asked bool) {
 	l.mu.Lock()
-	s := l.set
+	s, busy := l.set, l.pickBusy
+	if busy && !asked { // (one run at a time; the page's button marks its own run before it starts it)
+		l.mu.Unlock()
+		return
+	}
+	l.pickBusy = true
 	l.mu.Unlock()
+	defer func() { l.mu.Lock(); l.pickBusy = false; l.mu.Unlock() }() // (on every way out)
 	if s == nil {
 		return
 	}
@@ -353,10 +362,6 @@ func (l *launcher) pickServer(why string, asked bool) {
 	}
 	began := time.Now()
 	say("VPN server: %s; trying %d servers that fit the settings", why, len(cands))
-	l.mu.Lock()
-	l.pickBusy = true
-	l.mu.Unlock()
-	defer func() { l.mu.Lock(); l.pickBusy = false; l.mu.Unlock() }()
 	var best picked
 	tried, stopped := 0, false
 	for _, c := range cands {
@@ -412,10 +417,11 @@ func (l *launcher) pickServer(why string, asked bool) {
 			if now == best.Env {
 				p = best
 			}
-			p.Key = "" // (not a finished choice: the next quiet time tries again)
+			p.Key, p.Unfinished, p.At = key, true, time.Now().UTC().Format(time.RFC3339)
 			l.mu.Lock()
-			l.pick, l.pickTry = p, now
+			l.pick, l.pickTry = p, "" // (kept as the choice for these settings only, by its key)
 			l.mu.Unlock()
+			writeWhole(pickFile(l.dir), p)
 		}
 		return
 	}
@@ -461,8 +467,12 @@ func (l *launcher) pickDue() {
 	if someonePlaying() {
 		return
 	}
-	if p.Key != key {
-		l.pickServer("no server is chosen for these settings yet", false)
+	if p.Key != key || p.Unfinished {
+		why := "no server is chosen for these settings yet"
+		if p.Key == key {
+			why = "the last run was cut short"
+		}
+		l.pickServer(why, false)
 		return
 	}
 	if p.Env == "" { // (nothing to choose between for these settings: gluetun's own choice stands)

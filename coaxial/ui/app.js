@@ -413,7 +413,8 @@
       }),
       ui: { port: d.ui && d.ui.port != null ? String(d.ui.port) : '' },
       vpn: {
-        service_provider: v.service_provider || '', type: v.type === 'openvpn' ? 'openvpn' : 'wireguard',
+        // type as saved: none means gluetun's own default (OpenVPN), and is sent back as none
+        service_provider: v.service_provider || '', type: v.type == null ? '' : String(v.type),
         wireguard_private_key: '', wireguard_private_key_set: !!v.wireguard_private_key_set,
         wireguard_addresses: v.wireguard_addresses || '', server_countries: v.server_countries || '',
         server_cities: v.server_cities || '', server_regions: v.server_regions || '',
@@ -725,7 +726,7 @@
     remove.addEventListener('click', function () {
       S.cur.providers.splice(i, 1);
       S.errors = {}; S.general = [];
-      renderSettings();
+      renderSettings(); refreshBar();
       var next = document.querySelectorAll('.pcard .icon-btn.danger')[Math.min(i, S.cur.providers.length - 1)] || $('#add-provider');
       if (next) next.focus();
     });
@@ -853,7 +854,7 @@
           combo({ label: 'VPN service', path: 'vpn.service_provider', mono: true, placeholder: 'protonvpn',
             options: function () { return vpnList('providers'); }, get: function () { return v.service_provider; }, set: function (x) { v.service_provider = x; syncCombos(); },
             hint: function (has) { return has ? 'Pick one or type the name your VPN service goes by.' : 'Type the name your VPN service goes by.'; } }),
-          segmented({ label: 'Connection type', path: 'vpn.type', value: v.type, options: [['wireguard', 'WireGuard'], ['openvpn', 'OpenVPN']], set: function (x) { v.type = x; renderSettings(); refreshBar(); } }),
+          segmented({ label: 'Connection type', path: 'vpn.type', value: v.type || 'openvpn', options: [['wireguard', 'WireGuard'], ['openvpn', 'OpenVPN']], set: function (x) { v.type = x; renderSettings(); refreshBar(); } }),
           wg ? field({ label: 'WireGuard private key', path: 'vpn.wireguard_private_key', value: v.wireguard_private_key, secret: true, isSet: v.wireguard_private_key_set, mono: true, span: true, set: function (x) { v.wireguard_private_key = x; } }) : null,
           wg ? field({ label: 'WireGuard addresses', path: 'vpn.wireguard_addresses', value: v.wireguard_addresses, mono: true, span: true, placeholder: '10.2.0.2/32', hint: 'The interface address from your VPN account.', set: function (x) { v.wireguard_addresses = x; } }) : null,
           !wg ? field({ label: 'OpenVPN username', path: 'vpn.openvpn_user', value: v.openvpn_user, mono: true, hint: 'The OpenVPN username from your VPN account. It is often not your account email.', set: function (x) { v.openvpn_user = x; } }) : null,
@@ -882,7 +883,7 @@
 
       section('Web interface', 'Where this page is served.',
         h('div', { class: 'card panel' }, h('div', { class: 'grid' },
-          field({ label: 'Port', path: 'ui.port', value: m.ui.port, numeric: true, mono: true, placeholder: '8195', hint: 'After a change, this page moves to the new port.', set: function (x) { m.ui.port = x; } }))))
+          field({ label: 'Port', path: 'ui.port', value: m.ui.port, numeric: true, mono: true, placeholder: '8195', hint: 'Docker must open it too: UI_PORT in the .env file. After a change, this page is served on the new port only: open it there.', set: function (x) { m.ui.port = x; } }))))
     ]);
     paintErrors(); paintServers();
     paintPortWarn();
@@ -976,6 +977,16 @@
           message: 'Port ' + port + ' is not opened by Docker. Add a line such as PORT_3=' + port + ' (the next free PORT_n) to the .env file next to your compose file (or -p ' + port + ':' + port + ' to docker run), recreate the container, then save again.' });
       } catch (e) { /* the check could not run: let the save go on, the check after saving still warns */ }
     }
+    // The page's own port: after saving, the page moves there. If Docker does not open it, the page would be
+    // out of reach, so it is tried first in the same way.
+    var uiNew = String(S.cur.ui.port || '').trim(), uiOld = String((S.base && S.base.ui && S.base.ui.port) || '').trim();
+    if (/^[1-9][0-9]{0,4}$/.test(uiNew) && uiNew !== uiOld) {
+      try {
+        var u = await api('POST', '/api/port/try?port=' + uiNew);
+        if (u.ok && !(await reach(uiNew)) && !(await reach(uiNew))) shut.push({ field: 'ui.port',
+          message: 'Port ' + uiNew + ' is not opened by Docker, so this page could not be reached there. Set UI_PORT=' + uiNew + ' in the .env file next to your compose file (or -p ' + uiNew + ':' + uiNew + ' to docker run), recreate the container, then save again.' });
+      } catch (e) { /* the check could not run */ }
+    }
     if (shut.length) { S.saving = false; setErrors(shut); return; }
     try {
       var r = await api('PUT', '/api/settings', payload(S.cur));
@@ -984,6 +995,10 @@
         S.setup = false;
         await loadSettings();
         toast(vpnToo ? 'Saved. The proxy is restarting and the VPN is reconnecting.' : 'Saved. The proxy is restarting.');
+        if (/^[1-9][0-9]{0,4}$/.test(uiNew) && uiNew !== uiOld) { // (this address stops answering in a moment)
+          toast('Saved. This page now answers at ' + location.protocol + '//' + location.hostname + ':' + uiNew + '/ only. Open it there.');
+          return;
+        }
         checkPorts(vpnToo ? 45 : 20);
       } else if (r.status === 400 && r.data && r.data.errors && r.data.errors.length) {
         setErrors(r.data.errors);

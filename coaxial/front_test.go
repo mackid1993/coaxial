@@ -31,6 +31,8 @@ func TestSwap(t *testing.T) {
 		{"/__ch/live/tv/easy/12.m3u8/__index.m3u8?t=1", "/__ch/live/tv/easy/12.m3u8/__index.m3u8?t=1", "/live/real%20user/p%40ss%261/12.m3u8"},
 		{"/__ch/tv/easy/12.m3u8/seg_4.ts", "/__ch/tv/easy/12.m3u8/seg_4.ts", "/real%20user/p%40ss%261/12.m3u8"},
 		{"/__ch/live/a/b/12.m3u8/__index.m3u8", "/__ch/live/a/b/12.m3u8/__index.m3u8", "/live/a/b/12.m3u8"},
+		{"/hls/tv/easy/12_1.ts?t=1", "/hls/real%20user/p%40ss%261/12_1.ts?t=1", ""},
+		{"/__cdn/http/cdn.example/tv/easy/1.ts", "/__cdn/http/cdn.example/tv/easy/1.ts", ""},
 	} {
 		u, err := url.ParseRequestURI(c[0])
 		if err != nil {
@@ -49,7 +51,8 @@ func TestSwap(t *testing.T) {
 func TestLiveMatch(t *testing.T) {
 	f := testFront()
 	for p, want := range map[string]bool{"/live/tv/easy/12.ts": true, "/tv/easy/12": true, "/tv/easy/12.ts": true, "//live//tv//easy//12.ts": true,
-		"/tv/easy/abc": false, "/live/tv/easy/12.m3u8": false, "/movie/tv/easy/12.ts": false, "/live/x/y/12.ts": false, "/live/tv/easy/a/12.ts": false} {
+		"/tv/easy/abc": false, "/live/tv/easy/12.m3u8": false, "/movie/tv/easy/12.ts": false, "/live/x/y/12.ts": false, "/live/tv/easy/a/12.ts": false,
+		"/live/tv/easy/12_4031.ts": false, "/live/tv/easy/seg-7.ts": false} {
 		if f.liveTS.MatchString(p) != want {
 			t.Errorf("%s: live match should be %v", p, want)
 		}

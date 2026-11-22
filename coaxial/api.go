@@ -27,6 +27,9 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 	case "/status":
 		data, _ := json.Marshal(statusData())
 		answer(w, 200, "application/json", string(data))
+	case "/playing": // what plays, and nothing else (see playingNow)
+		data, _ := json.Marshal(map[string]any{"playing": playingNow()})
+		answer(w, 200, "application/json", string(data))
 	default:
 		answer(w, 404, "", "")
 	}
@@ -122,6 +125,63 @@ func statusData() map[string]any {
 	if k := keptValues["ping"]; k != nil && k.value != nil {
 		if ms, ok := k.value.(float64); ok {
 			out["ping_ms"] = int(math.Round(ms))
+		}
+	}
+	return out
+}
+
+// films: devices sent a film, an episode or catch-up through the pass-through: how many such answers are under
+// way, and when the last one ended. A player often asks for a film in parts, one after another.
+type film struct {
+	open int
+	last float64
+}
+
+var films = map[string]*film{}
+
+// watching notes a film answer to who; the function it returns notes its end.
+func watching(who string) func() {
+	mu.Lock()
+	defer mu.Unlock()
+	f := films[who]
+	if f == nil {
+		f = &film{}
+		films[who] = f
+	}
+	f.open++
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		f.open, f.last = f.open-1, mono()
+	}
+}
+
+// playingNow: who is playing, counted as statusData counts them, without asking anyone anything. The launcher
+// asks this every 20 s, day and night; /status would ask each provider for its account each time, and for its
+// channel list every minute while that fails. That is for the page, while someone looks at it. A film, an
+// episode or catch-up counts too (not on the page), until a minute after its last part was sent: the VPN must
+// not be restarted under it for an update or a server check.
+func playingNow() []any {
+	mu.Lock()
+	defer mu.Unlock()
+	now, out := mono(), []any{}
+	for who, f := range films {
+		if f.open > 0 || now-f.last <= 60 {
+			out = append(out, map[string]any{"device": who})
+		} else {
+			delete(films, who)
+		}
+	}
+	for _, c := range channels {
+		for rd := range c.readers {
+			if rd.kind != "HLS built from MPEG-TS" { // (its players are counted below)
+				out = append(out, map[string]any{"device": rd.who})
+			}
+		}
+	}
+	for _, h := range hlsRows {
+		if now-h.last <= 30 {
+			out = append(out, map[string]any{"device": h.who})
 		}
 	}
 	return out

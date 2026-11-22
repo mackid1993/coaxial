@@ -6,15 +6,19 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 var errNotHLS = errors.New("not joinable HLS")
@@ -204,6 +208,10 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 		mu.Unlock()
 		var last int64
 		hasLast, misses, lost, got, fresh := false, 0, 0, 0.0, mono()
+		// the numbers readers were handed first; a piece numbered afresh (after a discontinuity: another
+		// packager, an advert) is handed on under them, as a TS stream asked for again is (see renumber.go)
+		var pub numbering
+		var rn *renumber
 		var sent []string // names of the newest 60 pieces
 		for {
 			began := mono()
@@ -289,6 +297,15 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 					say("a provider sent nothing for %.0f s, then carried on", now-got)
 				}
 				got, fresh = now, now
+				if p, ok := programOf(data); ok && pub.es == nil {
+					pub = p
+				} else if ok {
+					rn = renumbering(p, pub)
+				}
+				if rn != nil {
+					rn.part = nil
+					data = rn.apply(data)
+				}
 				var parts [][]byte // whole 188-byte packets
 				for j := 0; j < len(data); j += 65424 {
 					parts = append(parts, data[j:min(j+65424, len(data))])
@@ -420,15 +437,11 @@ func realAddress(local string) string {
 	return strings.ToLower(m[1]) + "://" + m[2] + m[3] + m[4]
 }
 
-// rewritePlaylist points every address back at this proxy. With home (the player's own path, for a playlist the
-// provider answered directly), addresses on the provider's own server resolve against the player's path, so
-// they come back with the easy login and the real one is never written into the playlist.
-func rewritePlaylist(text, base, home string) (string, error) {
+// rewritePlaylist points every address back at this proxy. Addresses on the provider's own server (own), however
+// written, come back to its port with the easy login, so the real one is never written into the playlist.
+// (A server the provider sends the player to gets its addresses as they are, under /__cdn/.)
+func rewritePlaylist(text, base string, own *front) (string, error) {
 	b, err := url.Parse(base)
-	if err != nil {
-		return "", err
-	}
-	hu, err := url.Parse("http://home.invalid" + home)
 	if err != nil {
 		return "", err
 	}
@@ -450,16 +463,10 @@ func rewritePlaylist(text, base, home string) (string, error) {
 		if err != nil {
 			return "", err // an absolute address nothing could reach: refuse rather than pass a login through
 		}
-		if home != "" && full.Scheme == b.Scheme && full.Host == b.Host && !hasScheme.MatchString(ref) {
-			mine, _ := hu.Parse(ref)
-			p := mine.EscapedPath()
-			if p == "" {
-				p = "/"
+		if own != nil && own.ownServer(full) {
+			if p, ok := own.easyForm(full); ok {
+				return p, nil
 			}
-			if mine.RawQuery != "" {
-				p += "?" + mine.RawQuery
-			}
-			return p, nil
 		}
 		if c := cdnAddress(full); c != "" {
 			return c, nil
@@ -511,13 +518,15 @@ func send(w http.ResponseWriter, status int, h http.Header, data []byte) {
 }
 
 // servePlaylist rewrites a playlist; anything else is passed on as it came.
-func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte, base, home string) error {
+func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte, base string, own *front) error {
 	if bytes.Contains(data[:min(len(data), 1024)], []byte("#EXTM")) {
-		text, err := rewritePlaylist(string(data), base, home)
+		text, err := rewritePlaylist(string(data), base, own)
 		if err != nil {
 			return err
 		}
 		data = []byte(text)
+	} else if status >= 400 && own != nil {
+		data = own.hideLogin(data) // an error page (see hideLogin)
 	}
 	send(w, status, h, data)
 	return nil
@@ -660,10 +669,10 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if err != nil {
 			return err
 		}
-		return servePlaylist(w, resp.StatusCode, resp.Header, data, final, "")
+		return servePlaylist(w, resp.StatusCode, resp.Header, data, final, rt.f)
 	}
 	if rt.f.mode == "ts" { // a ts provider: live HLS is built from the shared MPEG-TS stream
-		if done, err := hlsFromTS(w, r, rt.client, provider, uri, opath, q, port); done {
+		if done, err := hlsFromTS(w, r, rt.client, provider, uri, opath, q, port, rt.f); done {
 			return err
 		}
 	}
@@ -689,7 +698,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if s, d, err = openChannel(key, target, h, ""); err != nil {
 			return err
 		} else if d != nil {
-			return servePlaylist(w, d.status, d.h, d.data, target, chanOrig)
+			return servePlaylist(w, d.status, d.h, d.data, target, rt.f)
 		}
 	}
 	mu.Lock()
@@ -757,7 +766,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if err != nil {
 			return err
 		} else if d != nil {
-			return servePlaylist(w, d.status, d.h, d.data, target, chanOrig)
+			return servePlaylist(w, d.status, d.h, d.data, target, rt.f)
 		}
 		s = ns
 	}
@@ -774,7 +783,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		}
 	}
 	mu.Unlock()
-	return servePlaylist(w, status, hd, data, final, "")
+	return servePlaylist(w, status, hd, data, final, rt.f)
 }
 
 // ---------------------------------------------------------------------------
@@ -832,8 +841,31 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if ce := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); ce != "" && ce != "identity" {
-		return &refused{status: 502} // asked for plain text; a compressed answer cannot be read
+	body := io.Reader(resp.Body)
+	switch ce := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))); ce {
+	case "", "identity":
+	case "gzip", "x-gzip": // asked for plain text, sent gzip anyway (some providers do, for their guide): unpacked
+		z, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return &refused{status: 502}
+		}
+		defer z.Close()
+		body = z
+	default:
+		return &refused{status: 502} // a compression this cannot read
+	}
+	if resp.StatusCode >= 400 { // the provider's own error page (see hideLogin)
+		page, err := io.ReadAll(io.LimitReader(body, 65536))
+		if err != nil {
+			return &refused{status: 502}
+		}
+		body = io.MultiReader(bytes.NewReader(rt.f.hideLogin(page)), body)
+	}
+	if q, _ := url.ParseQuery(r.URL.RawQuery); q.Get("action") == "" && strings.HasSuffix(strings.ToLower(r.URL.Path), "_api.php") {
+		// (the login itself: player_api.php or panel_api.php with no action)
+		if body, err = playerServer(body, home); err != nil { // (body: unpacked, if it came packed)
+			return err
+		}
 	}
 	for k, vs := range resp.Header {
 		if !plSkipRe.MatchString(k) {
@@ -846,14 +878,123 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 		w.Header().Set("Vary", "Accept-Encoding")
 	}
 	w.WriteHeader(resp.StatusCode)
-	if err := apiStream(w, resp.Body, []byte(`"http://`+home+"/__cdn/"), gz); err != nil {
+	// The answer to the login itself names the account: "username" and "password" in user_info are the
+	// provider's. The player is given its own (easy) login there instead, as everywhere else.
+	login := [][2]string{{"username", rt.f.user}, {"password", rt.f.pass}}
+	for i, l := range login {
+		easy := map[bool]string{true: rt.f.pu, false: rt.f.pp}[i == 0]
+		login[i] = [2]string{`"` + l[0] + `"\s{0,4}:\s{0,4}"` + jsonForms(l[1]) + `"`, `"` + l[0] + `":"` + easy + `"`}
+	}
+	if err := apiStream(w, body, []byte(`"http://`+home+"/__cdn/"), login, gz); err != nil {
 		panic(http.ErrAbortHandler) // cut off: the app must see a broken answer, not a short complete one
 	}
 	return nil
 }
 
-func apiStream(w io.Writer, body io.Reader, link []byte, gz bool) error {
+// jsonForms: a pattern for s as JSON writes it between quotes: \ and " escaped, and each character past ASCII
+// as it is or as \uXXXX (PHP's json_encode and Python's json write them so by default). The pattern is never
+// shorter than what it matches (see apiStream).
+func jsonForms(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\\' || r == '"':
+			b.WriteString(regexp.QuoteMeta(`\` + string(r)))
+		case r < 0x80:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		default:
+			b.WriteString("(?:" + regexp.QuoteMeta(string(r)) + "|")
+			for _, u := range utf16.Encode([]rune{r}) {
+				b.WriteString(fmt.Sprintf(`\\u(?i:%04x)`, u))
+			}
+			b.WriteString(")")
+		}
+	}
+	return b.String()
+}
+
+// playerServer: the answer to the login with server_info naming the address the player used (home), over
+// http, instead of the provider's server: apps build stream addresses from it, and some warn when it differs
+// from what was typed in. The answer is read up to the end of server_info; the rest follows as it comes.
+func playerServer(body io.Reader, home string) (io.Reader, error) {
+	host, port, err := net.SplitHostPort(home)
+	if err != nil {
+		host, port = home, "80" // (no port written: the player came in on http's own)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	key := []byte(`"server_info"`)
+	var data []byte
+	from, buf := 0, make([]byte, 65536)
+	for done := false; ; {
+		if i := bytes.Index(data[from:], key); i >= 0 {
+			at := from + i + len(key)
+			rest := bytes.TrimLeft(data[at:], " 	\r\n")
+			if len(rest) > 0 && rest[0] == ':' {
+				at = len(data) - len(rest) + 1
+				dec := json.NewDecoder(bytes.NewReader(data[at:]))
+				var info map[string]json.RawMessage
+				switch err := dec.Decode(&info); {
+				case err == nil && info != nil:
+					for k, v := range map[string]string{"url": host, "port": port, "https_port": port, "server_protocol": "http"} {
+						if old := bytes.TrimSpace(info[k]); k != "url" && k != "server_protocol" && len(old) > 0 && old[0] != '"' {
+							info[k] = json.RawMessage(v) // a number stays a number
+						} else {
+							info[k], _ = json.Marshal(v)
+						}
+					}
+					text, _ := json.Marshal(info)
+					end := at + int(dec.InputOffset())
+					head := append(append(append([]byte{}, data[:at]...), text...), data[end:]...)
+					return io.MultiReader(bytes.NewReader(head), body), nil
+				case err != io.EOF && err != io.ErrUnexpectedEOF: // not an object: it names no server
+					return io.MultiReader(bytes.NewReader(data), body), nil
+				}
+			} else if len(rest) > 0 {
+				from = at // only the words: look further on
+			}
+		} else {
+			from = max(0, len(data)-len(key))
+		}
+		if done {
+			return bytes.NewReader(data), nil
+		}
+		n, err := body.Read(buf)
+		data = append(data, buf[:n]...)
+		if err == io.EOF {
+			done = true
+		} else if err != nil {
+			return nil, err
+		} else if len(data) > 64<<20 {
+			return nil, &refused{status: 502}
+		}
+	}
+}
+
+// apiStream passes the provider's list on with every link pointed back here, and each pattern in login
+// (a regular expression that starts with a quote and matches no longer a text than itself, and what replaces it)
+// replaced.
+func apiStream(w io.Writer, body io.Reader, link []byte, login [][2]string, gz bool) error {
 	repl := append(append([]byte{}, link...), "${1}/"...)
+	find, keep, swaps := apiLink, 12, []*regexp.Regexp{}
+	if len(login) > 0 {
+		alts := []string{apiLink.String()}
+		for _, l := range login {
+			alts = append(alts, l[0])
+			swaps = append(swaps, regexp.MustCompile(l[0]))
+			keep = max(keep, len(l[0])) // (a pattern written out is never shorter than what it matches)
+		}
+		find = regexp.MustCompile(strings.Join(alts, "|"))
+	}
+	change := func(b []byte) []byte {
+		b = apiLink.ReplaceAll(b, repl)
+		for i, re := range swaps {
+			if pre, _ := re.LiteralPrefix(); bytes.Contains(b, []byte(pre)) { // (most lists hold no login at all)
+				b = re.ReplaceAllLiteral(b, []byte(login[i][1]))
+			}
+		}
+		return b
+	}
 	out := w
 	var z *gzip.Writer
 	if gz {
@@ -866,11 +1007,20 @@ func apiStream(w io.Writer, body io.Reader, link []byte, gz bool) error {
 		n, err := body.Read(buf)
 		data := append(tail, buf[:n]...)
 		tail = nil
-		// every link starts with a quote: hold back a quote near the end until the next piece
-		if cut := bytes.LastIndexByte(data, '"'); err == nil && cut >= 0 && len(data)-cut < 12 {
+		// what may be the start of a link or a login is held back until the next piece: the last keep bytes,
+		// or up to the end of a match that runs into them
+		if cut := len(data) - keep; err == nil && cut > 0 {
+			from := max(0, cut-keep) // (a match that runs past cut starts after this)
+			for _, m := range find.FindAllIndex(data[from:], -1) {
+				if from+m[0] < cut && from+m[1] > cut {
+					cut = from + m[1]
+				}
+			}
 			data, tail = data[:cut], append([]byte{}, data[cut:]...)
+		} else if err == nil {
+			data, tail = nil, data
 		}
-		if _, werr := out.Write(apiLink.ReplaceAll(data, repl)); werr != nil {
+		if _, werr := out.Write(change(data)); werr != nil {
 			return werr
 		}
 		if err == io.EOF {

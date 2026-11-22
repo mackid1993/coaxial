@@ -400,16 +400,16 @@ func statusPage(w http.ResponseWriter, r *http.Request) {
 			add(`<li>%s</li>`, esc(p))
 		}
 		if len(problems) == 0 && len(good) == 0 {
-			add(`<li>No provider is set up. Open your settings file (<code>settings.json</code>) and add a provider. The sample file next to it shows how.</li>`)
+			add(`<li>No provider is set up. Add one on the settings page (the web page port, 8195 unless you changed it).</li>`)
 		}
-		add(`</ul><small>After you fix the settings file, start the container again and reload this page.</small></div></div>`)
+		add(`</ul><small>After you fix it on the settings page, reload this page.</small></div></div>`)
 	}
 	if len(skipped) > 0 {
 		add(`<div class="card warn"><h2 style="color:inherit">&#9888;&#65039; These providers were left out</h2><ul>`)
 		for _, p := range skipped {
 			add(`<li><b>%s</b>: %s</li>`, esc(field(p, "name")), esc(field(p, "why")))
 		}
-		add(`</ul><p>Fix it in your settings file (<code>settings.json</code>) and start the container again.</p></div>`)
+		add(`</ul><p>Fix it on the settings page (the web page port, 8195 unless you changed it).</p></div>`)
 	}
 
 	add(`<div class="card"><h2>Your VPN</h2>`)
@@ -479,9 +479,9 @@ func statusPage(w http.ResponseWriter, r *http.Request) {
 			esc(field(p, "name")), pill, map[bool]string{true: "MPEG-TS", false: "HLS"}[field(p, "mode") == "ts"], esc(host), esc(field(p, "port")), facts)
 	}
 	if len(good) > 0 {
-		add(`<p class="note">In your player, add an Xtream login with that address and the easy username and password from your settings file (<code>user</code> and <code>password</code> under <code>player</code>).</p>`)
+		add(`<p class="note">In your player, add an Xtream login with that address and the player login from the settings page.</p>`)
 	}
-	add(`</div><div class="card"><h2>The Live TV setting</h2>Each provider has one line in your settings file that says how your players watch its live channels.<ul><li><code>&quot;live_tv&quot;: &quot;hls&quot;</code> Your players use <b>HLS</b>. Everyone on a channel shares one connection to the provider, so you can watch and record the same channel at once. A recorder that asks for MPEG-TS is given the same video as your players.</li><li><code>&quot;live_tv&quot;: &quot;ts&quot;</code> Your players use <b>MPEG-TS</b>. You get the provider&#39;s own stream, and everyone on a channel shares one connection to the provider. A player that asks for HLS instead is given HLS built from that same stream, so the provider still sees one connection.</li></ul><p class="note">Pick the one that matches the live format chosen in your players and in your playlist manager if you use one. They have to agree. If a provider only offers one of the two, use that one.</p></div>`)
+	add(`</div><div class="card"><h2>The Live TV setting</h2>Each provider has a Live TV setting on the settings page that says how your players watch its live channels.<ul><li><code>&quot;live_tv&quot;: &quot;hls&quot;</code> Your players use <b>HLS</b>. Everyone on a channel shares one connection to the provider, so you can watch and record the same channel at once. A recorder that asks for MPEG-TS is given the same video as your players.</li><li><code>&quot;live_tv&quot;: &quot;ts&quot;</code> Your players use <b>MPEG-TS</b>. You get the provider&#39;s own stream, and everyone on a channel shares one connection to the provider. A player that asks for HLS instead is given HLS built from that same stream, so the provider still sees one connection.</li></ul><p class="note">Pick the one that matches the live format chosen in your players and in your playlist manager if you use one. They have to agree. If a provider only offers one of the two, use that one.</p></div>`)
 
 	add(`<div class="card"><h2>Playing right now</h2>%s<p class="note">Live channels only. Movies, series and catch-up are not counted.</p></div>`, playing(provName))
 	add(`<div class="card"><h2>Still stuck?</h2>The container keeps one log. Run the command on the machine it runs on, with the name you gave the container.<ul><li><code>docker logs coaxial</code></li><li>Lines that start with <code>coaxial:</code> are this program&#39;s: every provider that was found at the start, and any that was left out and why; who is watching what, when a live channel is opened and closed, how long the provider took to send the first video, and anything that went wrong with a channel; and one <code>access</code> line for every request (never the address asked for).</li><li>The other lines are the VPN&#39;s own. They say whether the tunnel is up and where it comes out.</li></ul></div><footer>Coaxial</footer></main></body></html>`)

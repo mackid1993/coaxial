@@ -50,6 +50,7 @@ type fakeRegistry struct {
 	asked     map[string]int // "token", "manifest", "blob"
 	layer     string         // the digest of the layer with the program
 	index     string
+	open      func() bool // when set: it answers only while this says so (otherwise as if out of reach)
 }
 
 func newFakeRegistry(t *testing.T) *fakeRegistry {
@@ -82,6 +83,11 @@ func newFakeRegistry(t *testing.T) *fakeRegistry {
 		defer f.mu.Unlock()
 		kind, ref := "", r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
 		var data []byte
+		if f.open != nil && !f.open() {
+			f.asked["refused"]++
+			w.WriteHeader(503)
+			return
+		}
 		switch {
 		case r.URL.Path == "/token":
 			f.asked["token"]++
@@ -354,5 +360,27 @@ func TestSkippedBuild(t *testing.T) {
 	os.WriteFile(filepath.Join(bin, "skip.json"), []byte(`{"digest":"nonsense"}`), 0o644)
 	if skipped(bin) != "" {
 		t.Errorf("a damaged note skips something: %q", skipped(bin))
+	}
+}
+
+// The build left alone after a failed update is not downloaded again while it is still the newest.
+func TestSkippedBuildNotDownloaded(t *testing.T) {
+	f := newFakeRegistry(t)
+	oldRegs, oldTry := registries, tryProgram
+	defer func() { registries, tryProgram = oldRegs, oldTry }()
+	registries, tryProgram = []registry{f.reg(), f.reg()}, func(string) error { return nil }
+	if runtime.GOARCH != "amd64" {
+		t.Skip("the canned image is for amd64")
+	}
+	l := &launcher{dir: t.TempDir(), prog: builtinProgram}
+	bin := binDir(l.dir)
+	os.MkdirAll(bin, 0o755)
+	writeWhole(filepath.Join(bin, "skip.json"), map[string]string{"digest": f.index})
+	p := l.chooseProgram("latest")
+	if f.asked["blob"] != 0 || f.asked["manifest"] != 1 {
+		t.Errorf("the skipped build was fetched: asked %v", f.asked)
+	}
+	if p.Source != "builtin" {
+		t.Errorf("with only the skipped build on offer, the built-in one runs: %+v", p)
 	}
 }

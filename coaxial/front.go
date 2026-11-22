@@ -5,6 +5,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -14,8 +16,11 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -27,7 +32,8 @@ type front struct {
 	encU, encP             string // the same, percent-encoded for an address
 	pu, pp                 string // the easy login the players use
 
-	loginPath, loginShort, chLogin, liveTS *regexp.Regexp
+	// (loginAny: the login deeper in an address, as a provider's own playlist may write it: /hls/<login>/<piece>)
+	loginPath, loginShort, loginAny, chLogin, liveTS *regexp.Regexp
 }
 
 // route: what the front door worked out about one request, for the relay. Nothing in it comes from a header.
@@ -75,8 +81,11 @@ func newFront(p provider, pl player) *front {
 		user: p.User, pass: p.Password, encU: encLogin(p.User), encP: encLogin(p.Password), pu: pl.User, pp: pl.Password,
 		loginPath:  regexp.MustCompile(`^/+(live|movie|series|timeshift)/+` + pu + `/+` + pp + `/+(.*)$`),
 		loginShort: regexp.MustCompile(`^/+` + pu + `/+` + pp + `/+([^/]+)$`),
+		loginAny:   regexp.MustCompile(`^(/+[^_/][^/]*(?:/+[^/]+)*?)/+` + pu + `/+` + pp + `/+(.+)$`),
 		chLogin:    regexp.MustCompile(`^/__ch(/+(?:live/+)?)` + pu + `/+` + pp + `/+(.+?\.m3u8)/`),
-		liveTS:     regexp.MustCompile(`^/+(live/+` + pu + `/+` + pp + `/+[^/]+\.ts|` + pu + `/+` + pp + `/+[0-9]+(\.ts)?)$`)}
+		// (live channels are numbered: anything else under /live/, such as a piece a provider's playlist
+		// names next to itself, is passed on to the provider, not opened as a channel)
+		liveTS: regexp.MustCompile(`^/+(live/+` + pu + `/+` + pp + `/+[0-9]+\.ts|` + pu + `/+` + pp + `/+[0-9]+(\.ts)?)$`)}
 }
 
 func escPath(s string) string { return (&url.URL{Path: s}).EscapedPath() }
@@ -129,6 +138,8 @@ func (f *front) swap(u *url.URL) (up, uri string) {
 		raw = "/" + m[1] + "/" + f.encU + "/" + f.encP + "/" + escPath(m[2])
 	} else if m := f.loginShort.FindStringSubmatch(p); m != nil {
 		raw = "/" + f.encU + "/" + f.encP + "/" + escPath(m[1])
+	} else if m := f.loginAny.FindStringSubmatch(p); m != nil {
+		raw = escPath(m[1]) + "/" + f.encU + "/" + f.encP + "/" + escPath(m[2])
 	}
 	up = raw
 	if q := f.swapQuery(u.RawQuery); q != "" {
@@ -142,6 +153,86 @@ func (f *front) swap(u *url.URL) (up, uri string) {
 		uri = escPath(m[1]) + f.encU + "/" + f.encP + "/" + escPath(m[2])
 	}
 	return up, uri
+}
+
+// easyForm: an address on the provider's own server as a player is given it: the provider's login, where it
+// stands as two parts of the path or as username= and password=, becomes the easy one. ok=false: the front
+// door would not swap it back to the very same address.
+func (f *front) easyForm(u *url.URL) (string, bool) {
+	parts := strings.Split(u.EscapedPath(), "/") // (the rest stays written as the provider wrote it)
+	for i := 0; i+1 < len(parts); i++ {
+		a, err1 := url.PathUnescape(parts[i])
+		b, err2 := url.PathUnescape(parts[i+1])
+		if err1 == nil && err2 == nil && a == f.user && b == f.pass {
+			parts[i], parts[i+1] = f.pu, f.pp
+		}
+	}
+	p := strings.Join(parts, "/")
+	if p == "" {
+		p = "/"
+	}
+	if u.RawQuery != "" {
+		pairs := strings.Split(u.RawQuery, "&")
+		for i, kv := range pairs {
+			k, v, _ := strings.Cut(kv, "=")
+			key, err1 := url.QueryUnescape(k)
+			val, err2 := url.QueryUnescape(v)
+			if err1 == nil && err2 == nil && key == "username" && val == f.user {
+				pairs[i] = k + "=" + f.pu
+			} else if err1 == nil && err2 == nil && key == "password" && val == f.pass {
+				pairs[i] = k + "=" + f.pp
+			}
+		}
+		p += "?" + strings.Join(pairs, "&")
+	}
+	mine, err := url.Parse(p)
+	if err != nil {
+		return "", false
+	}
+	up, _ := f.swap(mine)
+	back, err := url.Parse(up)
+	if err != nil || cleanSlashes(back.Path) != cleanSlashes(u.Path) || back.Query().Encode() != u.Query().Encode() {
+		return "", false
+	}
+	return p, true
+}
+
+// hideLogin: a provider's error page as a player is given it. Some servers write the address asked for into
+// it ("The requested URL /movie/<login>/... was not found"); the login there becomes the easy one.
+func (f *front) hideLogin(page []byte) []byte {
+	swaps := [][2]string{{f.user, f.pu}, {f.pass, f.pp}, {f.encU, f.pu}, {f.encP, f.pp}}
+	sort.SliceStable(swaps, func(i, j int) bool { return len(swaps[i][0]) > len(swaps[j][0]) }) // (one inside another)
+	for _, s := range swaps {
+		if s[0] != "" {
+			page = bytes.ReplaceAll(page, []byte(s[0]), []byte(s[1]))
+		}
+	}
+	return page
+}
+
+// ownServer: an address on the provider's own server, however its name is written: in capitals, with a final dot,
+// with the scheme's own port (80, 443) written out or left out.
+func (f *front) ownServer(u *url.URL) bool {
+	if !strings.EqualFold(u.Scheme, f.scheme) {
+		return false
+	}
+	norm := func(hostport string) string {
+		h := &url.URL{Host: hostport}
+		port := h.Port()
+		if port == "" {
+			port = map[bool]string{true: "443", false: "80"}[f.scheme == "https"]
+		}
+		return strings.TrimSuffix(strings.ToLower(h.Hostname()), ".") + " " + port
+	}
+	return norm(u.Host) == norm(f.hostport)
+}
+
+// cleanSlashes: a path with doubled slashes written once (as the front door's swap writes it).
+func cleanSlashes(p string) string {
+	for strings.Contains(p, "//") {
+		p = strings.ReplaceAll(p, "//", "/")
+	}
+	return p
 }
 
 // rewriteLocation: a provider answers "go to that other server". The address is rewritten so the player
@@ -269,7 +360,8 @@ func (f *front) serve(c *counted, r *http.Request) {
 	case playlistRe.MatchString(p): // HLS playlists and live channels' folders
 		c.kind = "hls"
 		failed(c, playlistRequest(c, r, rt))
-	case low == "/player_api.php": // the provider's lists: logos and posters pointed back at this proxy
+	case low == "/player_api.php" || low == "/panel_api.php": // the provider's lists: logos and posters pointed back
+		// at this proxy (panel_api.php: older apps' login, which names the account and the server just the same)
 		c.kind = "api"
 		failed(c, api(c, r, rt))
 	case cdnForbidden.MatchString(cleanPath(p)):
@@ -296,9 +388,10 @@ func (f *front) serve(c *counted, r *http.Request) {
 		f.forward(c, r, target, scheme, hostport, 60, true)
 	case strings.HasPrefix(low, "/__cdu/"):
 		c.WriteHeader(404)
-	case low == "/xmltv.php": // the guide: large, and slow for some providers to start
+	case low == "/xmltv.php": // the guide: large, and slow for some providers to start. Its channel and programme
+		// pictures (icon src="http://...") are pointed back at this proxy, as in the lists.
 		c.kind, c.server = "guide", f.hostport
-		f.forward(c, r, f.base+up, f.scheme, f.hostport, 300, false)
+		failed(c, api(c, r, rt))
 	default: // everything else (movies, series, catch-up, account): straight to the provider
 		c.kind, c.server = "media", f.hostport
 		f.forward(c, r, f.base+up, f.scheme, f.hostport, 60, false)
@@ -357,8 +450,8 @@ func (f *front) forward(c *counted, r *http.Request, target, scheme, hostport st
 	if out.Header.Get("User-Agent") == "" {
 		out.Header["User-Agent"] = []string{""} // no Go-http-client name
 	}
-	timed := false
-	t := time.AfterFunc(secs(wait), func() { timed = true; cancel() })
+	var timed atomic.Bool // (set by the timer's own goroutine)
+	t := time.AfterFunc(secs(wait), func() { timed.Store(true); cancel() })
 	began := time.Now()
 	resp, err := sharedTransport.RoundTrip(out)
 	t.Stop()
@@ -368,7 +461,7 @@ func (f *front) forward(c *counted, r *http.Request, target, scheme, hostport st
 		case errors.As(err, &rf):
 			c.WriteHeader(rf.status)
 		case r.Context().Err() != nil: // the player hung up first
-		case timed || isTimeout(err):
+		case timed.Load() || isTimeout(err):
 			c.WriteHeader(504)
 		default:
 			say("a server could not be reached: %s", pyName(err))
@@ -385,17 +478,53 @@ func (f *front) forward(c *counted, r *http.Request, target, scheme, hostport st
 	}
 	h.Del("Via") // players see what the server sends, without a note that a proxy passed it on
 	if loc := resp.Header.Get("Location"); loc != "" {
-		h.Set("Location", rewriteLocation(loc, scheme, hostport))
+		moved := rewriteLocation(loc, scheme, hostport)
+		// back to the provider's own server: to its port, with the easy login (never the real one)
+		if u, err := out.URL.Parse(loc); err == nil && f.ownServer(u) {
+			if p, ok := f.easyForm(u); ok {
+				moved = p
+			}
+		}
+		h.Set("Location", moved)
 	}
 	if _, ok := h["Content-Type"]; !ok {
 		h["Content-Type"] = nil // none sent, none added
+	}
+	var src io.Reader = &quietBody{resp.Body, secs(wait)}
+	if resp.StatusCode >= 400 && !guard && r.Method != "HEAD" { // the provider's own error page (see hideLogin)
+		// Packed, as the player allowed (Apache packs its error pages): unpacked to be read, and passed on plain.
+		// Packed in a way this cannot read: the page is left out (its status still goes on).
+		switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
+		case "", "identity":
+		case "gzip", "x-gzip":
+			if z, err := gzip.NewReader(src); err == nil {
+				src = z
+			} else {
+				src = bytes.NewReader(nil)
+			}
+			h.Del("Content-Encoding")
+		default:
+			src = bytes.NewReader(nil)
+			h.Del("Content-Encoding")
+		}
+		page, err := io.ReadAll(io.LimitReader(src, 65536))
+		if err != nil && r.Context().Err() == nil {
+			panic(http.ErrAbortHandler)
+		}
+		h.Del("Content-Length")
+		src = io.MultiReader(bytes.NewReader(f.hideLogin(page)), src)
 	}
 	c.WriteHeader(resp.StatusCode)
 	c.Flush()
 	if r.Method == "HEAD" {
 		return
 	}
-	if _, err := copyFlush(c, &quietBody{resp.Body, secs(wait)}); err != nil && r.Context().Err() == nil {
+	kind, who := strings.ToLower(resp.Header.Get("Content-Type")), whoIs(r)
+	if resp.StatusCode < 300 && who != "127.0.0.1" && who != "::1" && // (not the relay's own bridge)
+		(strings.HasPrefix(kind, "video/") || strings.HasPrefix(kind, "audio/") || strings.HasPrefix(kind, "application/octet-stream")) {
+		defer watching(who)() // a film, an episode or catch-up: someone is watching (see playingNow)
+	}
+	if _, err := copyFlush(c, src); err != nil && r.Context().Err() == nil {
 		panic(http.ErrAbortHandler) // cut off: the player must see a broken answer, not a short complete one
 	}
 }
@@ -525,6 +654,12 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 	for _, p := range good {
 		f := newFront(p, s.Player)
 		ln, err := net.Listen("tcp", ":"+f.port)
+		// A save can move the web interface off a port and a provider onto it: the launcher lets the old port go
+		// a moment after this part has started. That moment is waited for (a few seconds at most).
+		for try := 0; errors.Is(err, syscall.EADDRINUSE) && try < 20; try++ {
+			time.Sleep(250 * time.Millisecond)
+			ln, err = net.Listen("tcp", ":"+f.port)
+		}
 		if err != nil {
 			say("PROVIDER %s NOT STARTED: port %s could not be opened (%v)", f.name, f.port, err)
 			continue

@@ -10,7 +10,8 @@
 //
 // Under "vpn", every key but "extra", "update_hours" and "gluetun_version" is a gluetun setting written in small letters (wireguard_private_key is
 // gluetun's WIREGUARD_PRIVATE_KEY; service_provider and type are VPN_SERVICE_PROVIDER and VPN_TYPE). "extra"
-// holds gluetun variables under their own names; it is applied last, so it wins, and nothing in it is refused.
+// holds gluetun variables under their own names; it is applied last, so it wins. What would run a program, open
+// gluetun's control page or not be one line is refused, here as under "vpn" (see validate).
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -160,7 +162,12 @@ func (s *settings) parse(data []byte) error {
 		s.VPN.Vars, s.VPN.Extra = map[string]string{}, map[string]string{}
 	}
 	if s.UI.Port == "" {
+		// None saved (at the first start there is no file at all): the port Docker opens for the page, UI_PORT in
+		// .env, which the compose file passes on as COAXIAL_UI_PORT; else 8195.
 		s.UI.Port = port(strconv.Itoa(defaultUIPort))
+		if n, ok := port(os.Getenv("COAXIAL_UI_PORT")).number(); ok && !ownPorts[n] {
+			s.UI.Port = port(strconv.Itoa(n))
+		}
 	}
 	if s.Providers == nil {
 		s.Providers = []provider{}
@@ -217,8 +224,13 @@ func (s *settings) vpnEnv() map[string]string {
 			env["UPDATER_PERIOD"] = "0"
 		}
 	}
-	for k, v := range s.VPN.Vars {
-		if v != "" && k != "update_hours" && k != "gluetun_version" {
+	keys := []string{}
+	for k := range s.VPN.Vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // (two keys can name one variable, "type" and "vpn_type": the same one wins every time)
+	for _, k := range keys {
+		if v := s.VPN.Vars[k]; v != "" && k != "update_hours" && k != "gluetun_version" {
 			env[envName(k)] = v
 		}
 	}
@@ -296,8 +308,12 @@ func (s *settings) validate() []fieldError {
 		default:
 			used[n] = true
 		}
-		if p.URL != "" && !providerRe.MatchString(p.URL) {
+		switch m := providerRe.FindStringSubmatch(p.URL); {
+		case p.URL != "" && m == nil:
 			bad(at+"url", "address must be http://name or https://name, optionally :port, with nothing after it")
+		case m != nil && m[1] != "" && (atoi(m[1][1:]) < 1 || atoi(m[1][1:]) > 65535):
+			// (Go takes :99999 or :0 in an address, and then cannot connect to it: every request would fail)
+			bad(at+"url", "the port in the address must be a number from 1 to 65535")
 		}
 		if p.LiveTV != "hls" && p.LiveTV != "ts" {
 			bad(at+"live_tv", `live_tv must be "hls" if your players use HLS, or "ts" if they use MPEG-TS`)
@@ -319,14 +335,83 @@ func (s *settings) validate() []fieldError {
 	if s.vpnEnv()["VPN_SERVICE_PROVIDER"] == "" {
 		bad("vpn.service_provider", "Pick your VPN service")
 	}
-	for k := range s.VPN.Vars {
+	for k, v := range s.VPN.Vars {
 		if k == "" || strings.ContainsAny(k, "=\x00") {
 			bad("vpn."+k, "that is not a setting's name")
+		} else if strings.Contains(v, "\x00") {
+			bad("vpn."+k, "that cannot be a variable's value")
 		}
 	}
 	for k, v := range s.VPN.Extra { // (any name gluetun may know is passed on; only what cannot be a variable is refused)
 		if k == "" || strings.ContainsAny(k, "=\x00") || strings.Contains(v, "\x00") {
 			bad("vpn.extra."+k, "that cannot be a variable's name")
+		}
+	}
+	// gluetun runs the program named in a ..._COMMAND variable (VPN_UP_COMMAND and the like) as root, where
+	// every password in this file can be read. The web page asks nobody who they are, so none is passed on.
+	// OpenVPN can be told to run programs too, through options passed in OPENVPN_FLAGS.
+	// gluetun reads a name in capitals with - as _ (VPN_UP-COMMAND is VPN_UP_COMMAND), and takes the value
+	// from the file named in NAME_FILE or NAME_SECRETFILE: every spelling is refused alike.
+	gluetunName := func(name string) (base string, fromFile bool) {
+		base = strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		for _, suffix := range []string{"_SECRETFILE", "_FILE"} {
+			if strings.HasSuffix(base, suffix) {
+				return strings.TrimSuffix(base, suffix), true
+			}
+		}
+		return base, false
+	}
+	scripts := map[string]bool{"--up": true, "--down": true, "--route-up": true, "--route-pre-down": true, "--ipchange": true,
+		"--tls-verify": true, "--client-connect": true, "--client-disconnect": true, "--learn-address": true,
+		"--auth-user-pass-verify": true, "--plugin": true, "--script-security": true, "--config": true, "--tls-crypt-v2-verify": true}
+	runs := func(name, value string) bool {
+		if base, fromFile := gluetunName(name); base != "OPENVPN_FLAGS" {
+			return false
+		} else if fromFile { // (what the file holds is not known here)
+			return true
+		}
+		for _, f := range strings.Fields(value) {
+			f, _, _ = strings.Cut(strings.ToLower(f), "=")
+			if scripts[f] || scripts["--"+strings.TrimLeft(f, "-")] {
+				return true
+			}
+		}
+		return false
+	}
+	for k, v := range s.VPN.Vars {
+		if runs(k, v) {
+			bad("vpn."+k, "Coaxial does not pass on OpenVPN options that run programs (such as --up): the program would run with every password in the settings in reach")
+		}
+	}
+	for k, v := range s.VPN.Extra {
+		if runs(k, v) {
+			bad("vpn.extra."+k, "Coaxial does not pass on OpenVPN options that run programs (such as --up): the program would run with every password in the settings in reach")
+		}
+	}
+	command := func(name string) bool { base, _ := gluetunName(name); return strings.HasSuffix(base, "_COMMAND") }
+	for k := range s.VPN.Vars {
+		if command(k) {
+			bad("vpn."+k, "Coaxial does not pass on gluetun's ..._COMMAND variables: the program named would run with every password in the settings in reach")
+		}
+	}
+	for k := range s.VPN.Extra {
+		if command(k) {
+			bad("vpn.extra."+k, "Coaxial does not pass on gluetun's ..._COMMAND variables: the program named would run with every password in the settings in reach")
+		}
+	}
+	// gluetun's control page can set those same commands and shows the VPN's key. Coaxial keeps it inside the
+	// container, with a key of its own; moved to a published port or opened up, anyone could use it.
+	// And gluetun writes some values (OPENVPN_AUTH, OPENVPN_CIPHERS, ...) into OpenVPN's configuration as
+	// lines: a value broken over two lines would add an option of its own (script-security, up). Only the
+	// certificate and key, which gluetun checks are base64, may be.
+	for field, vars := range map[string]map[string]string{"vpn.": s.VPN.Vars, "vpn.extra.": s.VPN.Extra} {
+		for k, v := range vars {
+			switch base, _ := gluetunName(envName(k)); {
+			case strings.HasPrefix(base, "HTTP_CONTROL_SERVER_") && base != "HTTP_CONTROL_SERVER_LOG":
+				bad(field+k, "Coaxial uses gluetun's control page itself and keeps it inside the container: it is not set here")
+			case strings.ContainsAny(v, "\r\n") && base != "OPENVPN_CERT" && base != "OPENVPN_KEY" && base != "OPENVPN_ENCRYPTED_KEY":
+				bad(field+k, "a VPN setting must be on one line")
+			}
 		}
 	}
 	return errs

@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -65,8 +66,9 @@ func main() {
 type child struct {
 	cmd     *exec.Cmd
 	done    chan struct{}
-	stopped bool // stopped on purpose
-	ever    bool // (the VPN) came up at least once
+	stopped bool   // stopped on purpose
+	ever    bool   // (the VPN) came up at least once
+	prog    string // (the VPN) the build it runs (its digest, "" for the built-in one)
 }
 
 type launcher struct {
@@ -93,6 +95,7 @@ type launcher struct {
 	updDigest        string // the newest program the registry names (checked hourly), when, and what went wrong
 	updAt            time.Time
 	updErr           string
+	updFailed        string // the newer program an update could not fetch: not tried again by itself
 	pick             picked // the VPN server chosen by trying them (pick.go), when, and the one being tried now
 	pickAt           time.Time
 	pickTry          string
@@ -133,10 +136,12 @@ func runLauncher() int {
 		}
 	}
 	l.uiPort = defaultUIPort
-	if s != nil {
-		if n, ok := s.UI.Port.number(); ok && !ownPorts[n] {
-			l.uiPort = n
-		}
+	at := s
+	if at == nil {
+		at = emptySettings() // (no usable settings.json: the port Docker opens for the page, see parse)
+	}
+	if n, ok := at.UI.Port.number(); ok && !ownPorts[n] {
+		l.uiPort = n
 	}
 	if err := l.listenUI(l.uiPort); err != nil {
 		say("the web interface could not open port %d: %v", l.uiPort, err)
@@ -221,6 +226,10 @@ func (l *launcher) apply() {
 	proxySame := pkey == l.proxyKey
 	l.mu.Unlock()
 	if !vpnSame {
+		if want {
+			tag, _ := s.gluetunVersion()
+			l.askBeforeStop(tag)
+		}
 		l.stopProxy()
 		l.stopVPN()
 		l.mu.Lock()
@@ -268,8 +277,9 @@ func (l *launcher) startVPN(env, names []string, tag string) {
 	}
 	cmd := exec.Command(prog.Path)
 	cmd.Env, cmd.Stdout, cmd.Stderr = env, os.Stdout, os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // (what it starts stays in its session: see endSession)
 	say("starting the VPN (gluetun); set from settings.json: %s", strings.Join(names, " "))
-	c := &child{cmd: cmd, done: make(chan struct{})}
+	c := &child{cmd: cmd, done: make(chan struct{}), prog: prog.Digest}
 	if err := cmd.Start(); err != nil {
 		say("the VPN program could not be started: %v", err)
 		l.mu.Lock()
@@ -282,6 +292,7 @@ func (l *launcher) startVPN(env, names []string, tag string) {
 	l.mu.Unlock()
 	go func() {
 		err := cmd.Wait()
+		endSession(cmd.Process.Pid)
 		close(c.done)
 		l.mu.Lock()
 		onPurpose, ever := c.stopped, c.ever
@@ -304,6 +315,36 @@ func (l *launcher) startVPN(env, names []string, tag string) {
 			time.AfterFunc(30*time.Second, l.apply)
 		}
 	}()
+}
+
+// endSession: what the VPN program started and left running when it ended is stopped and collected. gluetun
+// starts openvpn (in a process group of its own, so only the session finds it). When gluetun crashes or is
+// killed, openvpn ran on beside the next one, started 30 s later, and once it ended it stayed a zombie for
+// good: this program is the container's first process, and nothing else collects what is left to it.
+func endSession(sid int) {
+	for try := 0; try < 100; try++ {
+		left := 0
+		list, _ := os.ReadDir("/proc")
+		for _, e := range list {
+			pid, err := strconv.Atoi(e.Name())
+			data, _ := os.ReadFile("/proc/" + e.Name() + "/stat")
+			if err != nil || len(data) == 0 {
+				continue
+			}
+			// after the name (in brackets, and it may hold anything): state, parent, group, session
+			f := strings.Fields(string(data[bytes.LastIndexByte(data, ')')+1:]))
+			if len(f) < 4 || f[3] != strconv.Itoa(sid) {
+				continue
+			}
+			left++
+			syscall.Kill(pid, syscall.SIGKILL)
+			syscall.Wait4(pid, nil, syscall.WNOHANG, nil) // (collected here when it was left to this program)
+		}
+		if left == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (l *launcher) stop(c *child, wait time.Duration) {
@@ -367,6 +408,7 @@ func (l *launcher) startProxy() {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 65534, Gid: 65534}
 	}
 	c := &child{cmd: cmd, done: make(chan struct{})}
+	endTries() // (a provider's port tried by the page a moment ago)
 	say("starting the proxy part")
 	if err := cmd.Start(); err != nil {
 		say("the proxy part could not be started: %v", err)
@@ -433,6 +475,7 @@ func (l *launcher) watchVPN() {
 // ---------------------------------------------------------------------------
 
 func (l *launcher) listenUI(n int) error {
+	endTries() // (the page tries its new port just before it saves)
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(n))
 	if err != nil {
 		return err
@@ -455,7 +498,7 @@ func (l *launcher) listenUI(n int) error {
 		w.Header().Set("Cache-Control", "no-cache")
 		files.ServeHTTP(w, r)
 	})
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10, ErrorLog: log.New(io.Discard, "", 0)}
+	srv := &http.Server{Handler: sameSite(mux), ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10, ErrorLog: log.New(io.Discard, "", 0)}
 	l.mu.Lock()
 	old := l.ui
 	l.ui, l.uiPort = srv, n
@@ -465,6 +508,30 @@ func (l *launcher) listenUI(n int) error {
 		time.AfterFunc(time.Second, func() { old.Close() })
 	}
 	return nil
+}
+
+// sameSite: what changes something (any request but GET and HEAD) is taken from this page only. A browser
+// names the site a request comes from, so another web site open in a browser on the network cannot press
+// the page's buttons (restart the VPN, try servers, open ports). Programs such as curl name none and pass.
+func sameSite(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refuse := false
+		switch site := r.Header.Get("Sec-Fetch-Site"); {
+		case r.Method == "GET" || r.Method == "HEAD" || site == "same-origin" || site == "none":
+		case site != "":
+			refuse = true // cross-site or same-site
+		default: // (an older browser says only where the page is: Origin)
+			if o := r.Header.Get("Origin"); o != "" {
+				u, err := url.Parse(o)
+				refuse = err != nil || u.Host != r.Host
+			}
+		}
+		if refuse {
+			writeJSON(w, 403, map[string]any{"ok": false, "message": "Only Coaxial's own page can change it"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -522,10 +589,12 @@ func (l *launcher) healthz(w http.ResponseWriter, r *http.Request) {
 // healthcheck: the image's HEALTHCHECK. Healthy = set up, the VPN up, the proxy part answering.
 func healthcheck() int {
 	n := defaultUIPort
-	if s, err := loadSettings(filepath.Join(configDir(), "settings.json")); err == nil {
-		if p, ok := s.UI.Port.number(); ok && !ownPorts[p] {
-			n = p
-		}
+	s, err := loadSettings(filepath.Join(configDir(), "settings.json"))
+	if err != nil {
+		s = emptySettings() // (as runLauncher)
+	}
+	if p, ok := s.UI.Port.number(); ok && !ownPorts[p] {
+		n = p
 	}
 	client := &http.Client{Timeout: 8 * time.Second}
 	r, err := client.Get("http://127.0.0.1:" + strconv.Itoa(n) + "/healthz")
@@ -592,7 +661,10 @@ func (l *launcher) apiSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "restarting": map[string]bool{"proxy": proxyToo, "vpn": vpnToo}})
 		go func() {
 			l.apply()
-			if n, _ := s.UI.Port.number(); n != l.uiPort {
+			l.mu.Lock()
+			now := l.uiPort
+			l.mu.Unlock()
+			if n, _ := s.UI.Port.number(); n != now {
 				if err := l.listenUI(n); err != nil {
 					say("the web interface could not move to port %d: %v", n, err)
 				} else {
@@ -931,6 +1003,24 @@ func readOptions(dir string, stored bool, gluetun string) *vpnOptions {
 	return o
 }
 
+// The ports apiPortTry listens on. Each is let go as soon as the proxy part starts or the page moves: the
+// save that follows a try comes within its 8 seconds, and the port is wanted then.
+var (
+	triesMu sync.Mutex
+	tries   = map[*http.Server]net.Listener{}
+)
+
+// endTries closes every port opened by apiPortTry.
+func endTries() {
+	triesMu.Lock()
+	defer triesMu.Unlock()
+	for srv, ln := range tries {
+		ln.Close() // (itself too: a server that has not begun serving yet does not close it)
+		srv.Close()
+		delete(tries, srv)
+	}
+}
+
 // apiPortTry: so the web page can tell, before saving, whether a port typed for a provider is one Docker
 // publishes: this program cannot see Docker's settings, but it can listen on the port for a few seconds and
 // let the page try to reach it from the browser. A port already in use here (a provider's own) is left alone.
@@ -949,7 +1039,15 @@ func apiPortTry(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "close")
 		w.WriteHeader(204)
 	})}
+	triesMu.Lock()
+	tries[srv] = ln
+	triesMu.Unlock()
 	go srv.Serve(ln)
-	time.AfterFunc(8*time.Second, func() { srv.Close() })
+	time.AfterFunc(8*time.Second, func() {
+		triesMu.Lock()
+		delete(tries, srv)
+		triesMu.Unlock()
+		srv.Close()
+	})
 	writeJSON(w, 200, map[string]any{"ok": true, "listening": "for 8 seconds"})
 }

@@ -58,7 +58,7 @@ var segmenters = map[string]*segmenter{} // TS channel key -> its HLS builder
 
 // hlsFromTS answers a playlist or piece request for a live channel of a ts provider. ok=false: not a live
 // channel address (catch-up and the like), handled the usual way.
-func hlsFromTS(w http.ResponseWriter, r *http.Request, who, provider, uri, opath, q, port string) (bool, error) {
+func hlsFromTS(w http.ResponseWriter, r *http.Request, who, provider, uri, opath, q, port string, f *front) (bool, error) {
 	chURI := strings.SplitN(uri, "?", 2)[0]
 	if !liveM3U8.MatchString(chURI) {
 		return false, nil
@@ -149,7 +149,7 @@ wait:
 			e := sg.ch.refusal
 			mu.Unlock()
 			if e != nil && e.status >= 400 && e.status < 600 {
-				answer(w, e.status, e.kind, string(e.text))
+				answer(w, e.status, e.kind, string(f.hideLogin(e.text)))
 			} else {
 				answer(w, 502, "", "")
 			}
@@ -433,7 +433,9 @@ func (c *tsCutter) packet(pkt []byte) *segment {
 		if pts, ok := pesPTS(body); ok {
 			c.sawKey = c.sawKey || rai
 			if c.firstPTS < 0 {
-				c.firstPTS = pts
+				// (no piece yet: the wait for a frame it may start at is counted from here, not from 0, so
+				// the first piece starts at a keyframe too)
+				c.firstPTS, c.curStart = pts, pts
 			}
 			jump := c.lastPTS >= 0 && (pts < c.lastPTS-1 || pts > c.lastPTS+10)
 			if jump {
@@ -459,6 +461,12 @@ func (c *tsCutter) packet(pkt []byte) *segment {
 	}
 	if c.cur != nil {
 		c.cur = append(c.cur, pkt...)
+		// No frame to cut at for this long (the video stopped while the stream went on, with only padding
+		// or audio): the piece is let go rather than kept growing until memory runs out. The next piece
+		// starts at the next frame it may start at, marked as not following on.
+		if len(c.cur) > segBytes {
+			c.cur, c.nextDis = nil, true
+		}
 	}
 	return seg
 }
