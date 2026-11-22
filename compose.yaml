@@ -12,6 +12,12 @@ services:
       - /dev/net/tun:/dev/net/tun     # the built-in VPN needs it
     volumes:
       - ./config:/config              # the one bind mount: settings.json and the VPN's files
+    environment:                      # the page's port until one is saved in the page: UI_PORT in .env
+      - COAXIAL_UI_PORT=${UI_PORT:-8195}
+    logging:
+      options:                        # the log writes a line for every request: keep at most 3 x 10 MB
+        max-size: "10m"
+        max-file: "3"
     ports:
       # Twenty slots, PORT_1 to PORT_20, filled from .env. A slot left out of .env opens nothing new
       # (it falls back to PORT_1, which is already open). To add a provider port, add one PORT_n line

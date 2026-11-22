@@ -48,6 +48,12 @@ services:
       - /dev/net/tun:/dev/net/tun     # the built-in VPN needs it
     volumes:
       - ./config:/config              # the one bind mount: settings.json and the VPN's files
+    environment:                      # the page's port until one is saved in the page: UI_PORT in .env
+      - COAXIAL_UI_PORT=${UI_PORT:-8195}
+    logging:
+      options:                        # the log writes a line for every request: keep at most 3 x 10 MB
+        max-size: "10m"
+        max-file: "3"
     ports:
       # Twenty slots, PORT_1 to PORT_20, filled from .env. A slot left out of .env opens nothing new
       # (it falls back to PORT_1, which is already open). To add a provider port, add one PORT_n line
@@ -102,8 +108,9 @@ UI_PORT=8195
 Ports are set in `.env`, never in the compose file. Each provider needs its own. To add one, add the next `PORT_n` line
 (up to `PORT_20`), run `docker compose up -d` again, and pick that port for the provider in the web page.
 
-Open `http://<this machine>:8195`. Enter your VPN and provider settings and save. In each player, add an Xtream login
-with the address `http://<this machine>:<the provider's port>` and the player login you chose.
+Open `http://<this machine>:8195` (or the `UI_PORT` you set in `.env`). Enter your VPN and provider settings and save.
+In each player, add an Xtream login with the address `http://<this machine>:<the provider's port>` and the player login
+you chose.
 
 ## The web page
 
@@ -119,7 +126,8 @@ changes, unless settings are unsaved. **Settings** has:
   and a password. Then where to connect: countries, cities, regions, servers by hostname and servers by name. All of
   these are drop-downs filled from gluetun's own server lists, and the two server lists narrow to the places you
   picked. You can also type. `Refresh server list` has gluetun fetch a new list now, which needs the VPN to be running.
-- **Extra VPN variables.** Free-form names and values for any other gluetun variable.
+- **Extra VPN variables.** Free-form names and values for any other gluetun variable, except the few Coaxial refuses
+  (see `vpn.extra` below).
 - **Player login**, and the port of the web page.
 
 Saving player, provider or port settings restarts only the proxy. Saving VPN settings reconnects the VPN. Either one
@@ -157,11 +165,11 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | `player` | The login you type into every player. Letters, digits, `-` and `_` only. The username cannot be `live`, `movie`, `series` or `timeshift`. |
 | `providers` | One entry per provider: a name, its address (`http://name` or `https://name`, optionally `:port`, with nothing after it), the login it gave you, the port your players use for it, and `live_tv`. Ports 53, 8000 and 9999 and the web page's port cannot be used. |
 | `live_tv` | `ts` if your players watch live TV as MPEG-TS, `hls` if they use HLS. |
-| `ui.port` | The port of the web page and of the health check. 8195 if left out. If you change it, change `UI_PORT` in `.env` to match. |
+| `ui.port` | The port of the web page and of the health check. If left out, `UI_PORT` from `.env` (8195 if that is not set either). If you change it, change `UI_PORT` in `.env` to match. |
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
 | `vpn.update_hours` | How often gluetun refreshes its list of your VPN service's servers (its `UPDATER_PERIOD`). 24 if left out, 0 for never. |
 | `vpn.gluetun_version` | Which gluetun program runs: `latest` (also when left out), a tag of gluetun's image such as `v3.41.3` to stay on one version, or `builtin` to fetch nothing and run the one in this image. |
-| `vpn.extra` | Any other gluetun variable under its own name, such as `OPENVPN_PROTOCOL`. It is applied last, so it wins over the settings above. |
+| `vpn.extra` | Any other gluetun variable under its own name, such as `OPENVPN_PROTOCOL`. It is applied last, so it wins over the settings above. Refused here and under `vpn`, because anyone who can reach the web page could use them: gluetun's `..._COMMAND` variables, OpenVPN options that run programs (such as `--up`) in `OPENVPN_FLAGS`, `HTTP_CONTROL_SERVER_*` settings other than `HTTP_CONTROL_SERVER_LOG`, and values on more than one line (except the OpenVPN certificate and keys). |
 
 gluetun keeps its server lists in `gluetun/servers` in the mounted folder, so they survive a restart.
 
