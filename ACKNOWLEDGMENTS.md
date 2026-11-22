@@ -1,0 +1,30 @@
+# Acknowledgments
+
+## AH4C
+
+Coaxial carries two small functions from [AH4C](https://github.com/sullrich/ah4c), unchanged: `copyFlush` (a copy that
+pushes every piece out as soon as it is written) and `readWithDeadline` (a read that gives up on a source that has gone
+quiet). They are in `coaxial/passthrough.go`, under AH4C's notice, and do the copying whenever Coaxial passes a movie, a
+series episode, catch-up, the guide or a video piece from a provider to a player.
+
+AH4C was originally written by Aman Karmani ([tmm1](https://github.com/tmm1)), and has since been
+developed and maintained by Scott Ullrich ([sullrich](https://github.com/sullrich)) and Scott Ueland
+([bnhf](https://github.com/bnhf)). Thank you to all three.
+
+AH4C's license, word for word:
+
+```
+Unless noted at the top of each file, Copyright 2023 Fancy Bits, LLC
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+## gluetun
+
+The container image is built on the stock [gluetun](https://github.com/qdm12/gluetun) image, unchanged. gluetun makes
+the VPN connection and keeps everything else from leaving the container. It is the work of Quentin McGaw and is under
+the MIT license.
