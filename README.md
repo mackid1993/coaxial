@@ -108,7 +108,13 @@ gluetun keeps its server lists, and the updates it makes to them, in `config/glu
 
 ## Acknowledgments
 
-See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
+Coaxial stands on two projects:
+
+- [gluetun](https://github.com/qdm12/gluetun) by Quentin McGaw, the VPN client built into the container.
+- [AH4C](https://github.com/sullrich/ah4c), originally written by Aman Karmani and since developed by
+  Scott Ullrich and Scott Ueland, whose stream copying code Coaxial carries.
+
+Their licenses and the full credits are in [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
 
 ## License
 
