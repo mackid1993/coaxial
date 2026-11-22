@@ -99,28 +99,26 @@ UI_PORT=8195
 
 </details>
 
-That is one service and one bind mount. The container is given the `NET_ADMIN` capability and the `/dev/net/tun`
-device for the VPN.
-
-The ports are set in `.env`, never in the compose file. Each provider needs a port of its own. To add one, add the
-next `PORT_n` line (up to `PORT_20`), run `docker compose up -d` again, and pick that port for the provider in the web
-page. Any free port will do, in any order.
+Ports are set in `.env`, never in the compose file. Each provider needs its own. To add one, add the next `PORT_n` line
+(up to `PORT_20`), run `docker compose up -d` again, and pick that port for the provider in the web page.
 
 Open `http://<this machine>:8195`. Enter your VPN and provider settings and save. In each player, add an Xtream login
 with the address `http://<this machine>:<the provider's port>` and the player login you chose.
 
 ## The web page
 
-**Status** shows whether the VPN is up, where it comes out (city, country, IP address, ping), each provider, what is
-playing right now, and the Coaxial and gluetun versions. **Settings** has:
+**Status** shows whether the VPN is up, where it comes out (city, country, IP address, network, ping), each provider,
+what is playing right now, and the Coaxial version. It also has the gluetun version with `Check for updates` and the
+chosen VPN server with `Find the fastest server`. An open Status view loads itself again when the Coaxial version
+changes, unless settings are unsaved. **Settings** has:
 
 - **Providers.** Add them, remove them, and reorder them with the up and down arrows. A new port is tried before
-  saving: Coaxial listens on it for 8 seconds and the page tries to reach it from your browser. If that fails, Docker
-  is not publishing the port, and the page does not save.
+  saving: Coaxial listens on it for 8 seconds and the page tries to reach it from your browser. If that fails, the page
+  does not save and tells you to add a `PORT_n` line for it to `.env`. Ports are tried again after a save.
 - **VPN.** The service and the connection type. WireGuard takes a private key and addresses. OpenVPN takes a username
-  and a password. Then where to connect: countries, cities, regions, and single servers by hostname or by name. All of
-  these are drop-downs filled from gluetun's own server lists, and the server lists narrow to the places you picked.
-  You can also type. `Refresh server list` has gluetun fetch a new list now, which needs the VPN to be running.
+  and a password. Then where to connect: countries, cities, regions, servers by hostname and servers by name. All of
+  these are drop-downs filled from gluetun's own server lists, and the two server lists narrow to the places you
+  picked. You can also type. `Refresh server list` has gluetun fetch a new list now, which needs the VPN to be running.
 - **Extra VPN variables.** Free-form names and values for any other gluetun variable.
 - **Player login**, and the port of the web page.
 
@@ -157,9 +155,9 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | Setting | What it is |
 | --- | --- |
 | `player` | The login you type into every player. Letters, digits, `-` and `_` only. The username cannot be `live`, `movie`, `series` or `timeshift`. |
-| `providers` | One entry per provider: a name, its address (`http://name` or `https://name`, optionally `:port`, with nothing after it), the login it gave you, the port your players use for it, and `live_tv`. Each provider needs a port of its own. Ports 53, 8000 and 9999 and the web page's port cannot be used. |
+| `providers` | One entry per provider: a name, its address (`http://name` or `https://name`, optionally `:port`, with nothing after it), the login it gave you, the port your players use for it, and `live_tv`. Ports 53, 8000 and 9999 and the web page's port cannot be used. |
 | `live_tv` | `ts` if your players watch live TV as MPEG-TS, `hls` if they use HLS. |
-| `ui.port` | The port of the web page and of the health check. 8195 if left out. |
+| `ui.port` | The port of the web page and of the health check. 8195 if left out. If you change it, change `UI_PORT` in `.env` to match. |
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
 | `vpn.update_hours` | How often gluetun refreshes its list of your VPN service's servers (its `UPDATER_PERIOD`). 24 if left out, 0 for never. |
 | `vpn.gluetun_version` | Which gluetun program runs: `latest` (also when left out), a tag of gluetun's image such as `v3.41.3` to stay on one version, or `builtin` to fetch nothing and run the one in this image. |
@@ -170,25 +168,26 @@ gluetun keeps its server lists in `gluetun/servers` in the mounted folder, so th
 ## Choosing the VPN server
 
 If you name a server in the settings, Coaxial uses that one and leaves it alone. If you pick a city and leave both
-server boxes empty, Coaxial chooses the server for you:
+server boxes empty, Coaxial chooses the server for you. It does not do this for the `custom` service.
 
-- **A city is required.** With only a country or a region picked, nothing is tried and gluetun picks a server at random,
-  as it always has. A country can hold hundreds of servers.
-- **Up to 8 servers are tried per run**, a different handful each time when the city has more. Only servers that fit
-  your settings are tried: the connection type, and any gluetun `..._ONLY` setting that is on. Secure core, Tor, free
-  and multihop servers are left out unless your settings ask for them.
-- **Trying a server means connecting to it.** The VPN reconnects once for each one, about 2 seconds each, and a short
-  test file is downloaded from Cloudflare through the VPN to measure it. Coaxial stays on the fastest.
+- **A city is required.** With only a country or a region picked, gluetun picks a server at random, as before.
+- **Up to 8 servers are tried per run.** When the city has more, it is a different handful each time, and the server
+  Coaxial chose before is always among them. Only servers that fit your settings are tried: the connection type, and
+  `STREAM_ONLY`, `PORT_FORWARD_ONLY` and `OWNED_ONLY` when they are on. Secure core, Tor, free and multihop servers are
+  left out unless the matching `..._ONLY` setting is on. With fewer than two servers to choose from, nothing is tried.
+- **Trying a server means connecting to it.** The VPN reconnects once for each one, and a test file is downloaded from
+  `speed.cloudflare.com` through the VPN for up to 1.5 seconds. Coaxial stays on the fastest. Only speed counts: the
+  share of packets out of order is logged but not counted. Each takes a few seconds, so 8 take about a minute.
 - **The choice and its speed are saved** in `gluetun/pick.json` in the mounted folder. When the container starts, it
   goes straight to that server. Nothing is tried at start, so you can watch right away.
 - **In quiet times it checks, it does not shop around.** Once nothing has played or recorded for 10 minutes, Coaxial
   waits an hour, then measures the server in use without reconnecting, and again every hour until someone plays. The
-  other servers are tried again only if no server is chosen yet for your settings, or if the one in use has become
-  slow: under 50 Mbit/s, or under a fifth of the speed it was chosen at. A server that is fast but no longer the very
-  fastest is kept, because trying the others takes the VPN down for about a minute and a recording that starts in
-  that minute would be missed. If someone starts playing in the middle of a run, it stops where it is.
-- **`Find the fastest server`** on the Status view runs it now. It asks first, because anything playing or recording
-  stops for a minute or two.
+  other servers are tried only if no server is chosen yet for your settings, or the one in use is under 50 Mbit/s or
+  under a fifth of the speed it was chosen at, or it cannot be measured twice in a row. A server that is fast but no
+  longer the fastest is kept, because trying the others takes the VPN down for about a minute and a recording that
+  starts then could fail. If someone starts playing during a run, it stops and is done again in the next quiet time.
+- **`Find the fastest server`** on the Status view runs it now, and goes on even if someone starts playing. It asks
+  first, because anything playing or recording stops for a minute or two.
 - If the chosen server stops connecting for 2 minutes, Coaxial drops its choice and lets gluetun pick.
 
 ## VPN client updates
@@ -207,16 +206,16 @@ not need a new Coaxial image, Coaxial fetches that file itself.
 - **It is kept** in `gluetun/bin` in the mounted folder: the build in use and the one before it. If the registry cannot
   be reached, a check fails or the new program does not run, Coaxial uses the last good copy, or else the program built
   into the image. The look-up and download get two minutes at most.
-- **While it runs**, Coaxial asks the registry once an hour whether a newer build is out, and the Status view says so.
-  `Check for updates` asks at once. Checking never touches the VPN.
+- **While it runs**, Coaxial asks the registry once an hour whether a newer build is out, and Status says so. It skips
+  this while the VPN is down or servers are being tried. `Check for updates` asks at once. Neither reconnects the VPN.
 - **A newer build installs by itself, but only when nothing is playing.** Once no one has watched or recorded anything
-  for 10 minutes, Coaxial restarts the VPN with the new build. It never does this while something is playing.
-- **If the VPN does not connect** within 2 minutes on the new build, Coaxial puts the build before it back and leaves
-  the new one alone until a different build is published or you ask for it by hand.
-- **`Update now`** appears when a newer build is out, for when you do not want to wait. It asks you first, because the
-  VPN reconnects and anything playing stops. A newer build is also taken whenever the container starts again.
-- **To stay on one version**, set `vpn.gluetun_version` to a tag such as `v3.41.3`, or to `builtin`. Then nothing is
-  ever installed by itself.
+  for 10 minutes, Coaxial restarts the VPN with the new build.
+- **If the VPN does not connect** within 2 minutes on the new build, Coaxial goes back to the build before it and skips
+  the new one (`gluetun/bin/skip.json`), also after a restart, until another is out or you click `Update now`.
+- **`Update now`** appears when a newer build is out. It asks you first, because the VPN reconnects and anything
+  playing stops. A newer build is also taken whenever the container starts again.
+- **To stay on one version**, set `vpn.gluetun_version` to a tag such as `v3.41.3`, or to `builtin`. Coaxial then
+  looks only at that tag, and with `builtin` it fetches nothing.
 
 The downloaded program runs with the VPN's privileges, like the one in the image. Every start of the VPN logs which
 program runs and why, on a line containing `VPN program:`. Only gluetun's own program is fetched. The system tools it
@@ -224,21 +223,22 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
 
 ## How it behaves
 
-- **One provider connection per live channel.** Every device watching or recording a channel shares it. A reader that
-  joins a channel already open starts about 10 seconds back, at a point where a decoder can begin, and is then brought
-  up to live. After that nothing is held back: video is passed on as it arrives.
+- **One provider connection per live channel.** On a `ts` provider, every device watching or recording a channel
+  shares one MPEG-TS stream. A reader that joins a channel already open starts about 10 seconds back, at a point where
+  a decoder can begin, and is then brought up to live. From then on it is sent video as it arrives. On an `hls`
+  provider, the provider is asked for a channel once and every player's playlist comes from that one session.
 - **Mixed formats.** On a `ts` provider, a player that asks for a live channel as HLS is given HLS cut from the same
   shared MPEG-TS stream. On an `hls` provider, a reader that asks for MPEG-TS is fed from the players' one HLS session.
 - **Redirects stay inside the VPN.** When a provider sends a player to another server, Coaxial rewrites the address so
   the player comes back to Coaxial for it. Addresses in playlists, and logos and posters in the provider's lists, are
   pointed back the same way. Coaxial refuses such an address if it leads to this machine or a home network.
 - **Movies, series, catch-up and the guide** are passed on as they come, seeking included.
-- **Xtream logins only.** A provider's ready-made M3U link (`get.php`) is refused, because the addresses inside it skip
-  the VPN.
+- **Xtream logins only.** A provider's ready-made M3U link (`get.php`) is refused: its addresses skip the VPN.
 - **If the VPN fails.** If the VPN program stops before it has connected, the web page stays up and the VPN is started
   again after 30 seconds. If it stops after it had connected, Coaxial exits so that Docker restarts the container.
 - **Status page.** `http://<this machine>:<any provider's port>/status` is a plain page with the VPN's exit address,
-  each provider's account status and what is playing.
+  each provider's account status and what is playing. The exit address is asked of `ipinfo.io` through the VPN.
+- **The log.** Normal pauses in a provider's sending are not logged. A silence of 20 seconds or more is.
 
 ## Versions and builds
 
@@ -246,8 +246,8 @@ A version is the time the image was built, in UTC: `vYYYY.MM.DD.HHMM`. It is sta
 shown on the web page and in the first line of the log. The workflow in `.github/workflows/docker-build.yml` rebuilds
 the image on the 1st of every month, without a cache, so it takes in the newest Go and gluetun images. It builds for
 amd64 and arm64 and pushes to GitHub's container registry under this repository's name, tagged `latest` and with the
-version. It can also be started by hand, with a tag of your choice in place of `latest`. A push to the repository does
-not start it.
+version. Started by hand, it takes a `tag` to use in place of `latest` and a `fresh` box to build without the cache.
+A push to the repository does not start it.
 
 ## Acknowledgments
 
