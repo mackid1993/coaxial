@@ -28,6 +28,14 @@ on any of them.
 - **A device joining a channel already playing starts on a whole picture.**
   Its first video begins at the program table just before a keyframe, so its
   player does not throw away up to a second of video it cannot decode.
+- **A channel the provider sends again no longer runs backwards.** When a
+  provider ends a stream that is being watched, the relay asks for it again
+  and joins the new stream on to the old one. A provider asked again starts
+  with its opening burst, seconds of video from before where the old stream
+  stopped, and that was passed on: the stream's clock ran back about 11
+  seconds and players and recorders froze on it. The new stream now joins at
+  its first keyframe past the last clock passed on, and the log says how
+  much repeated video was left out.
 - **A player that hangs up and asks again while tuning keeps its full start.**
   A channel nobody is on any more is opened for the next request as for
   the first one: everything the provider sent so far, at once. Before, the
@@ -1625,6 +1633,12 @@ configs:
       // keyframe. Started at any PAT, the player was handed up to a whole keyframe interval of video it could not
       // decode, out of the few seconds it gets at once, and stalled. Streams that mark no keyframes: cleanStart.
       func keyStart(buf []byte) int {
+      	at, _ := keyFound(buf)
+      	return at
+      }
+
+      // keyFound: keyStart, and whether a keyframe was found.
+      func keyFound(buf []byte) (int, bool) {
       	start := cleanStart(buf)
       	pmtPID, vid, lastPAT := -1, -1, -1
       	for i := start; i+188 <= len(buf) && buf[i] == 0x47; i += 188 {
@@ -1645,10 +1659,61 @@ configs:
       		case pid == pmtPID && vid < 0:
       			vid = pickStream(tableStart(body))
       		case pid == vid && rai && lastPAT >= 0:
-      			return lastPAT
+      			return lastPAT, true
       		}
       	}
-      	return start
+      	return start, false
+      }
+
+      // lastPCR: the last program clock reference in b on the given stream (-1: the first one that carries one).
+      func lastPCR(b []byte, want int) (int, float64, bool) {
+      	start := -1
+      	for i := 0; i+376 < len(b); i++ {
+      		if b[i] == 0x47 && b[i+188] == 0x47 && b[i+376] == 0x47 {
+      			start = i
+      			break
+      		}
+      	}
+      	pid, v, ok := want, 0.0, false
+      	for i := start; start >= 0 && i+188 <= len(b) && b[i] == 0x47; i += 188 {
+      		p := b[i : i+188]
+      		id := int(p[1]&0x1f)<<8 | int(p[2])
+      		if p[3]&0x20 == 0 || p[4] < 7 || p[5]&0x10 == 0 || (pid >= 0 && id != pid) {
+      			continue
+      		}
+      		pid = id
+      		v = float64(int64(p[6])<<25|int64(p[7])<<17|int64(p[8])<<9|int64(p[9])<<1|int64(p[10])>>7) / 90000
+      		ok = true
+      	}
+      	return pid, v, ok
+      }
+
+      // spliceAt: where a stream the provider sent again joins on to the old one. A provider asked again starts
+      // with its opening burst, seconds of video from before where the old stream stopped; passed on, the
+      // stream's clock ran backwards and players froze on it. So the new stream joins at its first keyframe
+      // whose clock is past the last clock passed on (pid, clock). ok=false: not there yet (wait for more).
+      // A clock far from the old one (another clock entirely) is not compared: it joins at once.
+      func spliceAt(buf []byte, pid int, clock float64) (int, bool) {
+      	start := cleanStart(buf)
+      	if clock < 0 {
+      		return start, true
+      	}
+      	seen := false
+      	for i := start; i+188 <= len(buf) && buf[i] == 0x47; i += 188 {
+      		_, v, ok := lastPCR(buf[i:min(len(buf), i+188*3)], pid)
+      		if !ok || (i+188*3 > len(buf)) {
+      			continue
+      		}
+      		if !seen && math.Abs(v-clock) > 60 {
+      			return start, true
+      		}
+      		seen = true
+      		if v > clock {
+      			at, found := keyFound(buf[i:])
+      			return i + at, found
+      		}
+      	}
+      	return start, false
       }
 
       type pace struct{ have, credit, at, guess float64 } // a joiner's cushion, allowance, when counted, speed guessed
@@ -1997,6 +2062,7 @@ configs:
       func tsSource(target string, h http.Header) source {
       	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
       		again, sent, quiet := false, int64(0), 0
+      		clockPID, clock := -1, -1.0 // the newest stream clock passed on (see spliceAt)
       		for {
       			began, got := mono(), false
       			wait := float64(headerWait)
@@ -2030,7 +2096,16 @@ configs:
       						if err == nil && len(head) < 16384 {
       							continue
       						}
-      						data, head, joining = head[cleanStart(head):], nil, false
+      						at, ok := spliceAt(head, clockPID, clock)
+      						if !ok && err == nil && len(head) < 48<<20 {
+      							continue
+      						}
+      						if !ok {
+      							at = cleanStart(head)
+      						} else if clock >= 0 && at > 0 {
+      							say("a channel asked for again repeated %d KB of video; it was left out", at>>10)
+      						}
+      						data, head, joining = head[at:], nil, false
       						if len(data) > 0 && sent%188 != 0 { // the old stream stopped mid-packet: fill it out
       							fill := make([]byte, 188-sent%188)
       							for i := range fill {
@@ -2043,6 +2118,9 @@ configs:
       						}
       					}
       					if len(data) > 0 {
+      						if p, v, ok := lastPCR(data, clockPID); ok {
+      							clockPID, clock = p, v
+      						}
       						got = true
       						sent += int64(len(data))
       						if !yield(data) {
