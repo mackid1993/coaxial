@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07070A">
+<meta name="robots" content="noindex">
+<title>Coaxial</title>
+<link rel="icon" type="image/svg+xml" href="coaxial-favicon.svg">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<svg width="0" height="0" class="defs" aria-hidden="true" focusable="false">
+  <defs>
+    <radialGradient id="ring-core" cx=".36" cy=".32" r=".78"><stop offset="0" stop-color="#FFFFFF"/><stop offset=".45" stop-color="#E5E7EB"/><stop offset="1" stop-color="#9CA3AF"/></radialGradient>
+    <radialGradient id="ring-diel" cx=".5" cy=".42" r=".6"><stop offset="0" stop-color="#FFFFFF" stop-opacity=".14"/><stop offset="1" stop-color="#FFFFFF" stop-opacity=".03"/></radialGradient>
+  </defs>
+</svg>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="#/status" aria-label="Coaxial, go to status">
+      <img class="brand-icon" src="coaxial-icon.svg" width="30" height="30" alt="">
+      <img class="brand-word" src="coaxial-wordmark-dark.svg" width="107" height="26" alt="">
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a href="#/status" data-nav="status">Status</a>
+      <a href="#/settings" data-nav="settings">Settings<span class="nav-dot" id="nav-dirty" hidden title="Unsaved changes"></span></a>
+    </nav>
+    <span class="version" id="version" hidden></span>
+  </div>
+</header>
+
+<main id="main" class="wrap" tabindex="-1">
+
+  <section id="view-status" class="view" aria-labelledby="status-title" hidden>
+    <header class="page-head">
+      <div>
+        <h1 id="status-title">Status</h1>
+        <p class="page-sub" id="status-summary">Checking the tunnel.</p>
+      </div>
+      <div class="live" id="live" data-state="wait" role="status">
+        <span class="live-dot" aria-hidden="true"></span><span id="live-text">Connecting</span>
+      </div>
+    </header>
+
+    <div class="banner" id="status-error" role="alert" hidden>
+      <svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.2v.3"/></svg>
+      <span>Lost contact with Coaxial. Trying again every 2 seconds.</span>
+    </div>
+
+    <div id="status-body">
+      <article class="card vpn" id="vpn" data-state="wait" aria-label="VPN tunnel">
+        <div class="vpn-main">
+          <svg class="orb" width="84" height="84" viewBox="40 40 432 432" aria-hidden="true">
+            <circle class="orb-well" cx="256" cy="256" r="134"/>
+            <g class="orb-segs" fill="none" stroke-width="25.5">
+              <path style="--c:#FFD60A" d="M396.95 204.70A150 150 0 0 1 390.04 323.32"/>
+              <path style="--c:#22D3EE" d="M382.27 336.96A150 150 0 0 1 283.76 403.41"/>
+              <path style="--c:#34D399" d="M268.20 405.50A150 150 0 0 1 155.63 367.47"/>
+              <path style="--c:#E879F9" d="M144.53 356.37A150 150 0 0 1 106.50 243.80"/>
+              <path style="--c:#F43F5E" d="M108.59 228.24A150 150 0 0 1 175.04 129.73"/>
+              <path style="--c:#3B82F6" d="M188.68 121.96A150 150 0 0 1 307.30 115.05"/>
+              <path style="--c:#FFD60A" stroke-width="16.95" stroke-linecap="round" d="M314.61 117.92A150 150 0 0 1 394.08 197.39"/>
+            </g>
+            <path class="orb-signal" fill="none" stroke-width="13" stroke-linecap="round" d="M331.02 79.26A192 192 0 0 1 432.74 180.98"/>
+            <circle class="orb-braid" cx="256" cy="256" r="111" fill="none" stroke-width="10.5" stroke-dasharray="10.66 8.72" stroke-linecap="round"/>
+            <circle cx="256" cy="256" r="93" fill="url(#ring-diel)"/>
+            <circle class="orb-core" cx="256" cy="256" r="31.5"/>
+          </svg>
+          <div class="vpn-text">
+            <p class="eyebrow">VPN tunnel</p>
+            <p class="vpn-state" id="vpn-state">Checking</p>
+            <p class="vpn-sub" id="vpn-sub">Asking the tunnel how it is doing.</p>
+            <div class="vpn-acts">
+              <div class="vpn-prog" id="vpn-prog" hidden>
+                <div class="vpn-info"><span class="chip" id="vpn-prog-ver"></span><span class="vpn-prog-text" id="vpn-prog-text"></span></div>
+                <div class="vpn-btn"><button type="button" class="btn sm" id="vpn-prog-check"><span class="spin" aria-hidden="true"></span><span class="ico" aria-hidden="true"></span>Check for updates</button><button type="button" class="btn sm primary" id="vpn-prog-update" hidden><span class="spin" aria-hidden="true"></span><span class="ico" aria-hidden="true"></span>Update now</button></div>
+              </div>
+              <div class="vpn-pick" id="vpn-pick" hidden>
+                <div class="vpn-info"><span id="vpn-pick-text"></span></div>
+                <div class="vpn-btn"><button type="button" class="btn sm" id="vpn-pick-go"><span class="spin" aria-hidden="true"></span><span class="ico" aria-hidden="true"></span>Find the fastest server</button></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <dl class="metrics">
+          <div class="metric"><dt>Exit city</dt><dd id="vpn-city">n/a</dd></div>
+          <div class="metric"><dt>Country</dt><dd><img class="flag" id="vpn-flag" alt="" hidden><span id="vpn-country">n/a</span></dd></div>
+          <div class="metric"><dt>IP address</dt><dd class="mono" id="vpn-ip">n/a</dd><p class="metric-sub" id="vpn-net" hidden></p></div>
+          <div class="metric metric-ping">
+            <dt>Ping</dt>
+            <dd><span class="num" id="vpn-ping">n/a</span><small id="vpn-ping-unit" hidden>ms</small>
+              <svg class="spark" id="spark" viewBox="0 0 120 28" preserveAspectRatio="none" aria-hidden="true"><path id="spark-area" class="spark-area" d=""/><path id="spark-line" class="spark-line" d=""/></svg>
+            </dd>
+          </div>
+        </dl>
+      </article>
+
+      <div class="sec-head"><h2>Providers</h2></div>
+      <div class="providers" id="providers">
+        <div class="card prov skeleton" aria-hidden="true"></div>
+        <div class="card prov skeleton" aria-hidden="true"></div>
+      </div>
+      <div class="card empty empty-inline" id="providers-empty" hidden>
+        <div>
+          <p class="empty-title">No providers yet</p>
+          <p class="empty-text">Add your first IPTV provider and it shows up here.</p>
+        </div>
+        <a class="btn" href="#/settings">Open settings</a>
+      </div>
+
+      <div class="sec-head"><h2>Playing right now</h2><span class="count" id="playing-count" hidden></span></div>
+      <div class="card table-card">
+        <table class="playing" id="playing-table" hidden>
+          <thead>
+            <tr>
+              <th scope="col" class="c-device">Device</th>
+              <th scope="col" class="c-channel">Channel</th>
+              <th scope="col" class="c-provider">Provider</th>
+              <th scope="col" class="c-format">Format</th>
+              <th scope="col" class="c-time r">Watching for</th>
+              <th scope="col" class="c-data r">Data</th>
+            </tr>
+          </thead>
+          <tbody id="playing"></tbody>
+        </table>
+        <div class="empty" id="playing-empty" hidden>
+          <svg class="empty-art" width="76" height="76" viewBox="40 40 432 432" aria-hidden="true">
+            <g fill="none" stroke="currentColor" stroke-width="25.5">
+              <path d="M396.95 204.70A150 150 0 0 1 390.04 323.32"/>
+              <path d="M382.27 336.96A150 150 0 0 1 283.76 403.41"/>
+              <path d="M268.20 405.50A150 150 0 0 1 155.63 367.47"/>
+              <path d="M144.53 356.37A150 150 0 0 1 106.50 243.80"/>
+              <path d="M108.59 228.24A150 150 0 0 1 175.04 129.73"/>
+              <path d="M188.68 121.96A150 150 0 0 1 307.30 115.05"/>
+              <path stroke-width="16.95" stroke-linecap="round" d="M314.61 117.92A150 150 0 0 1 394.08 197.39"/>
+            </g>
+            <circle cx="256" cy="256" r="111" fill="none" stroke="currentColor" stroke-opacity=".6" stroke-width="10.5" stroke-dasharray="10.66 8.72" stroke-linecap="round"/>
+            <circle cx="256" cy="256" r="31.5" fill="currentColor"/>
+          </svg>
+          <p class="empty-title">Nothing is playing</p>
+          <p class="empty-text">The line is quiet. A stream shows up here the moment a device tunes in.</p>
+        </div>
+        <div class="table-skel" id="playing-skel" aria-hidden="true"><span></span><span></span><span></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-settings" class="view" aria-labelledby="settings-title" hidden>
+    <header class="page-head">
+      <div>
+        <h1 id="settings-title">Settings</h1>
+        <p class="page-sub">Saving restarts the proxy. The VPN only reconnects when a VPN setting changed.</p>
+      </div>
+    </header>
+    <div id="settings-root"></div>
+  </section>
+
+</main>
+
+<div class="savebar" id="savebar" hidden>
+  <div class="savebar-in">
+    <div class="savebar-msg" aria-live="polite">
+      <p class="savebar-title" id="save-title">Unsaved changes</p>
+      <p class="savebar-sub" id="save-sub"></p>
+    </div>
+    <div class="savebar-act">
+      <button type="button" class="btn ghost" id="discard">Discard</button>
+      <button type="button" class="btn primary" id="save"><span class="spin" aria-hidden="true"></span><span id="save-label">Save changes</span></button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<noscript><p class="noscript">Coaxial needs JavaScript to show status and settings.</p></noscript>
+<script src="app.js"></script>
+</body>
+</html>
