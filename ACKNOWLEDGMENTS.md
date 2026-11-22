@@ -1,17 +1,17 @@
 # Acknowledgments
 
-## AH4C
+## ah4c
 
-Coaxial carries two small functions from [AH4C](https://github.com/sullrich/ah4c), unchanged: `copyFlush` (a copy that
+Coaxial carries two small functions from [ah4c](https://github.com/sullrich/ah4c), unchanged: `copyFlush` (a copy that
 pushes every piece out as soon as it is written) and `readWithDeadline` (a read that gives up on a source that has gone
-quiet). They are in `coaxial/passthrough.go`, under AH4C's notice, and do the copying whenever Coaxial passes a movie, a
+quiet). They are in `coaxial/passthrough.go`, under ah4c's notice, and do the copying whenever Coaxial passes a movie, a
 series episode, catch-up, the guide or a video piece from a provider to a player.
 
-AH4C was originally written by Aman Karmani ([tmm1](https://github.com/tmm1)), and has since been
-developed and maintained by Scott Ullrich ([sullrich](https://github.com/sullrich)) and Scott Ueland
-([bnhf](https://github.com/bnhf)). Thank you to all three.
+ah4c was originally written by Aman Karmani ([tmm1](https://github.com/tmm1)), and has since been
+developed and maintained by Scott Ullrich ([sullrich](https://github.com/sullrich)), Scott Ueland
+([bnhf](https://github.com/bnhf)) and [mackid1993](https://github.com/mackid1993). Thank you to all four.
 
-AH4C's license, word for word:
+ah4c's license, word for word:
 
 ```
 Unless noted at the top of each file, Copyright 2023 Fancy Bits, LLC
