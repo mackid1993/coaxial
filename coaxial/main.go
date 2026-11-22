@@ -416,30 +416,54 @@ func lastPCR(b []byte, want int) (int, float64, int, bool) {
 // stream on the same clock laid out otherwise (padded to a constant rate, or not; its tables elsewhere), and
 // past bytes on was then a few packets off, a packet of video lost or sent twice and frames broken. The
 // place is then just after that packet, looked for from the clock on; not found, ok=false.
-func resumeAt(buf []byte, clock float64, past int, last []byte) (int, bool) {
+// video, the last packet of video passed on (nil: none), must be the last of its stream before the place.
+// Packets of sound can be the same in two streams: the same pictures encoded again (a provider's encoder
+// started afresh) carry the same clock and, their sound passed through, the same packets of sound; so do two
+// programs made from one source. Joined after such a packet, the readers' decoders went on into another
+// encoding mid-picture (broken frames up to its next keyframe), or packets were sent twice. A clock packet
+// that is not the place may be another program's on the same clock: the clock is looked for on.
+func resumeAt(buf []byte, clock float64, past int, last, video []byte) (int, bool) {
 	if clock < 0 {
 		return 0, false
+	}
+	place := func(at int) bool {
+		return (last == nil || samePacket(buf[at-188:at], last)) && (video == nil || lastOf(buf[:at], video))
 	}
 	for i := cleanStart(buf); i+188 <= len(buf) && buf[i] == 0x47; i += 188 {
 		if p := buf[i : i+188]; p[3]&0x20 != 0 && p[4] >= 7 && p[5]&0x10 != 0 &&
 			float64(int64(p[6])<<25|int64(p[7])<<17|int64(p[8])<<9|int64(p[9])<<1|int64(p[10])>>7)/90000 == clock {
 			at := i + past // (past is whole packets: see whole)
-			if last == nil || at > len(buf) || samePacket(buf[at-188:at], last) {
+			if at > len(buf) {
+				return at, true
+			}
+			if place(at) {
 				return at, true
 			}
 			end := i + 2*past + 188*64
 			for k := i; k+188 <= min(len(buf), end); k += 188 {
-				if samePacket(buf[k:k+188], last) {
+				if place(k + 188) {
 					return k + 188, true
 				}
 			}
 			if end > len(buf) {
 				return len(buf) + 188, true // (not come yet)
 			}
-			return 0, false
 		}
 	}
 	return 0, false
+}
+
+// lastOf: whether p is in b and no packet of its stream comes after it there (see samePacket).
+func lastOf(b, p []byte) bool {
+	after := map[int]bool{}
+	for i := len(b) - 188; i >= 0 && b[i] == 0x47; i -= 188 {
+		pid := int(b[i+1]&0x1f)<<8 | int(b[i+2])
+		if samePacket(b[i:i+188], p) {
+			return !after[pid]
+		}
+		after[pid] = true
+	}
+	return false
 }
 
 // samePacket: whether a and b are the same packet, whatever its PID and continuity counter (a stream numbered
@@ -489,8 +513,9 @@ func spliceAt(buf []byte, pid int, clock float64) (int, bool) {
 			// PID, and none on the old one, is compared from then on. (Waiting for the old PID waited for 48 MB
 			// of video, while every reader on the channel got nothing.)
 			if p, _, _, found := lastPCR(buf[i:min(len(buf), i+188*3)], -1); found && p != pid && !seen {
-				if other++; other >= 30 {
-					pid = p
+				if other++; other >= 30 { // (and looked through from its start: a keyframe in its first
+					// packets was passed over, and a whole keyframe interval of video lost)
+					pid, i = p, start-188
 				}
 			}
 			continue
@@ -875,7 +900,9 @@ func tsSource(target string, h http.Header) source {
 		// streams afresh (see renumber.go)
 		var pub numbering
 		var rn *renumber
-		var last []byte // the last packet of video or sound passed on (see resumeAt)
+		var last []byte  // the last packet of video or sound passed on (see resumeAt)
+		var video []byte // and of video, on its PID in this stream's numbers
+		vpid := -1
 		for {
 			began, got := mono(), false
 			wait := float64(headerWait)
@@ -913,7 +940,7 @@ func tsSource(target string, h http.Header) source {
 						if err == nil && len(head) < 16384 {
 							continue
 						}
-						at, ok := resumeAt(head, clock, past, last)
+						at, ok := resumeAt(head, clock, past, last, video)
 						if ok && at > len(head) && err == nil && len(head) < 48<<20 {
 							continue // (where the old stream stopped has not come yet)
 						}
@@ -933,11 +960,17 @@ func tsSource(target string, h http.Header) source {
 						}
 						if !ok {
 							at = cleanStart(head)
-						} else if clock >= 0 && at > 0 {
+						}
+						if programDue(head, at, pub) && err == nil && len(head) < 48<<20 {
+							continue // (numbered afresh, and its program table has not come yet)
+						}
+						if ok && clock >= 0 && at > 0 {
 							say("a channel asked for again repeated %d KB of video; it was left out", at>>10)
 						}
-						if p, ok := programOf(head); ok && pub.es != nil { // (the numbers this stream gives from its start)
-							rn = renumbering(p, pub)
+						if p, ok := programOf(head); ok { // (the numbers this stream gives from its start)
+							if vpid = p.video(); pub.es != nil {
+								rn = renumbering(p, pub)
+							}
 						}
 						data, head, joining = head[at:], nil, false
 						// its clock is taken afresh from it: it may be on another PID now
@@ -965,11 +998,18 @@ func tsSource(target string, h http.Header) source {
 								break
 							}
 						}
+						for i := len(data) - 188; i >= 0 && vpid >= 0; i -= 188 {
+							if int(data[i+1]&0x1f)<<8|int(data[i+2]) == vpid {
+								video = append(video[:0], data[i:i+188]...)
+								break
+							}
+						}
 						if rn != nil {
 							data = rn.apply(data)
 						}
 						if pub.es == nil {
 							pub, _ = programOf(data)
+							vpid = pub.video()
 						}
 						if len(data) > 0 && !yield(data) {
 							return errStop

@@ -25,7 +25,7 @@ func TestResumeWhereItStopped(t *testing.T) {
 		for k := 0; k < extra; k++ {                 // (the same packets, in the same place)
 			copy(again[(50+k)*188:], old[(100+k)*188:(101+k)*188])
 		}
-		if at, ok := resumeAt(again, clock, past, nil); !ok || at != (50+extra)*188 {
+		if at, ok := resumeAt(again, clock, past, nil, nil); !ok || at != (50+extra)*188 {
 			t.Errorf("%d packets after the last clock: carries on at packet %d (%v), want %d", extra, at/188, ok, 50+extra)
 		} else if !bytes.Equal(again[at:at+188], full[(150+extra)*188:(151+extra)*188]) {
 			t.Errorf("%d packets after the last clock: not the packet after the old stream's last", extra)
@@ -37,11 +37,11 @@ func TestResumeWhereItStopped(t *testing.T) {
 	for i := 0; i < len(again); i += 188 {
 		again[i+1], again[i+2] = 0x02, 0x00
 	}
-	if at, ok := resumeAt(again, clock, 150*188-at, nil); !ok || at != 50*188 {
+	if at, ok := resumeAt(again, clock, 150*188-at, nil, nil); !ok || at != 50*188 {
 		t.Errorf("numbered afresh: carries on at packet %d (%v), want 50", at/188, ok)
 	}
 	// another clock: not found here (spliceAt decides)
-	if _, ok := resumeAt(splicePkts(0x100, 1000, 300), clock, 188, nil); ok {
+	if _, ok := resumeAt(splicePkts(0x100, 1000, 300), clock, 188, nil, nil); ok {
 		t.Error("a stream on another clock was taken to carry on")
 	}
 }
@@ -91,7 +91,7 @@ func TestResumeOtherLayout(t *testing.T) {
 			last = old[len(old)-376 : len(old)-188]
 		}
 		again := fresh[len(fresh)/4/188*188:] // asked again, seconds back
-		from, ok := resumeAt(again, clock, len(old)-at, last)
+		from, ok := resumeAt(again, clock, len(old)-at, last, nil)
 		if !ok || from > len(again) {
 			t.Fatalf("%s: where it stopped was not found (%d, %v)", tc.name, from, ok)
 		}

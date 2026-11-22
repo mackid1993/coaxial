@@ -470,8 +470,8 @@ td.c-data { color: var(--text-2); }
 }
 .note svg { margin-top: 1px; color: var(--text-3); }
 .note code { font: 12px var(--mono); color: var(--text); }
-.port-warn { margin-top: 16px; border-color: rgba(244, 63, 94, .38); background: rgba(244, 63, 94, .07); }
-.port-warn svg { color: var(--down); }
+.port-warn, .setup-problem { margin-top: 16px; border-color: rgba(244, 63, 94, .38); background: rgba(244, 63, 94, .07); }
+.port-warn svg, .setup-problem svg { color: var(--down); }
 
 /* First run */
 .setup { position: relative; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 40px 56px; padding: 48px; }

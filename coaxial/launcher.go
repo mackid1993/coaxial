@@ -617,10 +617,15 @@ func (l *launcher) apiSettings(w http.ResponseWriter, r *http.Request) {
 	l.mu.Unlock()
 	switch r.Method {
 	case "GET", "HEAD":
-		if old == nil {
-			old = emptySettings()
+		m := emptySettings().masked()
+		if old != nil {
+			m = old.masked()
+		} else if _, err := os.Stat(l.file); err == nil { // a settings.json is there that could not be read: saving replaces it
+			l.mu.Lock()
+			m["problem"] = l.problem
+			l.mu.Unlock()
 		}
-		writeJSON(w, 200, old.masked())
+		writeJSON(w, 200, m)
 	case "PUT":
 		fail := func(status int, errs ...fieldError) {
 			writeJSON(w, status, map[string]any{"ok": false, "errors": errs})
@@ -680,8 +685,16 @@ func (l *launcher) apiSettings(w http.ResponseWriter, r *http.Request) {
 
 func (l *launcher) apiStatus(w http.ResponseWriter, r *http.Request) {
 	l.mu.Lock()
-	s, up, note, running, problem, prog := l.set, l.vpnUp, l.vpnNote, l.proxy != nil, l.problem, l.prog
+	s, up, note, running, problem, prog, started := l.set, l.vpnUp, l.vpnNote, l.proxy != nil, l.problem, l.prog, l.vpn != nil
 	l.mu.Unlock()
+	if note == "" && !up && !started && s != nil {
+		for _, e := range s.validate() {
+			if strings.HasPrefix(e.Field, "vpn.") { // (apply does not start the VPN with these)
+				note = "The VPN is not started: the VPN settings have a problem (" + e.Field + ": " + e.Message + ")"
+				break
+			}
+		}
+	}
 	vpn := map[string]any{"up": up, "city": "", "country": "", "ip": "", "network": "", "ping_ms": 0, "program": map[string]string{
 		"version": prog.Version, "source": prog.Source, "digest": short(prog.Digest), "fetched_at": prog.FetchedAt}}
 	vpn["update"] = l.programUpdate()

@@ -198,7 +198,8 @@
     progBusy = kind; if (st.data) paintProgram(st.data.vpn || {});
     try {
       var r = await api('POST', '/api/vpn/program/' + kind);
-      if (kind === 'update') toast(r.ok ? 'The VPN client was updated. The VPN is reconnecting.' : 'The update did not go through.', !r.ok);
+      var done = r.ok && !!r.data && r.data.ok !== false;
+      if (kind === 'update') toast(done ? 'The VPN client was updated. The VPN is reconnecting.' : (r.data && r.data.message) || 'The update did not go through.', !done);
       else if (r.ok && r.data && r.data.update && !r.data.update.available) toast(r.data.update.error ? 'Could not reach the registry to check.' : 'The VPN client is up to date.', !!r.data.update.error);
     } catch (e) { toast('Could not reach Coaxial.', true); }
     progBusy = '';
@@ -219,6 +220,13 @@
     if (e.target.closest && e.target.closest('#vpn-prog-update')) programAct('update');
   });
 
+  // Why the tunnel is down, when Coaxial knows it: a settings.json it could not read, VPN settings it does not
+  // start the VPN with, or a VPN that stopped before it connected (most often a setting the VPN client refused).
+  function downReason(d) {
+    var why = String(d.problem || (d.vpn && d.vpn.note) || '');
+    return why && !/[.!?]$/.test(why) ? why + '.' : why;
+  }
+
   function renderStatus() {
     var d = st.data, vpn = d.vpn || {}, provs = d.providers || [], playing = d.playing || [];
     var place = [vpn.city, vpn.country].filter(Boolean).join(', ');
@@ -228,7 +236,7 @@
     setText($('#vpn-state'), finding ? 'Finding the fastest server' : vpn.up ? 'Tunnel is up' : 'Tunnel is down');
     setText($('#vpn-sub'), finding ? 'Trying the servers in your city, one after another. Streams are on hold until the fastest is chosen.'
       : vpn.up ? (place ? 'Your streams leave through ' + place + '.' : 'Your streams leave through the VPN.')
-      : 'Waiting for the VPN to reconnect. Streams are on hold until it does.');
+      : downReason(d) || 'Waiting for the VPN to reconnect. Streams are on hold until it does.');
     setText($('#vpn-city'), vpn.up && vpn.city ? vpn.city : 'n/a');
     setText($('#vpn-country'), vpn.up && vpn.country ? vpn.country : 'n/a');
     var cc = vpn.up && /^[A-Za-z]{2}$/.test(vpn.country || '') ? vpn.country.toUpperCase() : '';
@@ -818,6 +826,8 @@
           h('img', { class: 'brand-icon', src: 'coaxial-icon.svg', width: '64', height: '64', alt: '' }),
           h('img', { class: 'brand-word', src: 'coaxial-wordmark-dark.svg', width: '215', height: '52', alt: '' })),
         h('h2', { text: 'Welcome. Let\u2019s get you watching.' }),
+        S.problem ? h('div', { class: 'note setup-problem', html: icon('alert') }, h('span', { text: S.problem +
+          '. Setting up here replaces that file. To keep what it holds, put the file right by hand and restart the container.' })) : null,
         h('p', { class: 'setup-lead', text: 'Coaxial carries your IPTV streams through a VPN tunnel and shares one provider connection per channel between all of your devices. Setup takes about two minutes.' }),
         start,
         h('p', { class: 'setup-foot' }, 'Everything is kept in ', h('code', { text: 'settings.json' }), ' in your own folder. Nothing is sent anywhere else.')),
@@ -894,7 +904,7 @@
     try {
       var r = await api('GET', '/api/settings');
       if (!r.ok || !r.data) throw new Error('bad settings');
-      S.base = normalize(r.data); S.cur = clone(S.base);
+      S.base = normalize(r.data); S.cur = clone(S.base); S.problem = r.data.problem || '';
       S.errors = {}; S.general = [];
     } catch (e) {
       S.failed = true;
@@ -941,6 +951,15 @@
       if (!bad.length || Date.now() > until) break;
       await new Promise(function (r) { setTimeout(r, 1500); });
       if (mine !== portCheck) return;
+    }
+    if (bad.length) { // the proxy waits for the VPN: until it is up no port answers, whatever Docker publishes
+      var now = null;
+      try { now = (await api('GET', '/api/status')).data; } catch (e) { /* not known: warn as below */ }
+      if (mine !== portCheck) return;
+      if (now && now.vpn && !now.vpn.up) {
+        toast('Saved, but the VPN has not connected, so no provider answers yet. ' + (downReason(now) || 'The container log has the reason.'), true);
+        return;
+      }
     }
     S.portWarn = {}; bad.forEach(function (p) { S.portWarn[p] = 1; });
     paintPortWarn();

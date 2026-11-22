@@ -787,7 +787,11 @@ func nothingPlaying() bool {
 // registry is asked first, through the VPN that still runs: gluetun leaves its firewall and its name server
 // (127.0.0.1) behind when it stops, so nothing can be fetched from the moment the VPN is stopped until it is up
 // again. The start that follows takes what was found from the cache.
-func (l *launcher) restartForProgram(why string) {
+func (l *launcher) restartForProgram(why string) { l.restartIf(why, false) }
+
+// restartIf is restartForProgram; with onlyNewer ("Update now"), the VPN is left running, and false returned, when
+// the registry gave no build other than the one in use: starting it again would cut what plays for nothing.
+func (l *launcher) restartIf(why string, onlyNewer bool) bool {
 	l.mu.Lock()
 	s := l.set
 	l.mu.Unlock()
@@ -798,14 +802,22 @@ func (l *launcher) restartForProgram(why string) {
 			if got.Path != "" { // (as a start does: the newest, the one the VPN last connected with, and no third)
 				tidy(binDir(l.dir), got.Digest)
 			}
+			l.mu.Lock()
+			same := got.Path == "" || got.Digest == l.prog.Digest
+			l.mu.Unlock()
 			l.work.Unlock()
 			say("VPN program: asked before the VPN is stopped: %s", found)
+			if onlyNewer && same {
+				say("VPN program: no newer build could be had; the VPN is left as it is")
+				return false
+			}
 		}
 	}
 	l.mu.Lock()
 	l.vpnKey = why
 	l.mu.Unlock()
 	l.apply()
+	return true
 }
 
 // askBeforeStop: a start of the VPN that will want the registry (another tag, or the last look-up is old) asks
@@ -1051,10 +1063,15 @@ func (l *launcher) apiProgramUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	say("VPN program: an update was asked for from the web interface; starting the VPN again")
 	os.Remove(filepath.Join(binDir(l.dir), "skip.json")) // (asked for by hand: a build left alone before is tried again)
-	l.restartForProgram("(update)")
+	done := l.restartIf("(update)", true)
 	l.mu.Lock()
 	p := l.prog
 	l.mu.Unlock()
+	if !done {
+		writeJSON(w, 200, map[string]any{"ok": false, "message": "The newer VPN client could not be downloaded, so nothing was changed and the VPN stayed connected. The container log has the reason.",
+			"program": map[string]string{"version": p.Version, "source": p.Source, "digest": short(p.Digest)}, "update": l.programUpdate()})
+		return
+	}
 	// (the registry was asked just before the VPN stopped; it cannot be asked again until the VPN is back up)
 	writeJSON(w, 200, map[string]any{"ok": true, "program": map[string]string{"version": p.Version, "source": p.Source, "digest": short(p.Digest)}, "update": l.programUpdate()})
 }

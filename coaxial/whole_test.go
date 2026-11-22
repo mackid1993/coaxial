@@ -36,7 +36,7 @@ func TestStoppedMidPacketCarriesOnWhole(t *testing.T) {
 			t.Fatalf("%s: no clock handed on", tc.name)
 		}
 		again := full[100*188:] // asked again: 2 s back
-		from, ok := resumeAt(again, clock, len(out)-at, nil)
+		from, ok := resumeAt(again, clock, len(out)-at, nil, nil)
 		if !ok {
 			t.Fatalf("%s: where it stopped was not found", tc.name)
 		}
