@@ -326,15 +326,17 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
   shared MPEG-TS stream, in pieces of about 4 seconds that each start at a keyframe. That HLS leaves the channel 30
   seconds after its players stop asking for it. On an `hls` provider, a reader that asks for MPEG-TS is fed from the
   players' one HLS session, at playing speed, with everything waiting sent just before each whole minute so a
-  recording that stops on the minute loses nothing.
+  recording that stops on the minute loses nothing. If the provider's pieces start numbering their
+  streams afresh (another packager, an advert), they are handed on under the numbers the reader started with, so
+  recorders carry on.
 - **When a provider drops a channel.** If a stream that ran at least 30 seconds ends while someone is watching,
-  Coaxial asks for it again at once. When the provider sends the same video again, the new stream is joined exactly
-  where the old one stopped, with nothing lost or repeated. Otherwise it is joined at its first keyframe past the last
-  picture sent, and the part the provider repeated is left out, so the picture does not jump back. A new stream that
-  numbers its streams differently (another of the provider's servers) is handed on under the numbers the players
-  started with, so players and recorders carry on instead of stopping. Coaxial does not ask again if another channel
-  of the same provider was opened in the last 15 seconds (on a one-connection account that would end it), or once
-  the channel has gone silent twice in a row.
+  Coaxial asks for it again at once. The new stream is joined at its first keyframe past the last picture sent, and
+  the part the provider repeated is left out, so the picture does not jump back. Up to one keyframe interval, often a
+  second or two, is skipped there. If no keyframe comes within 12 seconds, it is joined where its clock passes the
+  old one. Past the join, the new stream is passed on exactly as the provider sends it. On an account that allows one
+  connection (or whose limit is not known yet), Coaxial does not ask again if another channel of the same provider was
+  opened in the last 15 seconds, since asking would end that one. It also stops asking once the channel has gone
+  silent twice in a row.
 - **Changing channel.** A channel nobody is on any more is let go before the next one is asked for, and the provider
   gets a tenth of a second to see it, so one-connection accounts can change channel. A channel in its first seconds is
   kept for 0.4 seconds after its last reader leaves, because players often hang up and ask again while tuning.
