@@ -12,6 +12,22 @@ VPN ([gluetun](https://github.com/qdm12/gluetun)) built in: one image, one folde
 in to Coaxial with one login that you choose, instead of logging in to the provider. The part of Coaxial that talks to
 your providers is started only after the VPN is up.
 
+What it does:
+
+- **One VPN for every device.** TVs, phones and media servers need no VPN app. They reach the providers through
+  Coaxial, and Coaxial reaches them through the VPN.
+- **One provider connection per channel.** Every device watching or recording a channel shares it, in MPEG-TS or HLS,
+  whichever each device asks for.
+- **Drops are mended.** When a provider ends a stream someone is watching, Coaxial asks for it again and joins the new
+  one where the old one stopped, so players and recorders carry on.
+- **The fastest VPN server, kept up to date.** Pick a city and Coaxial tries the servers there and stays on the
+  fastest. In quiet hours it checks that server again and moves to a better one only if it has slowed down. It never
+  does this while anything is playing.
+- **The VPN client stays current.** A newer gluetun is downloaded, checked and installed by itself when nothing is
+  playing, and undone if the VPN does not connect with it.
+- **Your provider login stays private.** Players only ever see the login you chose for them.
+- **Set up in a web page.** No files to edit, and a status page that shows what is playing and where the VPN comes out.
+
 ## Read this first: there is no login
 
 Coaxial has no authentication at all. Anyone who can reach its web page can change every setting. Anyone who can reach
@@ -117,7 +133,11 @@ you chose.
 **Status** shows whether the VPN is up, where it comes out (city, country, IP address, network, ping), each provider,
 what is playing right now, and the Coaxial version. It also has the gluetun version with `Check for updates` and the
 chosen VPN server with `Find the fastest server`. An open Status view loads itself again when the Coaxial version
-changes, unless settings are unsaved. **Settings** has:
+changes, unless settings are unsaved. When the VPN does not come up, Status says why: a `settings.json` that could
+not be read, VPN settings Coaxial refused, or a VPN client that stopped before it connected.
+
+On the first start, Settings opens on a setup panel. If a `settings.json` is there but cannot be read, the panel says
+so, and warns that finishing setup replaces the file. **Settings** has:
 
 - **Providers.** Add them, remove them, and reorder them with the up and down arrows. A new port is tried before
   saving: Coaxial listens on it for 8 seconds and the page tries to reach it from your browser. If that fails, the page
@@ -163,7 +183,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | Setting | What it is |
 | --- | --- |
 | `player` | The login you type into every player. Letters, digits, `-` and `_` only. The username cannot be `live`, `movie`, `series` or `timeshift`. |
-| `providers` | One entry per provider: a name, its address (`http://name` or `https://name`, optionally `:port`, with nothing after it), the login it gave you, the port your players use for it, and `live_tv`. Ports 53, 8000 and 9999 and the web page's port cannot be used. |
+| `providers` | One entry per provider: a name, its address (`http://name` or `https://name`, optionally `:port`, with nothing after it), the login it gave you, the port your players use for it, and `live_tv`. A name is up to 40 letters, digits, spaces, `-`, `.` or `_`, starts with a letter or digit, and is not used by another provider. The provider's username and password cannot contain `/` or a line break. Ports 53, 8000 and 9999 and the web page's port cannot be used. |
 | `live_tv` | `ts` if your players watch live TV as MPEG-TS, `hls` if they use HLS. |
 | `ui.port` | The port of the web page and of the health check. If left out, `UI_PORT` from `.env` (8195 if that is not set either). If you change it, change `UI_PORT` in `.env` to match. |
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
@@ -175,6 +195,10 @@ gluetun keeps its server lists in `gluetun/servers` in the mounted folder, so th
 
 ## Choosing the VPN server
 
+VPN servers in one city can differ a lot in speed, and a fast one can slow down when it gets busy. gluetun picks one
+of the matching servers at random. Coaxial measures them instead, keeps you on the fastest, and keeps an eye on it,
+all without cutting off anything that plays.
+
 If you name a server in the settings, Coaxial uses that one and leaves it alone. If you pick a city and leave both
 server boxes empty, Coaxial chooses the server for you. It does not do this for the `custom` service.
 
@@ -185,7 +209,9 @@ server boxes empty, Coaxial chooses the server for you. It does not do this for 
   left out unless the matching `..._ONLY` setting is on. With fewer than two servers to choose from, nothing is tried.
 - **Trying a server means connecting to it.** The VPN reconnects once for each one, and a test file is downloaded from
   `speed.cloudflare.com` through the VPN for up to 1.5 seconds. Coaxial stays on the fastest. Only speed counts: the
-  share of packets out of order is logged but not counted. Each takes a few seconds, so 8 take about a minute.
+  share of packets out of order is logged but not counted. Each takes a few seconds, so 8 take about a minute. Each
+  server is measured the moment its tunnel passes traffic. One that passes nothing within 8 seconds, or cannot be
+  measured within 14, is passed over.
 - **The choice and its speed are saved** in `gluetun/pick.json` in the mounted folder. When the container starts, it
   goes straight to that server. Nothing is tried at start, so you can watch right away.
 - **In quiet times it checks, it does not shop around.** Once nothing has played or recorded for 10 minutes, Coaxial
@@ -193,7 +219,12 @@ server boxes empty, Coaxial chooses the server for you. It does not do this for 
   other servers are tried only if no server is chosen yet for your settings, or the one in use is under 50 Mbit/s or
   under a fifth of the speed it was chosen at, or it cannot be measured twice in a row. A server that is fast but no
   longer the fastest is kept, because trying the others takes the VPN down for about a minute and a recording that
-  starts then could fail. If someone starts playing during a run, it stops and is done again in the next quiet time.
+  starts then could fail. Measuring the server in use does not reconnect, so nobody notices it. If someone starts
+  playing during a run, it stops on the server it was trying at that moment, and the run is done again in the next
+  quiet time.
+- **What counts as playing.** A live channel open on any device, a device that asked for an HLS playlist in the last
+  30 seconds, and a movie, episode or catch-up until a minute after its last part was sent. The same rule decides when
+  a VPN client update may install (below).
 - **`Find the fastest server`** on the Status view runs it now, and goes on even if someone starts playing. It asks
   first, because anything playing or recording stops for a minute or two.
 - If the chosen server stops connecting for 2 minutes, Coaxial drops its choice and lets gluetun pick.
@@ -203,10 +234,12 @@ server boxes empty, Coaxial chooses the server for you. It does not do this for 
 gluetun is published only as a container image, and its program is one file in that image. So that a new gluetun does
 not need a new Coaxial image, Coaxial fetches that file itself.
 
-- **At every start of the container**, before the VPN is started, Coaxial asks gluetun's image what `latest` is now:
-  at `ghcr.io/qdm12/gluetun` first, and at `qmcgaw/gluetun` on Docker Hub if that fails. If it does not have that build
-  yet, it downloads the layer that holds the program for this machine's processor. The VPN is not up yet, so this
-  request does not go through it.
+- **At every start of the container**, before the VPN is started, Coaxial asks gluetun's image what the tag in
+  `vpn.gluetun_version` (`latest` unless you set another) is now: at `ghcr.io/qdm12/gluetun` first, and at
+  `qmcgaw/gluetun` on Docker Hub if that fails. If it does not have that build yet, it downloads the layer that holds
+  the program for this machine's processor. The VPN is not up yet, so this request does not go through it. When the
+  VPN is started again for a settings change or another server, the registry is asked again only if the last answer
+  is over 6 hours old (10 minutes after a failed one), and then before the VPN is stopped, through the VPN.
 - **The download is checked** against the registry's own SHA-256 checksums, over HTTPS: each manifest against its
   digest, and the layer against the digest and size in the manifest. The file must be a program for this processor and
   must answer a harmless command before it is used. No signature is checked. This is the same trust you place in
@@ -219,9 +252,12 @@ not need a new Coaxial image, Coaxial fetches that file itself.
 - **A newer build installs by itself, but only when nothing is playing.** Once no one has watched or recorded anything
   for 10 minutes, Coaxial restarts the VPN with the new build.
 - **If the VPN does not connect** within 2 minutes on the new build, Coaxial goes back to the build before it and skips
-  the new one (`gluetun/bin/skip.json`), also after a restart, until another is out or you click `Update now`.
+  the new one (`gluetun/bin/skip.json`), also after a restart, until another is out or you click `Update now`. The
+  same goes for a new build taken when the container starts: if the VPN has never connected with it and stays down for
+  2 minutes, Coaxial goes back to the build it last connected with.
 - **`Update now`** appears when a newer build is out. It asks you first, because the VPN reconnects and anything
-  playing stops. A newer build is also taken whenever the container starts again.
+  playing stops. If the newer build cannot be downloaded, nothing is changed and the VPN stays connected. A newer
+  build is also taken whenever the container starts again.
 - **To stay on one version**, set `vpn.gluetun_version` to a tag such as `v3.41.3`, or to `builtin`. Coaxial then
   looks only at that tag, and with `builtin` it fetches nothing.
 
@@ -236,14 +272,40 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
   a decoder can begin, and is then brought up to live. From then on it is sent video as it arrives. On an `hls`
   provider, the provider is asked for a channel once and every player's playlist comes from that one session.
 - **Mixed formats.** On a `ts` provider, a player that asks for a live channel as HLS is given HLS cut from the same
-  shared MPEG-TS stream. On an `hls` provider, a reader that asks for MPEG-TS is fed from the players' one HLS session.
+  shared MPEG-TS stream, in pieces of about 4 seconds that each start at a keyframe. That HLS leaves the channel 30
+  seconds after its players stop asking for it. On an `hls` provider, a reader that asks for MPEG-TS is fed from the
+  players' one HLS session, at playing speed, with everything waiting sent just before each whole minute so a
+  recording that stops on the minute loses nothing.
+- **When a provider drops a channel.** If a stream that ran at least 30 seconds ends while someone is watching,
+  Coaxial asks for it again at once. When the provider sends the same video again, the new stream is joined exactly
+  where the old one stopped, with nothing lost or repeated. Otherwise it is joined at its first keyframe past the last
+  picture sent, and the part the provider repeated is left out, so the picture does not jump back. A new stream that
+  numbers its streams differently (another of the provider's servers) is handed on under the numbers the players
+  started with, so players and recorders carry on instead of stopping. Coaxial does not ask again if another channel
+  of the same provider was opened in the last 15 seconds (on a one-connection account that would end it), or once
+  the channel has gone silent twice in a row.
+- **Changing channel.** A channel nobody is on any more is let go before the next one is asked for, and the provider
+  gets a tenth of a second to see it, so one-connection accounts can change channel. A channel in its first seconds is
+  kept for 0.4 seconds after its last reader leaves, because players often hang up and ask again while tuning.
+- **Slow devices.** A device that falls more than 16 MB behind for 15 seconds, or 64 MB at any moment, is cut off, so
+  it cannot hold memory without end. Up to 100 live streams are sent at once, all channels together.
 - **Redirects stay inside the VPN.** When a provider sends a player to another server, Coaxial rewrites the address so
-  the player comes back to Coaxial for it. Addresses in playlists, and logos and posters in the provider's lists, are
-  pointed back the same way. Coaxial refuses such an address if it leads to this machine or a home network.
-- **Movies, series, catch-up and the guide** are passed on as they come, seeking included.
+  the player comes back to Coaxial for it. Addresses in playlists, logos and posters in the provider's lists, and the
+  pictures in the guide are pointed back the same way. Coaxial refuses such an address if it leads to this machine or
+  a home network.
+- **Your provider login stays private.** Players log in with the player login, and Coaxial puts the provider's login
+  in its place on the way out. On the way back, the provider's login is replaced with the player login wherever it
+  appears: in playlists, redirects, error pages and the account details apps ask for. The account details also name
+  Coaxial's address as the server, so apps build their stream addresses through Coaxial.
+- **Movies, series, catch-up and the guide** are passed on as they come, seeking included. Older apps that log in
+  through `panel_api.php` work too. Certificates are not checked, as most players do not check them either.
 - **Xtream logins only.** A provider's ready-made M3U link (`get.php`) is refused: its addresses skip the VPN.
 - **If the VPN fails.** If the VPN program stops before it has connected, the web page stays up and the VPN is started
   again after 30 seconds. If it stops after it had connected, Coaxial exits so that Docker restarts the container.
+- **Kept apart.** The part that talks to your providers runs as an unprivileged user and is never given the VPN
+  settings. Saving provider settings restarts only that part, so the VPN stays connected.
+- **Health check.** Docker shows the container as healthy when it is set up, the VPN is up and the provider part
+  answers.
 - **Status page.** `http://<this machine>:<any provider's port>/status` is a plain page with the VPN's exit address,
   each provider's account status and what is playing. The exit address is asked of `ipinfo.io` through the VPN.
 - **The log.** Normal pauses in a provider's sending are not logged. A silence of 20 seconds or more is.
