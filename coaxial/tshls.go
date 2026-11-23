@@ -217,15 +217,22 @@ func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh 
 		}
 		mu.Unlock()
 		want := what{"ch", id}
-		h, why := f.admit(ctx, who, want, false, key, nil)
-		if h == nil {
-			unOpen(provider, key, was)
-			if why == "" {
-				return nil, &refused{status: 504} // (the player hung up while it waited)
+		// Only when a rule can apply now: otherwise the channel is opened at once, with nothing in between.
+		var h *hold
+		mu.Lock()
+		gate := f.needsRules(want)
+		mu.Unlock()
+		if gate {
+			var why string
+			if h, why = f.admit(ctx, who, want, false, key, nil); h == nil {
+				unOpen(provider, key, was)
+				if why == "" {
+					return nil, &refused{status: 504} // (the player hung up while it waited)
+				}
+				return nil, f.refusal(who, want, why)
 			}
-			return nil, f.refusal(who, want, why)
+			defer h.release()
 		}
-		defer h.release()
 		mu.Lock()
 		wait := lastDrop[provider] + dropGap - mono()
 		mu.Unlock()

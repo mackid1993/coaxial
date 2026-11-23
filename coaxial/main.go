@@ -473,14 +473,16 @@ func samePacket(a, b []byte) bool {
 	return len(a) == 188 && len(b) == 188 && a[0] == b[0] && a[1]&0xe0 == b[1]&0xe0 && a[3]&0xf0 == b[3]&0xf0 && bytes.Equal(a[4:], b[4:])
 }
 
-// whole: b's whole MPEG-TS packets, each passed on once the next one is seen to begin after it, and the rest
-// (kept for the next data). Bytes that begin no packet (a provider's padding before it hung up, a broken
-// piece) are left out: they reached no decoder, and counted in past, resumeAt carried on that many bytes too
-// far into the stream asked for again. What is kept when a stream ends is sent again by the next one.
+// whole: b's whole MPEG-TS packets, passed on at once, and the rest: the start of a packet not yet whole (kept
+// for the next data). A packet that ends where b ends goes now, not when the next data arrives: providers send
+// in lumps seconds apart, and holding a lump's last packet back until the next lump delayed the end of every
+// lump by that long. Bytes that begin no packet (a provider's padding before it hung up, a broken piece) are
+// left out: they reached no decoder, and counted in past, resumeAt carried on that many bytes too far into the
+// stream asked for again. What is kept when a stream ends is sent again by the next one.
 func whole(b []byte) (pkts, rest []byte) {
 	out, i := b[:0], 0
-	for i+376 <= len(b) {
-		if b[i] == 0x47 && b[i+188] == 0x47 {
+	for i+188 <= len(b) {
+		if b[i] == 0x47 && (i+188 == len(b) || b[i+188] == 0x47) {
 			out, i = append(out, b[i:i+188]...), i+188
 			continue
 		}
@@ -1195,15 +1197,22 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 		if path == "/hls" {
 			opens = provider + " /live/" + rt.f.encU + "/" + rt.f.encP + "/" + want.item + ".m3u8"
 		}
-		h, why := rt.f.admit(r.Context(), rt.client, want, false, opens, nil)
-		if h == nil {
-			unOpen(provider, key, was)
-			if why != "" {
-				failed(w, rt.f.refusal(rt.client, want, why))
+		// Only when a rule can apply now: otherwise the channel is opened at once, with nothing in between.
+		var h *hold
+		mu.Lock()
+		gate := rt.f.needsRules(want)
+		mu.Unlock()
+		if gate {
+			var why string
+			if h, why = rt.f.admit(r.Context(), rt.client, want, false, opens, nil); h == nil {
+				unOpen(provider, key, was)
+				if why != "" {
+					failed(w, rt.f.refusal(rt.client, want, why))
+				}
+				return
 			}
-			return
+			defer h.release()
 		}
-		defer h.release()
 		mu.Lock()
 		wait := lastDrop[provider] + dropGap - mono()
 		mu.Unlock()
