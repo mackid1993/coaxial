@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -14,6 +15,7 @@ import (
 // is asked; catch-up of any other channel is passed on as before.
 func TestCatchUpOfAChannelOpenLiveIsRefused(t *testing.T) {
 	f := testFront()
+	f.refuseCatchUp = true
 	key := channelKey("/ts", f.base, "/live/real%20user/p%40ss%261/12.ts")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -56,6 +58,24 @@ func TestCatchUpOfAChannelOpenLiveIsRefused(t *testing.T) {
 		f.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
 		if rec.Code != 503 || !strings.Contains(rec.Body.String(), "open live") {
 			t.Errorf("%s: answered %d %q, want 503 saying the channel is open live", p, rec.Code, rec.Body.String())
+		}
+	}
+
+	// With the setting left at "allow", the same catch-up is passed on to the provider, not refused.
+	f.refuseCatchUp = false
+	rec := httptest.NewRecorder()
+	f.ServeHTTP(rec, httptest.NewRequest("GET", "/timeshift/tv/easy/60/2026-01-01:10-00/12.ts", nil))
+	if strings.Contains(rec.Body.String(), "open live") {
+		t.Errorf("allow: catch-up of a channel open live was refused (%d %q)", rec.Code, rec.Body.String())
+	}
+	for _, c := range []struct{ v, want string }{{"", ""}, {"allow", ""}, {"refuse", ""}, {"Refuse", "catch_up_while_live"}, {"no", "catch_up_while_live"}} {
+		p := provider{Name: "One", URL: "http://one.example", User: "u", Password: "p", Port: "8095", LiveTV: "ts", CatchUpLive: c.v}
+		if got := newFront(p, player{User: "tv", Password: "easy"}).refuseCatchUp; got != (c.v == "refuse") {
+			t.Errorf("catch_up_while_live %q: refuse %v", c.v, got)
+		}
+		s := &settings{Player: player{User: "tv", Password: "easy"}, Providers: []provider{p}}
+		if msg := fmt.Sprint(s.validate()); (c.want == "") == strings.Contains(msg, "catch_up_while_live") {
+			t.Errorf("catch_up_while_live %q: check said %q", c.v, msg)
 		}
 	}
 

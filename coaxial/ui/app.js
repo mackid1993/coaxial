@@ -416,7 +416,8 @@
       providers: (d.providers || []).map(function (q) {
         return {
           name: q.name || '', url: q.url || '', user: q.user || '', password: '', password_set: !!q.password_set,
-          port: q.port == null ? '' : String(q.port), live_tv: q.live_tv === 'hls' ? 'hls' : 'ts'
+          port: q.port == null ? '' : String(q.port), live_tv: q.live_tv === 'hls' ? 'hls' : 'ts',
+          catch_up_while_live: q.catch_up_while_live === 'refuse' ? 'refuse' : 'allow'
         };
       }),
       ui: { port: d.ui && d.ui.port != null ? String(d.ui.port) : '' },
@@ -762,7 +763,8 @@
         field({ label: 'Username', path: base + '.user', value: p.user, set: function (v) { p.user = v; } }),
         field({ label: 'Password', path: base + '.password', value: p.password, secret: true, isSet: p.password_set, set: function (v) { p.password = v; } }),
         field({ label: 'Local port', path: base + '.port', value: p.port, numeric: true, mono: true, placeholder: '8095', hint: 'Players reach this provider on this port. Docker must open it too: add it as a PORT_n line in the .env file next to your compose file (or as -p in docker run).', set: function (v) { p.port = v; } }),
-        segmented({ label: 'Live format', path: base + '.live_tv', value: p.live_tv, options: [['ts', 'MPEG-TS'], ['hls', 'HLS']], hint: 'How live channels are sent to players.', set: function (v) { p.live_tv = v; } })),
+        segmented({ label: 'Live format', path: base + '.live_tv', value: p.live_tv, options: [['ts', 'MPEG-TS'], ['hls', 'HLS']], hint: 'How live channels are sent to players.', set: function (v) { p.live_tv = v; } }),
+        segmented({ label: 'Catch-up of a channel playing live', path: base + '.catch_up_while_live', value: p.catch_up_while_live, options: [['allow', 'Allow'], ['refuse', 'Refuse']], hint: 'Catch-up is different video, so it needs its own connection to the provider. Some providers allow one connection per channel and end the live stream (a recording too) when catch-up of it opens. Choose Refuse for those: the live stream keeps playing and catch-up of that channel waits until nobody has it open live.', set: function (v) { p.catch_up_while_live = v; } })),
       h('p', { class: 'err' }));
   }
 
@@ -810,7 +812,7 @@
   function addProvider() {
     var ports = S.cur.providers.map(function (p) { return parseInt(p.port, 10) || 0; });
     var next = ports.length ? Math.max.apply(null, ports) + 1 : 8095;
-    S.cur.providers.push({ name: '', url: '', user: '', password: '', password_set: false, port: String(next), live_tv: 'ts' });
+    S.cur.providers.push({ name: '', url: '', user: '', password: '', password_set: false, port: String(next), live_tv: 'ts', catch_up_while_live: 'allow' });
     renderSettings();
     var cards = document.querySelectorAll('.pcard');
     var last = cards[cards.length - 1];

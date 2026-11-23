@@ -74,6 +74,9 @@ type provider struct {
 	Password string `json:"password"`
 	Port     port   `json:"port"`
 	LiveTV   string `json:"live_tv"`
+	// CatchUpLive: what to do with catch-up of a channel that is open live: "allow" (pass it on; also when left
+	// out) or "refuse" (for a provider that allows one connection per channel and ends the live stream for it)
+	CatchUpLive string `json:"catch_up_while_live,omitempty"`
 }
 
 type uiSettings struct {
@@ -318,6 +321,9 @@ func (s *settings) validate() []fieldError {
 		if p.LiveTV != "hls" && p.LiveTV != "ts" {
 			bad(at+"live_tv", `live_tv must be "hls" if your players use HLS, or "ts" if they use MPEG-TS`)
 		}
+		if p.CatchUpLive != "" && p.CatchUpLive != "allow" && p.CatchUpLive != "refuse" {
+			bad(at+"catch_up_while_live", `catch_up_while_live must be "allow" or "refuse"`)
+		}
 		for _, f := range [][2]string{{"user", p.User}, {"password", p.Password}} {
 			if hasControl.MatchString(f[1]) {
 				bad(at+f[0], "its username or password is broken over two lines")
@@ -423,7 +429,7 @@ func (s *settings) masked() map[string]any {
 	provs := []any{}
 	for _, p := range s.Providers {
 		provs = append(provs, map[string]any{"name": p.Name, "url": p.URL, "user": p.User, "password": "", "password_set": p.Password != "",
-			"port": p.Port, "live_tv": p.LiveTV})
+			"port": p.Port, "live_tv": p.LiveTV, "catch_up_while_live": or(p.CatchUpLive, "allow")})
 	}
 	hours, _ := s.updateHours()
 	tag, _ := s.gluetunVersion()
@@ -598,3 +604,11 @@ const sampleSettings = `{
   }
 }
 `
+
+// or: a, or b when a is empty.
+func or(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a
+}

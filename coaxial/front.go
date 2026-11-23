@@ -35,6 +35,7 @@ type front struct {
 	// (loginAny: the login deeper in an address, as a provider's own playlist may write it: /hls/<login>/<piece>)
 	loginPath, loginShort, loginAny, chLogin, liveTS *regexp.Regexp
 	catchUp                                          *regexp.Regexp // catch-up of a live channel: its number
+	refuseCatchUp                                    bool           // catch-up of a channel open live is refused
 }
 
 // route: what the front door worked out about one request, for the relay. Nothing in it comes from a header.
@@ -78,7 +79,7 @@ func newFront(p provider, pl player) *front {
 	base := strings.TrimRight(p.URL, "/")
 	scheme, hostport, _ := strings.Cut(base, "://")
 	pu, pp := regexp.QuoteMeta(pl.User), regexp.QuoteMeta(pl.Password)
-	return &front{name: p.Name, port: p.Port.String(), mode: p.LiveTV, base: base, scheme: strings.ToLower(scheme), hostport: hostport,
+	return &front{name: p.Name, port: p.Port.String(), mode: p.LiveTV, refuseCatchUp: p.CatchUpLive == "refuse", base: base, scheme: strings.ToLower(scheme), hostport: hostport,
 		user: p.User, pass: p.Password, encU: encLogin(p.User), encP: encLogin(p.Password), pu: pl.User, pp: pl.Password,
 		loginPath:  regexp.MustCompile(`^/+(live|movie|series|timeshift)/+` + pu + `/+` + pp + `/+(.*)$`),
 		loginShort: regexp.MustCompile(`^/+` + pu + `/+` + pp + `/+([^/]+)$`),
@@ -109,7 +110,7 @@ func (f *front) catchUpOf(u *url.URL) string {
 // liveOpen: whether channel id of this provider is open live here now (an MPEG-TS channel, HLS built from it, or
 // a live HLS session asked for in the last 30 s). Some providers allow one connection per channel on an account,
 // and count catch-up of a channel as that channel: a catch-up opened ends the live stream, and the live stream
-// asked for again ends the catch-up. (mu held)
+// asked for again ends the catch-up. Others allow both. Used only with catch_up_while_live "refuse". (mu held)
 func (f *front) liveOpen(id string) bool {
 	for _, c := range channels {
 		if c.provider == f.base && !c.done && c.key[strings.LastIndexByte(c.key, '/')+1:] == id {
@@ -385,7 +386,7 @@ func (f *front) serve(c *counted, r *http.Request) {
 		c.WriteHeader(200)
 		return
 	}
-	if id := f.catchUpOf(r.URL); id != "" {
+	if id := f.catchUpOf(r.URL); id != "" && f.refuseCatchUp {
 		mu.Lock()
 		open := f.liveOpen(id)
 		said := catchUpSaid[f.base+" "+whoIs(r)+" "+id]
