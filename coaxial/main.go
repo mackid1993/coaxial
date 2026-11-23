@@ -898,15 +898,8 @@ func (ch *channel) drop() { // let go of the provider's stream now (mu held)
 // tsSource: the provider's own MPEG-TS stream, asked for again if it ends while people watch.
 func tsSource(target string, h http.Header) source {
 	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
-		again, quiet := false, 0
-		clockPID, clock, past := -1, -1.0, 0 // the newest stream clock passed on, bytes passed since its packet began (see resumeAt)
-		// the numbers readers were handed first, and this stream's put back to them when it numbers its
-		// streams afresh (see renumber.go)
-		var pub numbering
-		var rn *renumber
-		var last []byte  // the last packet of video or sound passed on (see resumeAt)
-		var video []byte // and of video, on its PID in this stream's numbers
-		vpid := -1
+		again, sent, quiet := false, int64(0), 0
+		clockPID, clock := -1, -1.0 // the newest stream clock passed on (see spliceAt)
 		for {
 			began, got := mono(), false
 			wait := float64(headerWait)
@@ -929,11 +922,7 @@ func tsSource(target string, h http.Header) source {
 					setWait(r, 2*reopenWait)
 				}
 				var head []byte // a stream opened again is joined on at a whole packet
-				var part []byte // the start of a packet not yet whole
 				joining := again
-				if rn != nil {
-					rn.part = nil
-				}
 				buf := make([]byte, 65536)
 				for {
 					n, err := r.Body.Read(buf)
@@ -944,78 +933,34 @@ func tsSource(target string, h http.Header) source {
 						if err == nil && len(head) < 16384 {
 							continue
 						}
-						at, ok := resumeAt(head, clock, past, last, video)
-						if ok && at > len(head) && err == nil && len(head) < 48<<20 {
-							continue // (where the old stream stopped has not come yet)
-						}
-						if !ok || at > len(head) {
-							at, ok = spliceAt(head, clockPID, clock)
-						}
+						at, ok := spliceAt(head, clockPID, clock)
 						if !ok && err == nil && len(head) < 48<<20 {
-							continue
-						}
-						if _, v, _, found := lastPCR(head[len(head)-min(len(head), 4<<20):], -1); !ok && err == nil && found && v <= clock && clock-v < 60 {
-							// 48 MB in and still before where the old stream stopped (a provider resending
-							// from far back at a high rate): joined at its start, the readers were sent all of
-							// it again and its clock ran backwards (30 s back at 20 Mbit/s). The oldest of it
-							// is let go instead and the wait goes on.
-							head = append([]byte(nil), head[len(head)-16<<20:]...)
 							continue
 						}
 						if !ok {
 							at = cleanStart(head)
-						}
-						if programDue(head, at, pub) && err == nil && len(head) < 48<<20 {
-							continue // (numbered afresh, and its program table has not come yet)
-						}
-						if ok && clock >= 0 && at > 0 {
+						} else if clock >= 0 && at > 0 {
 							say("a channel asked for again repeated %d KB of video; it was left out", at>>10)
 						}
-						if p, ok := programOf(head); ok { // (the numbers this stream gives from its start)
-							if vpid = p.video(); pub.es != nil {
-								rn = renumbering(p, pub)
+						data, head, joining = head[at:], nil, false
+						if len(data) > 0 && sent%188 != 0 { // the old stream stopped mid-packet: fill it out
+							fill := make([]byte, 188-sent%188)
+							for i := range fill {
+								fill[i] = 0xff
+							}
+							sent += int64(len(fill))
+							if !yield(fill) {
+								return errStop
 							}
 						}
-						data, head, joining = head[at:], nil, false
-						// its clock is taken afresh from it: it may be on another PID now
-						clockPID = -1
 					}
-					// Handed on in whole packets. A provider hangs up anywhere, most often inside a packet: its
-					// start had gone to the readers, filled out with 0xff, and the stream asked for again carried on
-					// at the next one, so one packet of video was broken (a frame or more lost or broken at every
-					// such drop). Kept back, it is not passed on, and the stream asked for again sends it whole.
-					data, part = whole(append(part, data...))
 					if len(data) > 0 {
-						if p, v, at, ok := lastPCR(data, clockPID); ok {
-							clockPID, clock, past = p, v, len(data)-at
-						} else {
-							past += len(data)
+						if p, v, _, ok := lastPCR(data, clockPID); ok {
+							clockPID, clock = p, v
 						}
 						got = true
-						pmt := pub.pmt
-						if rn != nil {
-							pmt = rn.pmt
-						}
-						for i := len(data) - 188; i >= 0; i -= 188 {
-							if pid := int(data[i+1]&0x1f)<<8 | int(data[i+2]); pid >= 0x20 && pid != 0x1fff && pid != pmt {
-								last = append(last[:0], data[i:i+188]...)
-								break
-							}
-						}
-						for i := len(data) - 188; i >= 0 && vpid >= 0; i -= 188 {
-							if int(data[i+1]&0x1f)<<8|int(data[i+2]) == vpid {
-								video = append(video[:0], data[i:i+188]...)
-								break
-							}
-						}
-						if rn != nil {
-							data = rn.apply(data)
-						}
-						if pub.es == nil {
-							pub, _ = programOf(data)
-							vpid = pub.video()
-						}
-						if len(data) > 0 && !yield(data) {
+						sent += int64(len(data))
+						if !yield(data) {
 							return errStop
 						}
 					}
