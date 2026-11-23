@@ -101,6 +101,8 @@ type launcher struct {
 	updFailed        string // the newer program an update could not fetch: not tried again by itself
 	pick             picked // the VPN server chosen by trying them (pick.go), when, and the one being tried now
 	pickAt           time.Time
+	checkMbps        float64   // the server in use, as last measured by the quiet-hour check (pick.go)
+	checkAt          time.Time // when (zero: not measured since this start)
 	pickTry          string
 	pickLoaded       bool
 	pickBusy         bool

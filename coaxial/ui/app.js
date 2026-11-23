@@ -175,7 +175,7 @@
       setText($('#vpn-pick-text'), sv.testing ? 'Trying up to ' + most + ' servers in your city. This takes about a minute.'
         : sv.why_not === 'named' ? 'You named a server in Settings, so Coaxial uses that one and does not look for a faster one.'
         : sv.why_not === 'city' ? 'Pick a city in Settings and Coaxial will find the fastest server there for you. It does not do this for a whole country or region: there are too many servers.'
-        : sv.name ? 'Server ' + sv.name + (sv.of > 1 ? ': the fastest of ' + sv.of + ' tried' : '') + (sv.mbps ? ', ' + Math.round(sv.mbps) + ' Mbit/s' : '') + (sv.at ? ', checked ' + when(sv.at) : '') + '. Up to ' + most + ' servers in your city are tried per run.'
+        : sv.name ? 'Server ' + sv.name + (sv.of > 1 ? ': the fastest of ' + sv.of + ' tried' : '') + (sv.mbps ? ', ' + Math.round(sv.mbps) + ' Mbit/s' : '') + (sv.at ? ', chosen ' + when(sv.at) : '') + (sv.checked_at ? '. Last speed check: ' + Math.round(sv.checked_mbps) + ' Mbit/s, ' + when(sv.checked_at) : '') + '. Up to ' + most + ' servers in your city are tried per run.'
         : 'Coaxial picks the server: it tries up to ' + most + ' in your city and stays on the fastest. In quiet hours it checks that server and looks for a better one only if it has become slow. The button does it now.');
       pickBtn.hidden = !sv.possible; pickBtn.disabled = !!sv.testing; pickBtn.classList.toggle('busy', !!sv.testing);
     }

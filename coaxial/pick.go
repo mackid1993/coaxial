@@ -498,6 +498,9 @@ func (l *launcher) pickDue() {
 	}
 	l.mu.Lock()
 	l.pickAt = time.Now()
+	if err == nil {
+		l.checkMbps, l.checkAt = mbps, l.pickAt
+	}
 	l.mu.Unlock()
 	switch {
 	case someonePlaying(): // someone started in the meantime: nothing is done
@@ -528,8 +531,12 @@ func (l *launcher) pickStatus() map[string]any {
 	default:
 		why = "city" // no city is picked
 	}
-	return map[string]any{"name": l.pick.Name, "mbps": l.pick.Mbps, "out_of_order": l.pick.OFO, "of": l.pick.Of, "at": l.pick.At,
+	st := map[string]any{"name": l.pick.Name, "mbps": l.pick.Mbps, "out_of_order": l.pick.OFO, "of": l.pick.Of, "at": l.pick.At,
 		"testing": l.pickBusy, "possible": possible, "why_not": why, "most": pickMost, "locked": l.set.addressLocked()}
+	if !l.checkAt.IsZero() { // the last quiet-hour measurement of the server in use
+		st["checked_mbps"], st["checked_at"] = l.checkMbps, l.checkAt.UTC().Format(time.RFC3339)
+	}
+	return st
 }
 
 // apiPick: "find the fastest server now", asked for from the page. It answers at once; the trying goes on
