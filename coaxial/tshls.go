@@ -88,7 +88,7 @@ func hlsFromTS(w http.ResponseWriter, r *http.Request, who, provider, uri, opath
 			answer(w, 404, "", "")
 			return true, nil
 		}
-	} else if s, err := segmenterFor(r.Context(), key, provider, tsURI, who, port, id, r.Header); err != nil {
+	} else if s, err := segmenterFor(r.Context(), f, key, tsURI, who, id, r.Header); err != nil {
 		return true, err
 	} else {
 		sg = s
@@ -190,8 +190,9 @@ wait:
 }
 
 // segmenterFor finds the channel's HLS builder, or joins the channel's shared MPEG-TS stream (opening it at
-// the provider if nobody is on it) and starts one.
-func segmenterFor(ctx context.Context, key, provider, tsURI, who, port, id string, rh http.Header) (*segmenter, error) {
+// the provider if nobody is on it, by the rules the provider has on: see advanced.go) and starts one.
+func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh http.Header) (*segmenter, error) {
+	provider, port := f.base, f.port
 	mu.Lock()
 	if sg := segmenters[key]; sg != nil && !sg.over {
 		if sg.players[who] == 0 { // a device new to this builder has left any builder of its own
@@ -206,6 +207,7 @@ func segmenterFor(ctx context.Context, key, provider, tsURI, who, port, id strin
 		releaseFor(provider, who, key)
 	}
 	if first {
+		was := lastOpen[provider]
 		lastOpen[provider] = opened{mono(), key}
 		releaseFor(provider, who, key)
 		for _, c := range channels { // channels of this provider that nobody reads go first (changing channel)
@@ -213,10 +215,24 @@ func segmenterFor(ctx context.Context, key, provider, tsURI, who, port, id strin
 				c.dropIfEmpty()
 			}
 		}
+		mu.Unlock()
+		want := what{"ch", id}
+		h, why := f.admit(ctx, who, want, false, key, nil)
+		if h == nil {
+			unOpen(provider, key, was)
+			if why == "" {
+				return nil, &refused{status: 504} // (the player hung up while it waited)
+			}
+			return nil, f.refusal(who, want, why)
+		}
+		defer h.release()
+		mu.Lock()
 		wait := lastDrop[provider] + dropGap - mono()
 		mu.Unlock()
 		time.Sleep(secs(math.Max(0, wait)))
 		mu.Lock()
+		// (from here on it is counted as the channel, or it joined one)
+		delete(holds, h)
 		if sg := segmenters[key]; sg != nil && !sg.over { // another request got here first
 			mu.Unlock()
 			return sg, nil
@@ -230,7 +246,8 @@ func segmenterFor(ctx context.Context, key, provider, tsURI, who, port, id strin
 					}
 				}
 			}
-			ch = newChannel(key, tsSource(provider+tsURI, sent), provider)
+			ch = newChannel(key, tsSource(provider+tsURI, f.agent(sent)), provider)
+			ch.owner = f
 			channels[key] = ch
 		} else {
 			first = false

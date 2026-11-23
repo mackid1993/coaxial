@@ -18,7 +18,10 @@
   var settings = {
     player: { user: 'david' },
     providers: [
-      { name: 'Provider One', url: 'https://example.com', user: 'abc', port: 8095, live_tv: 'ts' },
+      { name: 'Provider One', url: 'https://example.com', user: 'abc', port: 8095, live_tv: 'ts',
+        advanced: { stay_under_limit: true, connections: null, one_per_channel: true, one_per_item: false, locked_to_address: false,
+          address_wait_seconds: 90, send_app_name: true, app_name: 'IPTVSmartersPro', share_lists: false, share_minutes: 10,
+          limit_movie_speed: false, movie_mbps: 20 } },
       { name: 'Provider Two', url: 'https://example.net', user: 'def', port: 8096, live_tv: 'hls' }
     ],
     ui: { port: 8195 },
@@ -97,7 +100,7 @@
     secrets.providers = list.map(function (p, i) { return p.password || secrets.providers[i] || ''; });
     settings = {
       player: { user: player.user },
-      providers: list.map(function (p) { return { name: p.name, url: p.url, user: p.user, port: p.port, live_tv: p.live_tv }; }),
+      providers: list.map(function (p) { return { name: p.name, url: p.url, user: p.user, port: p.port, live_tv: p.live_tv, advanced: p.advanced }; }),
       ui: { port: body.ui.port },
       vpn: {
         service_provider: vpn.service_provider, type: vpn.type, wireguard_addresses: vpn.wireguard_addresses,

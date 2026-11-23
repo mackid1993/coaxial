@@ -27,6 +27,19 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 	case "/status":
 		data, _ := json.Marshal(statusData())
 		answer(w, 200, "application/json", string(data))
+	case "/vpn-changed": // the launcher saw the VPN come back up: the address may be new (see locked_to_address)
+		mu.Lock()
+		vpnChanged = mono()
+		lastIP = "" // (the next look-up starts from the new address: one change starts one wait)
+		locked := false
+		for _, f := range fronts {
+			locked = locked || f.locked
+		}
+		mu.Unlock()
+		if locked {
+			say("the VPN reconnected; providers that lock an account to one address get new streams after a short wait")
+		}
+		answer(w, 200, "", "ok\n")
 	case "/playing": // what plays, and nothing else (see playingNow)
 		data, _ := json.Marshal(map[string]any{"playing": playingNow()})
 		answer(w, 200, "application/json", string(data))

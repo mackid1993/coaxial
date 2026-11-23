@@ -206,7 +206,9 @@
     if (typeof poll === "function") poll(); else if (st.data) paintProgram(st.data.vpn || {});
   }
   async function pickNow() {
-    if (!window.confirm('Find the fastest server now? Up to 8 servers in your city are tried, and the VPN reconnects once for each. Anything playing or recording stops for a minute or two.')) return;
+    var locked = !!(st.data && st.data.vpn && st.data.vpn.server && st.data.vpn.server.locked);
+    if (!window.confirm('Find the fastest server now? Up to 8 servers in your city are tried, and the VPN reconnects once for each. Anything playing or recording stops for a minute or two.' +
+      (locked ? ' A provider here is locked to one address, so it may refuse new streams for a while after the switch.' : ''))) return;
     try {
       var r = await api('POST', '/api/vpn/server/pick');
       var d = r.data || {};
@@ -417,7 +419,7 @@
         return {
           name: q.name || '', url: q.url || '', user: q.user || '', password: '', password_set: !!q.password_set,
           port: q.port == null ? '' : String(q.port), live_tv: q.live_tv === 'hls' ? 'hls' : 'ts',
-          catch_up_while_live: q.catch_up_while_live === 'refuse' ? 'refuse' : 'allow'
+          advanced: advOf(q.advanced)
         };
       }),
       ui: { port: d.ui && d.ui.port != null ? String(d.ui.port) : '' },
@@ -434,10 +436,35 @@
     };
   }
   function portOut(s) { s = String(s).trim(); return /^\d+$/.test(s) ? parseInt(s, 10) : s; }
+  // A provider's advanced options as the page keeps them: numbers as typed text. Old settings without them get
+  // the defaults. Each number: [lowest, highest, default, the option it belongs to].
+  var ADV_NUM = {
+    connections: [0, 999, '', 'stay_under_limit'], address_wait_seconds: [10, 600, '90', 'locked_to_address'],
+    share_minutes: [1, 1440, '10', 'share_lists'], movie_mbps: [1, 10000, '100', 'limit_movie_speed']
+  };
+  function advOf(a) {
+    a = a || {};
+    function num(k) { var v = a[k]; return v == null || v === '' ? ADV_NUM[k][2] : String(v); }
+    return {
+      stay_under_limit: a.stay_under_limit !== false, connections: num('connections'),
+      one_per_channel: !!a.one_per_channel, one_per_item: !!a.one_per_item,
+      locked_to_address: !!a.locked_to_address, address_wait_seconds: num('address_wait_seconds'),
+      send_app_name: !!a.send_app_name, app_name: a.app_name == null ? '' : String(a.app_name),
+      share_lists: !!a.share_lists, share_minutes: num('share_minutes'),
+      limit_movie_speed: !!a.limit_movie_speed, movie_mbps: num('movie_mbps')
+    };
+  }
+  // What is saved: numbers as numbers ("" for blank). A value under an option that is off is sent as its default,
+  // so turning an option on, changing it and turning it off again leaves nothing to save.
+  function advOut(a) {
+    Object.keys(ADV_NUM).forEach(function (k) { a[k] = portOut(a[ADV_NUM[k][3]] ? a[k] : ADV_NUM[k][2]); });
+    a.app_name = a.send_app_name ? a.app_name.trim() : '';
+  }
   function payload(m) {
     var out = clone(m), extra = {};
     out.providers.forEach(function (p) {
       p.name = p.name.trim(); p.url = p.url.trim(); p.user = p.user.trim(); p.port = portOut(p.port);
+      advOut(p.advanced);
     });
     out.player.user = out.player.user.trim();
     out.ui.port = portOut(out.ui.port);
@@ -476,12 +503,14 @@
   function paintErrors() {
     Array.prototype.forEach.call(document.querySelectorAll('[data-path]'), function (box) {
       var msg = S.errors[box.dataset.path];
-      var input = box.querySelector(':scope > .control input, :scope > .seg input, :scope > input');
+      var input = box.querySelector(':scope > .control input, :scope > .control select, :scope > .seg input, :scope > input');
       var err = box.querySelector(':scope > .msg > .err, :scope > .err');
       box.classList.toggle('invalid', !!msg);
       if (err) err.textContent = msg || '';
       if (input) { if (msg) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid'); }
     });
+    // A problem inside a provider's advanced options opens them, so it can be seen.
+    Array.prototype.forEach.call(document.querySelectorAll('details.adv'), function (d) { if (d.querySelector('.invalid')) d.open = true; });
   }
   function setErrors(list) {
     S.errors = {}; S.general = [];
@@ -495,7 +524,7 @@
       else S.general.push((path ? path + ': ' : '') + (e.message || 'Not valid.'));
     });
     paintErrors(); refreshBar();
-    var first = $('.invalid input');
+    var first = Array.prototype.filter.call(document.querySelectorAll('.invalid input, .invalid select'), function (el) { return el.getClientRects().length > 0; })[0];
     if (first) first.focus();
   }
   function clearError(path) {
@@ -763,9 +792,167 @@
         field({ label: 'Username', path: base + '.user', value: p.user, set: function (v) { p.user = v; } }),
         field({ label: 'Password', path: base + '.password', value: p.password, secret: true, isSet: p.password_set, set: function (v) { p.password = v; } }),
         field({ label: 'Local port', path: base + '.port', value: p.port, numeric: true, mono: true, placeholder: '8095', hint: 'Players reach this provider on this port. Docker must open it too: add it as a PORT_n line in the .env file next to your compose file (or as -p in docker run).', set: function (v) { p.port = v; } }),
-        segmented({ label: 'Live format', path: base + '.live_tv', value: p.live_tv, options: [['ts', 'MPEG-TS'], ['hls', 'HLS']], hint: 'How live channels are sent to players.', set: function (v) { p.live_tv = v; } }),
-        segmented({ label: 'Catch-up of a channel playing live', path: base + '.catch_up_while_live', value: p.catch_up_while_live, options: [['allow', 'Allow'], ['refuse', 'Refuse']], hint: 'Catch-up is different video, so it needs its own connection to the provider. Some providers allow one connection per channel and end the live stream (a recording too) when catch-up of it opens. Choose Refuse for those: the live stream keeps playing and catch-up of that channel waits until nobody has it open live.', set: function (v) { p.catch_up_while_live = v; } })),
+        segmented({ label: 'Live format', path: base + '.live_tv', value: p.live_tv, options: [['ts', 'MPEG-TS'], ['hls', 'HLS']], hint: 'How live channels are sent to players.', set: function (v) { p.live_tv = v; } })),
+      advancedPanel(p, i),
       h('p', { class: 'err' }));
+  }
+
+  // ---------- a provider's advanced options ----------
+  // App names offered for "Send an app name": [label, the exact text sent].
+  var APPS = [
+    ['VLC', 'VLC/3.0.20 LibVLC/3.0.20'],
+    ['IPTV Smarters Player', 'IPTVSmartersPlayer'],
+    ['IPTV Smarters Pro', 'IPTVSmartersPro'],
+    ['XCIPTV', 'XCIPTV'],
+    ['TiviMate', 'TiviMate'],
+    ['OTT Navigator', 'OTT Navigator'],
+    ['Kodi', 'Kodi'],
+    ['MAG box', 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3'],
+    ['ExoPlayer', 'ExoPlayer'],
+    ['Chrome', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36']
+  ];
+  function appPreset(name) { for (var k = 0; k < APPS.length; k++) if (APPS[k][1] === name) return k; return -1; }
+  var ADV = [
+    { key: 'stay_under_limit', name: 'Stay under my connection limit',
+      help: 'Coaxial will not open more streams than your account allows, so nobody gets kicked off. Leave the number blank to use what your provider reports.',
+      num: { key: 'connections', label: 'Connections my account allows', placeholder: 'From provider' } },
+    { key: 'one_per_channel', name: 'One connection per channel',
+      help: 'Only one stream of each channel at a time. Rewinding a channel someone else is watching or recording waits until they finish.' },
+    { key: 'one_per_item', name: 'One connection per movie or episode',
+      help: 'Only one TV plays a movie or episode at a time.' },
+    { key: 'locked_to_address', name: 'My provider locks my account to one address',
+      help: 'Coaxial will not switch VPN servers on its own, and waits a moment before streaming after a switch.',
+      num: { key: 'address_wait_seconds', label: 'Wait after a switch (seconds)', placeholder: '90' } },
+    { key: 'send_app_name', name: 'Send an app name to my provider',
+      help: 'Some providers only let certain apps in. Pick the one your provider names, or try VLC, then IPTV Smarters.', app: true },
+    { key: 'share_lists', name: 'Share list and guide downloads',
+      help: 'Coaxial downloads the channel list and guide once and hands the same copy to every TV for a few minutes.',
+      num: { key: 'share_minutes', label: 'Minutes', placeholder: '10' } },
+    { key: 'limit_movie_speed', name: 'Limit movie download speed',
+      help: 'Movies and episodes download no faster than a set speed, so it looks like normal watching. Set it above the movie\'s own bitrate, or it stops to buffer. 100 suits 4K remuxes.',
+      num: { key: 'movie_mbps', label: 'Mbit/s', placeholder: '100' } }
+  ];
+  var TROUBLE = [
+    ['A recording stops when someone rewinds, or plays the same channel from earlier', 'one_per_channel'],
+    ['Someone gets kicked off when another TV starts watching', 'stay_under_limit'],
+    ['Two TVs on the same movie keep stopping each other', 'one_per_item'],
+    ['Nothing plays for a while after the VPN changes server', 'locked_to_address'],
+    ['Channels list fine but will not play', 'send_app_name'],
+    ['The guide or channel list fails or is slow when several TVs start', 'share_lists'],
+    ['Your account gets warned or blocked after watching movies', 'limit_movie_speed']
+  ];
+  // Page-only state per provider (open or closed, Custom picked), kept across redraws and never saved.
+  var advUI = typeof WeakMap === 'function' ? new WeakMap() : null;
+  var advWasOpen = {}; // by card number, so a panel stays open over a save or a discard
+  function advState(p, i) {
+    var ui = advUI && advUI.get(p);
+    if (!ui) {
+      var name = p.advanced.app_name.trim();
+      ui = { open: !!advWasOpen[i], custom: name !== '' && appPreset(name) < 0 };
+      if (advUI) advUI.set(p, ui);
+    }
+    return ui;
+  }
+  function advSummary(a) {
+    var n = ADV.filter(function (o) { return o.key !== 'stay_under_limit' && a[o.key]; }).length, parts = [];
+    if (n) parts.push(n + ' on');
+    if (!a.stay_under_limit) parts.push('limit off');
+    return parts.join(', ');
+  }
+
+  // The app name: a list of common apps, the exact text sent under it, and Custom with a text box.
+  function appPicker(a, path, ui) {
+    var id = 'f' + (++uid);
+    var sel = h('select', { id: id, class: 'input select', 'aria-describedby': id + '-m' });
+    APPS.forEach(function (x, k) { sel.appendChild(h('option', { value: String(k), text: x[0] })); });
+    sel.appendChild(h('option', { value: 'custom', text: 'Custom...' }));
+    var text = h('input', { class: 'input mono', type: 'text', maxlength: '200', 'aria-label': 'App name to send', placeholder: 'Exactly as your provider wrote it',
+      autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', 'aria-describedby': id + '-m' });
+    var textBox = h('div', { class: 'control adv-custom' }, text);
+    var sent = h('code');
+    var sentLine = h('span', { class: 'hint adv-sent' }, 'Sent as ', sent);
+    function paint() {
+      var k = appPreset(a.app_name.trim());
+      sel.value = ui.custom || k < 0 ? 'custom' : String(k);
+      textBox.hidden = !ui.custom && k >= 0;
+      sentLine.hidden = !textBox.hidden;
+      if (text.value !== a.app_name) text.value = a.app_name;
+      setText(sent, a.app_name.trim());
+    }
+    sel.addEventListener('change', function () {
+      if (sel.value === 'custom') { ui.custom = true; paint(); text.focus(); }
+      else { ui.custom = false; a.app_name = APPS[+sel.value][1]; paint(); }
+      touched(path);
+    });
+    text.addEventListener('input', function () { a.app_name = text.value; setText(sent, text.value.trim()); touched(path); });
+    var box = h('div', { class: 'field adv-more adv-app', 'data-path': path },
+      h('label', { for: id, text: 'App' }),
+      h('div', { class: 'control' }, sel, h('span', { class: 'combo-caret', html: icon('chevron') })),
+      textBox,
+      h('p', { class: 'msg', id: id + '-m' }, sentLine, h('span', { class: 'err' })));
+    box.paint = paint;
+    paint();
+    return box;
+  }
+
+  function advancedPanel(p, i) {
+    var a = p.advanced, base = 'providers[' + i + '].advanced', ui = advState(p, i), rows = {};
+    var count = h('span', { class: 'count adv-count' });
+    function paintCount() { var t = advSummary(a); count.hidden = !t; setText(count, t); }
+
+    var opts = ADV.map(function (o) {
+      var id = 'a' + (++uid);
+      var sw = h('input', { type: 'checkbox', class: 'switch', role: 'switch', id: id, 'aria-describedby': id + '-h' });
+      sw.checked = !!a[o.key];
+      var more = null, subPath = '';
+      if (o.num) {
+        subPath = base + '.' + o.num.key;
+        more = h('div', { class: 'adv-more adv-num' }, field({ label: o.num.label, path: subPath, value: a[o.num.key], numeric: true, mono: true,
+          placeholder: o.num.placeholder, set: function (v) { a[o.num.key] = v; } }));
+      } else if (o.app) {
+        subPath = base + '.app_name';
+        more = appPicker(a, subPath, ui);
+      }
+      if (more) more.hidden = !sw.checked;
+      sw.addEventListener('change', function () {
+        a[o.key] = sw.checked;
+        // Turned on for the first time: VLC is picked, the first one to try.
+        if (o.app && sw.checked && !a.app_name.trim() && !ui.custom) a.app_name = APPS[0][1];
+        if (more) { more.hidden = !sw.checked; if (more.paint) more.paint(); }
+        if (subPath && !sw.checked) clearError(subPath); // (what is off is not checked)
+        paintCount(); touched(base + '.' + o.key);
+      });
+      var row = h('div', { class: 'adv-opt' },
+        h('label', { class: 'adv-head', for: id },
+          h('span', { class: 'adv-text' }, h('span', { class: 'adv-name', text: o.name }), h('span', { class: 'adv-help', id: id + '-h', text: o.help })),
+          sw),
+        more);
+      rows[o.key] = row;
+      return row;
+    });
+
+    var trouble = h('ul', { class: 'adv-trouble' }, TROUBLE.map(function (t) {
+      var name = ADV.filter(function (o) { return o.key === t[1]; })[0].name;
+      var go = h('button', { type: 'button', class: 'adv-go', html: icon('arrow', 13) }, h('span', { text: name }));
+      go.addEventListener('click', function () {
+        var row = rows[t[1]];
+        row.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+        row.classList.remove('flash'); void row.offsetWidth; row.classList.add('flash');
+        row.querySelector('.switch').focus({ preventScroll: true });
+      });
+      return h('li', null, h('span', { class: 'adv-sym', text: t[0] }), go);
+    }));
+
+    var box = h('details', { class: 'adv' },
+      h('summary', { class: 'adv-sum' }, h('span', { text: 'Advanced options' }), count, h('span', { class: 'adv-caret', html: icon('chevron') })),
+      h('div', { class: 'adv-body' },
+        h('p', { class: 'adv-intro', text: 'Most providers need none of these. If something goes wrong, find it below and turn on what it points to.' }),
+        h('div', { class: 'adv-help-box' }, h('p', { class: 'label-cap', text: 'Having trouble?' }), trouble),
+        h('div', { class: 'adv-opts' }, opts)));
+    box.open = ui.open;
+    box.addEventListener('toggle', function () { ui.open = advWasOpen[i] = box.open; });
+    paintCount();
+    return box;
   }
 
   function extraEditor() {
@@ -812,7 +999,7 @@
   function addProvider() {
     var ports = S.cur.providers.map(function (p) { return parseInt(p.port, 10) || 0; });
     var next = ports.length ? Math.max.apply(null, ports) + 1 : 8095;
-    S.cur.providers.push({ name: '', url: '', user: '', password: '', password_set: false, port: String(next), live_tv: 'ts', catch_up_while_live: 'allow' });
+    S.cur.providers.push({ name: '', url: '', user: '', password: '', password_set: false, port: String(next), live_tv: 'ts', advanced: advOf() });
     renderSettings();
     var cards = document.querySelectorAll('.pcard');
     var last = cards[cards.length - 1];
@@ -920,7 +1107,23 @@
       var n = portOut(val);
       if (typeof n !== 'number' || n < 1 || n > 65535) errs.push({ field: path, message: 'Enter a port from 1 to 65535.' });
     }
-    S.cur.providers.forEach(function (p, i) { port('providers[' + i + '].port', p.port); });
+    S.cur.providers.forEach(function (p, i) {
+      port('providers[' + i + '].port', p.port);
+      // Advanced options: only what is on is checked, as Coaxial does.
+      var a = p.advanced, at = 'providers[' + i + '].advanced.';
+      Object.keys(ADV_NUM).forEach(function (k) {
+        var r = ADV_NUM[k], v = String(a[k]).trim();
+        if (!a[r[3]] || (v === '' && k === 'connections')) return;
+        var n = portOut(v);
+        if (typeof n !== 'number' || n < r[0] || n > r[1]) errs.push({ field: at + k, message: 'Enter a whole number from ' + r[0] + ' to ' + r[1] + (k === 'connections' ? ', or leave it blank.' : '.') });
+      });
+      if (a.send_app_name) {
+        var name = a.app_name.trim();
+        if (!name) errs.push({ field: at + 'app_name', message: 'Type the app name to send, or turn this off.' });
+        else if (!/^[\x20-\x7e]+$/.test(name)) errs.push({ field: at + 'app_name', message: 'Use plain letters, digits, spaces and punctuation only.' });
+        else if (name.length > 200) errs.push({ field: at + 'app_name', message: 'Keep it to 200 characters or fewer.' });
+      }
+    });
     port('ui.port', S.cur.ui.port);
     S.cur.vpn.extra.forEach(function (row, i) {
       var k = row.k.trim();

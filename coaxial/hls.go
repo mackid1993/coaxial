@@ -400,6 +400,11 @@ var (
 type session struct {
 	loc, final string // where the provider sent the channel; the playlist's real address
 	used       float64
+	opened     float64            // when it was opened at the provider
+	what       what               // what it is, as the advanced options count it (advanced.go)
+	who        map[string]float64 // device -> its last playlist request
+	pieces     map[string]bool    // the addresses its playlist last gave the players (see inUse)
+	owner      *front             // the provider account it is opened for (see conns in advanced.go)
 }
 
 type hlsRow struct {
@@ -518,11 +523,14 @@ func send(w http.ResponseWriter, status int, h http.Header, data []byte) {
 }
 
 // servePlaylist rewrites a playlist; anything else is passed on as it came.
-func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte, base string, own *front) error {
+func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte, base string, own *front, film *speed) error {
 	if bytes.Contains(data[:min(len(data), 1024)], []byte("#EXTM")) {
 		text, err := rewritePlaylist(string(data), base, own)
 		if err != nil {
 			return err
+		}
+		if film != nil && status < 300 { // a film's: what it names is read no faster than set (advanced.go)
+			own.noteFilm(text, film)
 		}
 		data = []byte(text)
 	} else if status >= 400 && own != nil {
@@ -625,7 +633,7 @@ func openChannel(key, target string, h http.Header, renewFrom string) (*session,
 		if isPrivate(u.Hostname()) || strings.EqualFold(u.Hostname(), "localhost") || (u.Scheme != "http" && u.Scheme != "https") {
 			return nil, nil, &refused{status: 403}
 		}
-		s := &session{u.String(), u.String(), mono()}
+		s := &session{loc: u.String(), final: u.String(), used: mono(), opened: mono(), who: map[string]float64{}}
 		mu.Lock()
 		sessions[key] = s
 		mu.Unlock()
@@ -651,16 +659,25 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			h[k] = vs
 		}
 	}
+	rt.f.agent(h)
 	opath, oquery, _ := strings.Cut(orig, "?")
 	q := ""
 	if oquery != "" {
 		q = "?" + oquery
 	}
 	ctx := r.Context()
+	// (a part of a film's HLS: another quality, or its audio)
+	film := rt.f.filmSpeed(rt.client, r, what{})
 	if m := cdnRe.FindStringSubmatch(opath); m != nil { // a playlist on a server the provider sent the player to
+		mu.Lock()
+		rt.f.inUse(orig, rt.client)
+		mu.Unlock()
 		if m[3] == "" {
 			m[3] = "/"
 		}
+		mu.Lock()
+		rt.f.variant(strings.ToLower(m[1])+"://"+m[2]+m[3], rt.client)
+		mu.Unlock()
 		resp, final, err := fetchShared(ctx, strings.ToLower(m[1])+"://"+m[2]+m[3]+q, h, playlistWait)
 		if err != nil {
 			return err
@@ -669,7 +686,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if err != nil {
 			return err
 		}
-		return servePlaylist(w, resp.StatusCode, resp.Header, data, final, rt.f)
+		return servePlaylist(w, resp.StatusCode, resp.Header, data, final, rt.f, film)
 	}
 	if rt.f.mode == "ts" { // a ts provider: live HLS is built from the shared MPEG-TS stream
 		if done, err := hlsFromTS(w, r, rt.client, provider, uri, opath, q, port, rt.f); done {
@@ -689,21 +706,59 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	if m != nil && oquery != "" && !strings.Contains(uri, "?") {
 		target += q
 	}
+	who := rt.client
+	want := rt.f.classify(&url.URL{Path: chanOrig, RawQuery: oquery})
+	if film == nil {
+		film = rt.f.filmSpeed(who, r, want)
+	}
 	mu.Lock()
 	s := sessions[key]
+	back := s != nil && mono()-s.used > hlsHeld // (it no longer counts: its connection may be someone else's now)
+	// (a variant's own playlist, named in the playlist of a session that is open: that session goes on)
+	of := s == nil && want.kind == "" && rt.f.variant(provider+strings.SplitN(uri, "?", 2)[0], who)
 	mu.Unlock()
-	if s == nil {
+	if s == nil || back {
+		// A new session at the provider: by the rules it has on (advanced.go). Others asking for the same
+		// channel meanwhile share it. (The relay's own bridge was let through when its reader came.)
+		if !of {
+			hd, why := rt.f.admit(ctx, who, want, false, key, nil)
+			if hd == nil {
+				if why == "" {
+					return nil // (the player hung up while it waited)
+				}
+				return rt.f.refusal(who, want, why)
+			}
+			defer hd.release()
+		}
 		var d *direct
 		var err error
-		if s, d, err = openChannel(key, target, h, ""); err != nil {
-			return err
-		} else if d != nil {
-			return servePlaylist(w, d.status, d.h, d.data, target, rt.f)
+		mu.Lock()
+		if s != nil && sessions[key] != s { // (let go of while this waited)
+			s = nil
+		}
+		mu.Unlock()
+		if s == nil {
+			if s, d, err = openChannel(key, target, h, ""); err != nil {
+				return err
+			} else if d != nil {
+				return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film)
+			}
 		}
 	}
 	mu.Lock()
 	s.used = mono()
-	who := rt.client
+	if s.what.kind == "" {
+		s.what = want
+	}
+	if s.owner == nil {
+		s.owner = rt.f
+	}
+	if s.who == nil {
+		s.who = map[string]float64{}
+	}
+	if !isLoop(who) {
+		s.who[who] = mono()
+	}
 	if rk := who + " " + provider + " " + channelID(uri); who != "127.0.0.1" && who != "::1" { // (not the relay's own bridge)
 		if row := hlsRows[rk]; row != nil && mono()-row.last <= 30 {
 			row.last = mono()
@@ -766,13 +821,31 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if err != nil {
 			return err
 		} else if d != nil {
-			return servePlaylist(w, d.status, d.h, d.data, target, rt.f)
+			return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film)
 		}
+		mu.Lock()
+		if ns != s { // (opened afresh: still the same stream, and the same devices on it)
+			ns.what = s.what
+			for d, t := range s.who {
+				ns.who[d] = t
+			}
+		}
+		mu.Unlock()
 		s = ns
+	}
+	var pieces map[string]bool
+	if text, err := rewritePlaylist(string(data), final, rt.f); err == nil && status == 200 {
+		pieces = map[string]bool{}
+		for _, line := range strings.Split(text, "\n") {
+			if a := strings.TrimSpace(line); a != "" && !strings.HasPrefix(a, "#") {
+				pieces[a] = true
+			}
+		}
 	}
 	mu.Lock()
 	s.final = final
 	if status == 200 {
+		s.pieces = pieces
 		hlsSeen[port+chanOrig] = mono()
 		if len(hlsSeen) > 300 {
 			for k, t := range hlsSeen {
@@ -783,7 +856,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		}
 	}
 	mu.Unlock()
-	return servePlaylist(w, status, hd, data, final, rt.f)
+	return servePlaylist(w, status, hd, data, final, rt.f, film)
 }
 
 // ---------------------------------------------------------------------------
@@ -836,7 +909,14 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 			h[k] = vs
 		}
 	}
-	resp, err := fetch(r.Context(), provider+uri, h, opts{guardAll: true, wait: 300})
+	rt.f.agent(h)
+	var resp *http.Response
+	var err error
+	if key := shareKey(rt.f, r); key != "" { // the same download shared by every player for a while (share.go)
+		resp, err = shared(r.Context(), rt.f, key, provider+uri, h)
+	} else {
+		resp, err = fetch(r.Context(), provider+uri, h, opts{guardAll: true, wait: 300})
+	}
 	if err != nil {
 		return err
 	}
@@ -861,8 +941,13 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 		}
 		body = io.MultiReader(bytes.NewReader(rt.f.hideLogin(page)), body)
 	}
+	var loginAnswer *bytes.Buffer
 	if q, _ := url.ParseQuery(r.URL.RawQuery); q.Get("action") == "" && strings.HasSuffix(strings.ToLower(r.URL.Path), "_api.php") {
 		// (the login itself: player_api.php or panel_api.php with no action)
+		if resp.StatusCode == 200 { // what it says about the account's connections is kept (see limit)
+			loginAnswer = &bytes.Buffer{}
+			body = io.TeeReader(body, capped{loginAnswer, 1 << 20})
+		}
 		if body, err = playerServer(body, home); err != nil { // (body: unpacked, if it came packed)
 			return err
 		}
@@ -887,6 +972,9 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 	}
 	if err := apiStream(w, body, []byte(`"http://`+home+"/__cdn/"), login, gz); err != nil {
 		panic(http.ErrAbortHandler) // cut off: the app must see a broken answer, not a short complete one
+	}
+	if loginAnswer != nil {
+		rt.f.noteAccount(loginAnswer.Bytes())
 	}
 	return nil
 }

@@ -84,6 +84,8 @@ type launcher struct {
 	vpnEnv           []string
 	ctlKey           string // for gluetun's control page, made up at each start of the VPN ("" = set by the user: not ours to use)
 	vpnUp            bool
+	vpnUpAt          time.Time // when the VPN last came up (handed to the proxy part: see locked_to_address)
+	vpnLink          int       // the index of the VPN's interface when last seen up (0: not known)
 	vpnNote          string
 	ui               *http.Server
 	uiPort           int
@@ -400,6 +402,11 @@ func (l *launcher) startProxy() {
 	cmd := exec.Command(self, "proxy")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader(input), os.Stdout, os.Stderr
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GOMEMLIMIT=384MiB"} // (no VPN key, no settings: it is handed what it needs)
+	l.mu.Lock()
+	if !l.vpnUpAt.IsZero() {
+		cmd.Env = append(cmd.Env, "COAXIAL_VPN_UP_AT="+strconv.FormatInt(l.vpnUpAt.Unix(), 10))
+	}
+	l.mu.Unlock()
 	if tz := os.Getenv("TZ"); tz != "" {
 		cmd.Env = append(cmd.Env, "TZ="+tz)
 	}
@@ -447,19 +454,13 @@ func (l *launcher) watchVPN() {
 			up = cmd.Run() == nil
 			cancel()
 		}
-		l.mu.Lock()
-		if l.vpn == c {
-			if up && !l.vpnUp {
-				say("the VPN is up")
-			} else if !up && l.vpnUp {
-				say("the VPN is down; gluetun lets nothing out until it is back")
-			}
-			l.vpnUp = up
-			if up && c != nil {
-				c.ever = true
-			}
+		link := 0
+		if up {
+			link = tunnelLink()
 		}
-		l.mu.Unlock()
+		if again := l.sawVPN(c, up, link); again { // (back up under the proxy part: its address may be new. A proxy part started now is told at its start)
+			askProxy("/vpn-changed", 3*time.Second)
+		}
 		if up {
 			l.work.Lock()
 			l.startProxy()
@@ -468,6 +469,45 @@ func (l *launcher) watchVPN() {
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// sawVPN notes one look at the VPN of child c: up, and the index of its interface (0: not known). It returns
+// whether the proxy part must be told the VPN came back up, its address perhaps new. gluetun makes the interface
+// anew each time it connects, also when it reconnects by itself (its own health check failed, and with no
+// server named it takes another one) within the few seconds between two looks here: a new index is that.
+func (l *launcher) sawVPN(c *child, up bool, link int) (again bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.vpn != c {
+		return false
+	}
+	if up && !l.vpnUp {
+		say("the VPN is up")
+		l.vpnUpAt, again = time.Now(), l.proxy != nil
+	} else if up && link != 0 && l.vpnLink != 0 && link != l.vpnLink {
+		l.vpnUpAt, again = time.Now(), l.proxy != nil
+	} else if !up && l.vpnUp {
+		say("the VPN is down; gluetun lets nothing out until it is back")
+	}
+	l.vpnUp = up
+	if up {
+		l.vpnLink = link
+		if c != nil {
+			c.ever = true
+		}
+	}
+	return again
+}
+
+// tunnelLink: the index of the VPN's own interface (a point-to-point one that is up), 0 while there is none.
+func tunnelLink() int {
+	list, _ := net.Interfaces()
+	for _, i := range list {
+		if i.Flags&net.FlagPointToPoint != 0 && i.Flags&net.FlagUp != 0 {
+			return i.Index
+		}
+	}
+	return 0
 }
 
 // ---------------------------------------------------------------------------

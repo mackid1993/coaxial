@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"sort"
@@ -35,7 +36,18 @@ type front struct {
 	// (loginAny: the login deeper in an address, as a provider's own playlist may write it: /hls/<login>/<piece>)
 	loginPath, loginShort, loginAny, chLogin, liveTS *regexp.Regexp
 	catchUp                                          *regexp.Regexp // catch-up of a live channel: its number
-	refuseCatchUp                                    bool           // catch-up of a channel open live is refused
+	liveHLS, vodPath                                 *regexp.Regexp // a live channel as HLS; a movie or an episode
+
+	// the advanced options (advanced.go)
+	limitOn             bool
+	limitSet            int // connections the settings allow (-1: what the provider reports)
+	reported            int // max_connections in the provider's login answer (0: not known) (mu)
+	oneChannel, oneItem bool
+	locked              bool
+	lockWait            float64 // seconds
+	app                 string  // the User-Agent sent to the provider ("": each player's own)
+	shareFor            float64 // seconds a list or the guide is shared (0: not shared)
+	movieRate           float64 // bytes a second for a movie or an episode (0: as fast as it comes)
 }
 
 // route: what the front door worked out about one request, for the relay. Nothing in it comes from a header.
@@ -79,7 +91,7 @@ func newFront(p provider, pl player) *front {
 	base := strings.TrimRight(p.URL, "/")
 	scheme, hostport, _ := strings.Cut(base, "://")
 	pu, pp := regexp.QuoteMeta(pl.User), regexp.QuoteMeta(pl.Password)
-	return &front{name: p.Name, port: p.Port.String(), mode: p.LiveTV, refuseCatchUp: p.CatchUpLive == "refuse", base: base, scheme: strings.ToLower(scheme), hostport: hostport,
+	f := &front{name: p.Name, port: p.Port.String(), mode: p.LiveTV, base: base, scheme: strings.ToLower(scheme), hostport: hostport,
 		user: p.User, pass: p.Password, encU: encLogin(p.User), encP: encLogin(p.Password), pu: pl.User, pp: pl.Password,
 		loginPath:  regexp.MustCompile(`^/+(live|movie|series|timeshift)/+` + pu + `/+` + pp + `/+(.*)$`),
 		loginShort: regexp.MustCompile(`^/+` + pu + `/+` + pp + `/+([^/]+)$`),
@@ -89,7 +101,12 @@ func newFront(p provider, pl player) *front {
 		// names next to itself, is passed on to the provider, not opened as a channel)
 		liveTS: regexp.MustCompile(`^/+(live/+` + pu + `/+` + pp + `/+[0-9]+\.ts|` + pu + `/+` + pp + `/+[0-9]+(\.ts)?)$`),
 		// /timeshift/<login>/<minutes>/<start>/<channel>.ts (or .m3u8)
-		catchUp: regexp.MustCompile(`^/+timeshift/+` + pu + `/+` + pp + `/+[^/]+/+[^/]+/+([0-9]+)(\.[A-Za-z0-9]+)?$`)}
+		catchUp: regexp.MustCompile(`^/+timeshift/+` + pu + `/+` + pp + `/+[^/]+/+[^/]+/+([0-9]+)(\.[A-Za-z0-9]+)?$`),
+		liveHLS: regexp.MustCompile(`^/+(live/+)?` + pu + `/+` + pp + `/+[0-9]+\.m3u8$`),
+		// /movie/<login>/<id>.<ext> and /series/<login>/<id>.<ext>
+		vodPath: regexp.MustCompile(`^/+(movie|series)/+` + pu + `/+` + pp + `/+([^/]+?)(\.[A-Za-z0-9]+)?$`)}
+	f.applyAdvanced(p.Advanced)
+	return f
 }
 
 // catchUpOf: the channel a catch-up request is for ("" if it is not one), in either form Xtream servers take:
@@ -106,29 +123,6 @@ func (f *front) catchUpOf(u *url.URL) string {
 	}
 	return ""
 }
-
-// liveOpen: whether channel id of this provider is open live here now (an MPEG-TS channel, HLS built from it, or
-// a live HLS session asked for in the last 30 s). Some providers allow one connection per channel on an account,
-// and count catch-up of a channel as that channel: a catch-up opened ends the live stream, and the live stream
-// asked for again ends the catch-up. Others allow both. Used only with catch_up_while_live "refuse". (mu held)
-func (f *front) liveOpen(id string) bool {
-	for _, c := range channels {
-		if c.provider == f.base && !c.done && c.key[strings.LastIndexByte(c.key, '/')+1:] == id {
-			return true
-		}
-	}
-	now := mono()
-	for k, s := range sessions {
-		if rest, ok := strings.CutPrefix(k, f.base+" "); ok && now-s.used <= 30 &&
-			strings.HasPrefix(rest, "/live/") && strings.TrimSuffix(rest[strings.LastIndexByte(rest, '/')+1:], ".m3u8") == id {
-			return true
-		}
-	}
-	return false
-}
-
-// catchUpSaid: when a refused catch-up was last logged, per provider, player and channel. (mu held)
-var catchUpSaid = map[string]float64{}
 
 func escPath(s string) string { return (&url.URL{Path: s}).EscapedPath() }
 
@@ -386,31 +380,6 @@ func (f *front) serve(c *counted, r *http.Request) {
 		c.WriteHeader(200)
 		return
 	}
-	if id := f.catchUpOf(r.URL); id != "" && f.refuseCatchUp {
-		mu.Lock()
-		open := f.liveOpen(id)
-		said := catchUpSaid[f.base+" "+whoIs(r)+" "+id]
-		if open {
-			catchUpSaid[f.base+" "+whoIs(r)+" "+id] = mono()
-			if len(catchUpSaid) > 300 {
-				for k, t := range catchUpSaid {
-					if mono()-t > 60 {
-						delete(catchUpSaid, k)
-					}
-				}
-			}
-		}
-		mu.Unlock()
-		if open { // the provider would end the live stream for it (a recording among them): refused instead
-			c.kind = "media"
-			if said == 0 || mono()-said > 60 { // (once a minute: players ask again every few seconds)
-				say("%s asked for catch-up of channel %s while it is open live (%s); refused, so the live stream is not cut", whoIs(r), id, hostOf(f.base))
-			}
-			answer(c, 503, "", "This channel is open live on this provider right now (being watched or recorded).\n"+
-				"The provider allows one connection per channel, catch-up included, so catch-up of it is refused until live is closed.\n")
-			return
-		}
-	}
 	up, uri := f.swap(r.URL)
 	rt := &route{f: f, uri: uri, orig: r.URL.RequestURI(), client: whoIs(r)}
 	switch {
@@ -452,7 +421,11 @@ func (f *front) serve(c *counted, r *http.Request) {
 			answer(c, 403, "", "That address leads to this machine or a home network.\n")
 			return
 		}
-		f.forward(c, r, target, scheme, hostport, 60, true)
+		mu.Lock()
+		f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session: it is still playing)
+		mu.Unlock()
+		w, follow := f.followed(r) // (a redirect of a film or catch-up let through: what it continues)
+		f.stream(c, r, w, follow, target, scheme, hostport, true)
 	case strings.HasPrefix(low, "/__cdu/"):
 		c.WriteHeader(404)
 	case low == "/xmltv.php": // the guide: large, and slow for some providers to start. Its channel and programme
@@ -461,8 +434,42 @@ func (f *front) serve(c *counted, r *http.Request) {
 		failed(c, api(c, r, rt))
 	default: // everything else (movies, series, catch-up, account): straight to the provider
 		c.kind, c.server = "media", f.hostport
-		f.forward(c, r, f.base+up, f.scheme, f.hostport, 60, false)
+		mu.Lock()
+		f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session on the provider's own server)
+		mu.Unlock()
+		w, follow := f.followed(r)
+		if !follow {
+			w = f.classify(r.URL)
+		}
+		f.stream(c, r, w, follow, f.base+up, f.scheme, f.hostport, false)
 	}
+}
+
+// stream passes on a film, an episode, catch-up or a redirect of one (w), by the rules this provider has on:
+// it counts as a provider connection until it ends, however it ends. Anything else is passed on as it is.
+func (f *front) stream(c *counted, r *http.Request, w what, follow bool, target, scheme, hostport string, guard bool) {
+	who := whoIs(r)
+	if w.kind == "" || r.Method != "GET" || isLoop(who) {
+		f.forward(c, r, target, scheme, hostport, 60, guard)
+		return
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	// Cut to make room: the provider's read ends, and so does a write to a player that reads no more (its
+	// buffer is full, or it opened its new read before closing this one), so the new one need not wait.
+	rc := http.NewResponseController(c)
+	h, why := f.admit(ctx, who, w, follow, "", func() { cancel(); rc.SetWriteDeadline(time.Now()) })
+	if h == nil {
+		if why != "" {
+			failed(c, f.refusal(who, w, why))
+		}
+		return
+	}
+	defer func() {
+		h.release()
+		rc.SetWriteDeadline(time.Time{}) // (cut once all was sent: the connection may be used again)
+	}()
+	f.forwardHeld(c, r.WithContext(ctx), target, scheme, hostport, 60, guard, h)
 }
 
 // What belongs to one connection and is not passed on in either direction.
@@ -494,6 +501,13 @@ func dropHop(h http.Header) {
 // wait: seconds the server may send nothing before it is given up on. guard: the address dialed may not be
 // this machine or a home network.
 func (f *front) forward(c *counted, r *http.Request, target, scheme, hostport string, wait float64, guard bool) {
+	f.forwardHeld(c, r, target, scheme, hostport, wait, guard, nil)
+}
+
+// forwardHeld is forward for a stream admitted by the advanced options under hd (advanced.go): a redirect of
+// it carries on what it was admitted for, a movie or an episode is read no faster than set, and it ends,
+// broken off, when it is cut to make room.
+func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostport string, wait float64, guard bool, hd *hold) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	if guard {
@@ -514,7 +528,7 @@ func (f *front) forward(c *counted, r *http.Request, target, scheme, hostport st
 	for _, name := range []string{"X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "Via"} {
 		out.Header.Del(name)
 	}
-	if out.Header.Get("User-Agent") == "" {
+	if f.agent(out.Header).Get("User-Agent") == "" {
 		out.Header["User-Agent"] = []string{""} // no Go-http-client name
 	}
 	var timed atomic.Bool // (set by the timer's own goroutine)
@@ -527,6 +541,8 @@ func (f *front) forward(c *counted, r *http.Request, target, scheme, hostport st
 		switch {
 		case errors.As(err, &rf):
 			c.WriteHeader(rf.status)
+		case hd.wasCut(): // its device asked for something else: this made room
+			panic(http.ErrAbortHandler)
 		case r.Context().Err() != nil: // the player hung up first
 		case timed.Load() || isTimeout(err):
 			c.WriteHeader(504)
@@ -553,6 +569,11 @@ func (f *front) forward(c *counted, r *http.Request, target, scheme, hostport st
 			}
 		}
 		h.Set("Location", moved)
+		if hd != nil && moved != loc { // the player comes back for it: it carries on what was admitted
+			mu.Lock()
+			f.remember(moved, hd)
+			mu.Unlock()
+		}
 	}
 	if _, ok := h["Content-Type"]; !ok {
 		h["Content-Type"] = nil // none sent, none added
@@ -591,7 +612,10 @@ func (f *front) forward(c *counted, r *http.Request, target, scheme, hostport st
 		(strings.HasPrefix(kind, "video/") || strings.HasPrefix(kind, "audio/") || strings.HasPrefix(kind, "application/octet-stream")) {
 		defer watching(who)() // a film, an episode or catch-up: someone is watching (see playingNow)
 	}
-	if _, err := copyFlush(c, src); err != nil && r.Context().Err() == nil {
+	if p := f.speedOf(r, hd); p != nil && resp.StatusCode < 300 {
+		src = &throttle{r: src, ctx: r.Context(), p: p}
+	}
+	if _, err := copyFlush(c, src); err != nil && (r.Context().Err() == nil || hd.wasCut()) {
 		panic(http.ErrAbortHandler) // cut off: the player must see a broken answer, not a short complete one
 	}
 }
@@ -716,6 +740,13 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 	}
 	good, notes := checkProviders(s)
 	startNotes = notes
+	// When the VPN came up (the launcher says): a provider that locks an account to one address gets new
+	// streams only a while after that (advanced.go).
+	if t, err := strconv.ParseInt(os.Getenv("COAXIAL_VPN_UP_AT"), 10, 64); err == nil && t > 0 {
+		mu.Lock()
+		vpnChanged = mono() - time.Since(time.Unix(t, 0)).Seconds()
+		mu.Unlock()
+	}
 	var servers []*http.Server
 	var listeners []net.Listener
 	for _, p := range good {
@@ -766,6 +797,7 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 	}
 	mu.Unlock()
 	time.Sleep(100 * time.Millisecond)
+	endShares()
 	return 0
 }
 

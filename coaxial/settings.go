@@ -2,7 +2,8 @@
 //
 //	{
 //	  "player":    {"user": "", "password": ""},            the easy login typed into every player
-//	  "providers": [{"name": "", "url": "", "user": "", "password": "", "port": 8095, "live_tv": "ts"}],
+//	  "providers": [{"name": "", "url": "", "user": "", "password": "", "port": 8095, "live_tv": "ts",
+//	                 "advanced": {...}}],                     what a provider needs handled (see advanced)
 //	  "ui":        {"port": 8195},                          the web interface and the health check
 //	  "vpn":       {"service_provider": "", "type": "wireguard", ..., "update_hours": 24, "gluetun_version": "latest",
 //	                "extra": {"ANY_GLUETUN_VARIABLE": "value"}}
@@ -74,9 +75,10 @@ type provider struct {
 	Password string `json:"password"`
 	Port     port   `json:"port"`
 	LiveTV   string `json:"live_tv"`
-	// CatchUpLive: what to do with catch-up of a channel that is open live: "allow" (pass it on; also when left
-	// out) or "refuse" (for a provider that allows one connection per channel and ends the live stream for it)
-	CatchUpLive string `json:"catch_up_while_live,omitempty"`
+	// Advanced: the advanced options (advanced.go). Every one is off unless set, but stay_under_limit.
+	Advanced advanced `json:"advanced"`
+	// OldCatchUp: an older form of one_per_channel, read and then dropped: "refuse" turns one_per_channel on.
+	OldCatchUp any `json:"catch_up_while_live,omitempty"` // (any value loads: it is never an error)
 }
 
 type uiSettings struct {
@@ -174,6 +176,17 @@ func (s *settings) parse(data []byte) error {
 	}
 	if s.Providers == nil {
 		s.Providers = []provider{}
+	}
+	for i := range s.Providers {
+		p := &s.Providers[i]
+		if p.OldCatchUp == "refuse" && !p.Advanced.channelSet {
+			p.Advanced.OnePerChannel = true
+		}
+		p.OldCatchUp = nil // (written in the new form at the next save; any other value meant "allow")
+		if p.Advanced.StayUnder == nil {
+			on := true
+			p.Advanced.StayUnder = &on
+		}
 	}
 	return nil
 }
@@ -321,8 +334,8 @@ func (s *settings) validate() []fieldError {
 		if p.LiveTV != "hls" && p.LiveTV != "ts" {
 			bad(at+"live_tv", `live_tv must be "hls" if your players use HLS, or "ts" if they use MPEG-TS`)
 		}
-		if p.CatchUpLive != "" && p.CatchUpLive != "allow" && p.CatchUpLive != "refuse" {
-			bad(at+"catch_up_while_live", `catch_up_while_live must be "allow" or "refuse"`)
+		for _, e := range p.Advanced.check() {
+			bad(at+"advanced."+e.Field, "%s", e.Message)
 		}
 		for _, f := range [][2]string{{"user", p.User}, {"password", p.Password}} {
 			if hasControl.MatchString(f[1]) {
@@ -429,7 +442,7 @@ func (s *settings) masked() map[string]any {
 	provs := []any{}
 	for _, p := range s.Providers {
 		provs = append(provs, map[string]any{"name": p.Name, "url": p.URL, "user": p.User, "password": "", "password_set": p.Password != "",
-			"port": p.Port, "live_tv": p.LiveTV, "catch_up_while_live": or(p.CatchUpLive, "allow")})
+			"port": p.Port, "live_tv": p.LiveTV, "advanced": p.Advanced.view()})
 	}
 	hours, _ := s.updateHours()
 	tag, _ := s.gluetunVersion()
@@ -517,6 +530,17 @@ func (s *settings) keepSecrets(old *settings) {
 			s.VPN.Extra[k] = old.VPN.Extra[k]
 		}
 	}
+}
+
+// addressLocked: whether any provider locks its account to one address (locked_to_address): the VPN server
+// is then never changed on Coaxial's own.
+func (s *settings) addressLocked() bool {
+	for _, p := range s.Providers {
+		if p.Advanced.Locked {
+			return true
+		}
+	}
+	return false
 }
 
 // forProxy: what the proxy part is given: no VPN setting at all.

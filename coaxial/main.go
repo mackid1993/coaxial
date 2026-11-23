@@ -95,6 +95,7 @@ type refused struct { // the other side said no; carries what to tell the reader
 	status int
 	kind   string
 	text   []byte
+	after  int // seconds to ask again after (Retry-After), when known
 }
 
 func (e *refused) Error() string { return "refused " + strconv.Itoa(e.status) }
@@ -590,6 +591,7 @@ type source func(ctx context.Context, ch *channel, yield func([]byte) bool) erro
 
 type channel struct {
 	key, provider      string
+	owner              *front // the provider account it is opened for (see conns in advanced.go)
 	readers            map[*reader]bool
 	timer              *time.Timer
 	ring               []item
@@ -916,7 +918,7 @@ func tsSource(target string, h http.Header) source {
 			if r.StatusCode != 200 && r.StatusCode != 206 {
 				say("a provider answered %d when asked for a channel", r.StatusCode)
 				text, _ := readAll(r, 65536, 5) // what the provider said, passed on to the player
-				return &refused{r.StatusCode, r.Header.Get("Content-Type"), text[:min(len(text), 65536)]}
+				return &refused{status: r.StatusCode, kind: r.Header.Get("Content-Type"), text: text[:min(len(text), 65536)]}
 			}
 			err = func() error {
 				defer r.Body.Close()
@@ -1125,6 +1127,9 @@ func hms(s float64) string {
 func failed(w http.ResponseWriter, err error) {
 	var r *refused
 	if errors.As(err, &r) {
+		if r.after > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(r.after))
+		}
 		answer(w, r.status, r.kind, string(r.text))
 	} else if err != nil {
 		answer(w, 502, "", "")
@@ -1151,6 +1156,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 			}
 		}
 	}
+	rt.f.agent(sent)
 	key, gone := channelKey(path, provider, uri), r.Context().Done()
 	mu.Lock()
 	ch := channels[key]
@@ -1161,6 +1167,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	if first {
 		// Changing channel: the hang-up on the old one and this request arrive in either order. Channels of
 		// this provider nobody reads go now; a hang-up just behind gets 30 ms; the provider gets dropGap to see it.
+		was := lastOpen[provider]
 		lastOpen[provider] = opened{mono(), key}
 		releaseFor(provider, rt.client, key)
 		var mine []*channel
@@ -1181,6 +1188,22 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 			}
 			mu.Unlock()
 		}
+		// A new provider connection: by the rules this provider has on (advanced.go). Another request for the
+		// same channel in the meantime joins it. MPEG-TS made from HLS reads the channel's HLS session: one
+		// that is open already (a device watching the channel as HLS) costs nothing more.
+		want, opens := what{"ch", channelID(uri)}, key
+		if path == "/hls" {
+			opens = provider + " /live/" + rt.f.encU + "/" + rt.f.encP + "/" + want.item + ".m3u8"
+		}
+		h, why := rt.f.admit(r.Context(), rt.client, want, false, opens, nil)
+		if h == nil {
+			unOpen(provider, key, was)
+			if why != "" {
+				failed(w, rt.f.refusal(rt.client, want, why))
+			}
+			return
+		}
+		defer h.release()
 		mu.Lock()
 		wait := lastDrop[provider] + dropGap - mono()
 		mu.Unlock()
@@ -1216,10 +1239,12 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 					notPrintable.ReplaceAllString(r.Header.Get("User-Agent"), ""), inside{rt.f})
 			}
 			ch = newChannel(key, src, provider)
+			ch.owner = rt.f
 			channels[key] = ch
 		} else {
 			first = false
 		}
+		delete(holds, h) // (counted as the channel from here on)
 	}
 	if allReaders() >= readersMax {
 		if first {

@@ -116,8 +116,26 @@ func whereAmI() any { // what the internet sees, asked through the VPN (certific
 		if err != nil || r.StatusCode != 200 {
 			return nil, err
 		}
-		return parseJSON(data)
+		v, err := parseJSON(data)
+		if ip := pyStr(field(v, "ip")); err == nil && truthy(field(v, "ip")) {
+			sawAddress(ip)
+		}
+		return v, err
 	})
+}
+
+var lastIP string // the public address last seen (mu; "" after the launcher said the VPN came back up)
+
+// sawAddress: the public address the status page's look-up found. Another one than the last seen means the
+// VPN came out somewhere else (see locked_to_address).
+func sawAddress(ip string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if was := lastIP; was != "" && was != ip {
+		vpnChanged = mono()
+		say("the VPN's public address changed")
+	}
+	lastIP = ip
 }
 
 // vpnPing: round trip to the VPN server in ms. A packet allowed one hop dies there and its "time exceeded"
@@ -181,7 +199,7 @@ func playerAPI(ctx context.Context, port, extra string) (int, []byte, error) {
 	}
 	u := fmt.Sprintf("%s/player_api.php?username=%s&password=%s%s", f.base, url.QueryEscape(f.user), url.QueryEscape(f.pass), extra)
 	ask := func() (int, []byte, error) {
-		r, err := fetch(ctx, u, agentOf(""), opts{guardAll: true, wait: headerWait})
+		r, err := fetch(ctx, u, f.agent(agentOf("")), opts{guardAll: true, wait: headerWait})
 		if err != nil {
 			return 0, nil, err
 		}
@@ -220,6 +238,9 @@ func account(port string, wait time.Duration) map[string]any {
 					info := field(v, "user_info")
 					value = map[string]any{"answer": 200, "status": field(info, "status"), "auth": field(info, "auth"),
 						"exp": field(info, "exp_date"), "used": field(info, "active_cons"), "max": field(info, "max_connections")}
+					if f := fronts[port]; f != nil {
+						f.noteMax(field(info, "max_connections"))
+					}
 				}
 			}
 			mu.Lock()

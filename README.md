@@ -142,6 +142,7 @@ so, and warns that finishing setup replaces the file. **Settings** has:
 - **Providers.** Add them, remove them, and reorder them with the up and down arrows. A new port is tried before
   saving: Coaxial listens on it for 8 seconds and the page tries to reach it from your browser. If that fails, the page
   does not save and tells you to add a `PORT_n` line for it to `.env`. Ports are tried again after a save.
+  Each provider also has `Advanced options`, closed until you open it (see below).
 - **VPN.** The service and the connection type. WireGuard takes a private key and addresses. OpenVPN takes a username
   and a password. Then where to connect: countries, cities, regions, servers by hostname and servers by name. All of
   these are drop-downs filled from gluetun's own server lists, and the two server lists narrow to the places you
@@ -185,7 +186,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | `player` | The login you type into every player. Letters, digits, `-` and `_` only. The username cannot be `live`, `movie`, `series` or `timeshift`. |
 | `providers` | One entry per provider: a name, its address (`http://name` or `https://name`, optionally `:port`, with nothing after it), the login it gave you, the port your players use for it, and `live_tv`. A name is up to 40 letters, digits, spaces, `-`, `.` or `_`, starts with a letter or digit, and is not used by another provider. The provider's username and password cannot contain `/` or a line break. Ports 53, 8000 and 9999 and the web page's port cannot be used. |
 | `live_tv` | `ts` if your players watch live TV as MPEG-TS, `hls` if they use HLS. |
-| `catch_up_while_live` | `allow` (also when left out) or `refuse`. Catch-up is different video from live, so it needs its own connection to the provider. Some providers allow one connection per channel and end the live stream, a recording included, when catch-up of that channel opens. Set `refuse` for those: catch-up of a channel open live is turned down, and the live stream keeps playing. |
+| `advanced` | Options some providers need, all off but `stay_under_limit`. Left out, the defaults apply. See [Advanced options](#advanced-options-per-provider). |
 | `ui.port` | The port of the web page and of the health check. If left out, `UI_PORT` from `.env` (8195 if that is not set either). If you change it, change `UI_PORT` in `.env` to match. |
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
 | `vpn.update_hours` | How often gluetun refreshes its list of your VPN service's servers (its `UPDATER_PERIOD`). 24 if left out, 0 for never. |
@@ -193,6 +194,55 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | `vpn.extra` | Any other gluetun variable under its own name, such as `OPENVPN_PROTOCOL`. It is applied last, so it wins over the settings above. Refused here and under `vpn`, because anyone who can reach the web page could use them: gluetun's `..._COMMAND` variables, OpenVPN options that run programs (such as `--up`) in `OPENVPN_FLAGS`, `HTTP_CONTROL_SERVER_*` settings other than `HTTP_CONTROL_SERVER_LOG`, and values on more than one line (except the OpenVPN certificate and keys). |
 
 gluetun keeps its server lists in `gluetun/servers` in the mounted folder, so they survive a restart.
+
+## Advanced options (per provider)
+
+Most providers need none of these. If something goes wrong, find it below and turn on what it points to. They are
+under `Advanced options` on each provider in Settings, and under `advanced` in that provider's entry in `settings.json`.
+
+| Having trouble? | Turn on |
+| --- | --- |
+| A recording stops when someone rewinds, or plays the same channel from earlier | One connection per channel |
+| Someone gets kicked off when another TV starts watching | Stay under my connection limit |
+| Two TVs on the same movie keep stopping each other | One connection per movie or episode |
+| Nothing plays for a while after the VPN changes server | My provider locks my account to one address |
+| Channels list fine but will not play | Send an app name to my provider |
+| The guide or channel list fails or is slow when several TVs start | Share list and guide downloads |
+| Your account gets warned or blocked after watching movies | Limit movie download speed |
+
+- **Stay under my connection limit** (`stay_under_limit`, on by default). Coaxial does not open more streams than your
+  account allows, so nobody gets kicked off. `connections` is that number. Leave it empty (the default) to use what
+  your provider reports.
+- **One connection per channel** (`one_per_channel`, off). Only one stream of each channel at a time, live or catch-up.
+  Rewinding a channel someone else is watching or recording waits until they finish. An older `settings.json` with
+  `"catch_up_while_live": "refuse"` gets this turned on.
+- **One connection per movie or episode** (`one_per_item`, off). Only one TV plays a movie or episode at a time.
+- **My provider locks my account to one address** (`locked_to_address`, off). Coaxial does not switch VPN servers on its
+  own, and after a switch new streams wait `address_wait_seconds` (90) so the provider can let go of the old address.
+- **Send an app name to my provider** (`send_app_name`, off). Every request to the provider names the app in `app_name`
+  instead of the player's own. The page lists common player apps, VLC first, and `Custom...` for any other name. Plain
+  text, up to 200 characters.
+- **Share list and guide downloads** (`share_lists`, off). The channel lists and the guide are downloaded once and the
+  same copy goes to every TV for `share_minutes` (10).
+- **Limit movie download speed** (`limit_movie_speed`, off). Movies and episodes download no faster than `movie_mbps`
+  Mbit/s (100), so it looks like normal watching. Set it above the movie's own bitrate, or it stops to buffer: 100 suits
+  4K remuxes; 20 is enough for most plain 1080p movies.
+
+<details>
+<summary>The defaults in <code>settings.json</code></summary>
+
+```json
+"advanced": {
+  "stay_under_limit": true, "connections": "",
+  "one_per_channel": false, "one_per_item": false,
+  "locked_to_address": false, "address_wait_seconds": 90,
+  "send_app_name": false, "app_name": "",
+  "share_lists": false, "share_minutes": 10,
+  "limit_movie_speed": false, "movie_mbps": 100
+}
+```
+
+</details>
 
 ## Choosing the VPN server
 

@@ -320,6 +320,16 @@ func (l *launcher) pickServer(why string, asked bool) {
 	if s == nil {
 		return
 	}
+	l.mu.Lock()
+	named := l.pick.Key == pickKey(s.vpnEnv()) && l.pick.Env != ""
+	l.mu.Unlock()
+	// With a provider locked to one address, a server once chosen is changed only from the page
+	// (locked_to_address). The first choice is still made: until a server is named, gluetun takes one of the
+	// city's servers at random at every start of the VPN, and a new address with it.
+	if !asked && s.addressLocked() && named {
+		say("VPN server: %s, but a provider is set to lock the account to one address, so Coaxial does not change server on its own", why)
+		return
+	}
 	env := s.vpnEnv()
 	key := pickKey(env)
 	l.optionsNow()
@@ -519,7 +529,7 @@ func (l *launcher) pickStatus() map[string]any {
 		why = "city" // no city is picked
 	}
 	return map[string]any{"name": l.pick.Name, "mbps": l.pick.Mbps, "out_of_order": l.pick.OFO, "of": l.pick.Of, "at": l.pick.At,
-		"testing": l.pickBusy, "possible": possible, "why_not": why, "most": pickMost}
+		"testing": l.pickBusy, "possible": possible, "why_not": why, "most": pickMost, "locked": l.set.addressLocked()}
 }
 
 // apiPick: "find the fastest server now", asked for from the page. It answers at once; the trying goes on
