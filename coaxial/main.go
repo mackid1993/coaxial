@@ -1137,6 +1137,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 		} else {
 			first = false
 		}
+		delete(holds, h) // (counted as the channel from here on)
 	}
 	if allReaders() >= readersMax {
 		if first {
