@@ -49,7 +49,6 @@ type front struct {
 	shareFor            float64 // seconds a list or the guide is shared (0: not shared)
 	movieRate           float64 // bytes a second for a movie or an episode (0: as fast as it comes)
 
-	plays map[string]float64 // device and stream -> when it was last in use (see resumes) (mu)
 }
 
 // route: what the front door worked out about one request, for the relay. Nothing in it comes from a header.

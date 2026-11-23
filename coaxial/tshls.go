@@ -508,25 +508,31 @@ func tableStart(body []byte) []byte {
 
 // pickStream: the video stream of a PMT section, or else its first audio stream.
 func pickStream(s []byte) int {
+	pid, _ := pickType(s)
+	return pid
+}
+
+// pickType: pickStream, and its stream type.
+func pickType(s []byte) (int, byte) {
 	if len(s) < 12 {
-		return -1
+		return -1, 0
 	}
 	end := min(len(s)-4, 3+(int(s[1]&0x0f)<<8|int(s[2]))-4) // (minus the CRC)
 	i := 12 + (int(s[10]&0x0f)<<8 | int(s[11]))
-	audio := -1
+	audio, audioType := -1, byte(0)
 	for i+5 <= end {
 		typ, pid, info := s[i], int(s[i+1]&0x1f)<<8|int(s[i+2]), int(s[i+3]&0x0f)<<8|int(s[i+4])
 		switch typ {
 		case 0x01, 0x02, 0x10, 0x1b, 0x24, 0x42, 0xea:
-			return pid
+			return pid, typ
 		case 0x03, 0x04, 0x0f, 0x11, 0x81, 0x87:
 			if audio < 0 {
-				audio = pid
+				audio, audioType = pid, typ
 			}
 		}
 		i += 5 + info
 	}
-	return audio
+	return audio, audioType
 }
 
 // pesPTS: the presentation time, in seconds, of a PES packet that starts in this payload.

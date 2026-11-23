@@ -50,3 +50,32 @@ func TestHLSPieceNumberedAfresh(t *testing.T) {
 		t.Errorf("after the discontinuity readers see %+v", got)
 	}
 }
+
+// tablePkt: a PAT (pid 0) or PMT packet with a good CRC.
+func tablePkt(pid int, section []byte) []byte {
+	c := crcMPEG(section)
+	return cutPkt(pid, true, nil, append(append([]byte{0}, section...), byte(c>>24), byte(c>>16), byte(c>>8), byte(c)))
+}
+
+// progPkts: a stream whose program table is on pmt and lists es (type, PID), its clock on pcr (on a PID of
+// its own: clock-only packets there), a few packets of each stream.
+func progPkts(pmt, pcr int, es ...[2]int) []byte {
+	pat := tablePkt(0, []byte{0x00, 0xb0, 13, 0, 1, 0xc1, 0, 0, 0, 1, 0xe0 | byte(pmt>>8), byte(pmt)})
+	sec := []byte{0x02, 0xb0, 0, 0, 1, 0xc1, 0, 0, 0xe0 | byte(pcr>>8), byte(pcr), 0xf0, 0}
+	for _, e := range es {
+		sec = append(sec, byte(e[0]), 0xe0|byte(e[1]>>8), byte(e[1]), 0xf0, 0)
+	}
+	sec[2] = byte(len(sec) - 3 + 4)
+	out := append(append([]byte{}, pat...), tablePkt(pmt, sec)...)
+	for k := 0; k < 20; k++ {
+		if pcr != es[0][1] { // a clock-only packet (an adaptation field and no payload)
+			p := splicePkts(pcr, 40+0.04*float64(k), 1)
+			p[3], p[4] = 0x20, 183
+			out = append(out, p...)
+		}
+		for _, e := range es {
+			out = append(out, cutPkt(e[1], k == 0, nil, []byte{0, 0, 1, 0xe0})...)
+		}
+	}
+	return out
+}

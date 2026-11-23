@@ -690,6 +690,7 @@ func (l *launcher) apiSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		s.keepSecrets(old)
 		if errs := s.validate(); len(errs) > 0 {
+			s.whyNoPassword(old, errs)
 			fail(400, errs...)
 			return
 		}

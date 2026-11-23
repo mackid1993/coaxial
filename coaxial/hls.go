@@ -209,7 +209,7 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 		var last int64
 		hasLast, misses, lost, got, fresh := false, 0, 0, 0.0, mono()
 		// the numbers readers were handed first; a piece numbered afresh (after a discontinuity: another
-		// packager, an advert) is handed on under them, as a TS stream asked for again is (see renumber.go)
+		// packager, an advert) is handed on under them (see renumber.go)
 		var pub numbering
 		var rn *renumber
 		var sent []string // names of the newest 60 pieces

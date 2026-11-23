@@ -532,6 +532,28 @@ func (s *settings) keepSecrets(old *settings) {
 	}
 }
 
+// whyNoPassword: a provider still without a password after keepSecrets because its address changed is told
+// so, instead of only being asked for one (the page shows the saved password as "Saved").
+func (s *settings) whyNoPassword(old *settings, errs []fieldError) {
+	if old == nil {
+		return
+	}
+	for i, p := range s.Providers {
+		if p.Password != "" {
+			continue
+		}
+		for _, o := range old.Providers {
+			if o.Password != "" && !sameServer(o.URL, p.URL) && (strings.EqualFold(o.Name, p.Name) || o.User == p.User) {
+				for j := range errs {
+					if errs[j].Field == "providers["+strconv.Itoa(i)+"].password" {
+						errs[j].Message = "the address changed, so the saved password is not sent to it: type the password again"
+					}
+				}
+			}
+		}
+	}
+}
+
 // addressLocked: whether any provider locks its account to one address (locked_to_address): the VPN server
 // is then never changed on Coaxial's own.
 func (s *settings) addressLocked() bool {

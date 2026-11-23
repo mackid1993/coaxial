@@ -1,14 +1,12 @@
 package main
 
-import (
-	"math"
-	"slices"
-)
+import "slices"
 
-// A provider asked for again may send the channel numbered afresh (another server): its program table and its
-// streams on other PIDs. Players and recorders read a program's numbers when they start: ffmpeg, and the media
-// servers and players built on it, took the new numbers for new streams and showed and recorded nothing more
-// after such a splice. So a stream asked for again is handed on under the numbers the readers were given.
+// HLS pieces after a discontinuity (another packager, an advert) may come numbered afresh: their program table
+// and their streams on other PIDs. Players and recorders read a program's numbers when they start: ffmpeg, and
+// the media servers and players built on it, took the new numbers for new streams and showed and recorded
+// nothing more. So MPEG-TS made from a provider's HLS is handed on under the numbers the readers were given
+// (hls.go). A provider's own MPEG-TS stream is passed on as it is.
 
 // numbering: a stream's numbers: its program table's PID, its clock's, and each stream's type and PID in order;
 // and the program tables of the other programs its PAT lists.
@@ -16,16 +14,6 @@ type numbering struct {
 	pmt, pcr int
 	es       [][2]int
 	others   []int
-}
-
-// video: the PID of its video stream (-1: none).
-func (n numbering) video() int {
-	for _, e := range n.es {
-		if slices.Contains([]int{0x01, 0x02, 0x10, 0x1b, 0x24, 0x42, 0xea}, e[0]) {
-			return e[1]
-		}
-	}
-	return -1
 }
 
 // programOf: the numbering of the first program in buf (a PAT, then its PMT).
@@ -57,30 +45,6 @@ func programOf(buf []byte) (numbering, bool) {
 		}
 	}
 	return numbering{}, false
-}
-
-// programDue: whether a stream asked for again is numbered afresh (a stream on a PID the readers were not
-// given) and its program table has not come yet, in its first keyWait seconds from at, where it joins. Its
-// numbers are put back once the table says what is what: joined before it (a provider that sends its tables
-// seconds after the video), every packet went on under the new numbers, and a recorder stopped there for good.
-func programDue(b []byte, at int, pub numbering) bool {
-	if _, ok := programOf(b); ok || pub.es == nil {
-		return false
-	}
-	afresh, first, newest := false, -1.0, -1.0
-	for i := at + cleanStart(b[at:]); i+188 <= len(b) && b[i] == 0x47; i += 188 {
-		pid := int(b[i+1]&0x1f)<<8 | int(b[i+2])
-		if pid >= 0x20 && pid != 0x1fff && pid != pub.pmt && pid != pub.pcr && !slices.ContainsFunc(pub.es, func(e [2]int) bool { return e[1] == pid }) {
-			afresh = true
-		}
-		if p := b[i : i+188]; p[3]&0x20 != 0 && p[4] >= 7 && p[5]&0x10 != 0 {
-			newest = float64(int64(p[6])<<25|int64(p[7])<<17|int64(p[8])<<9|int64(p[9])<<1|int64(p[10])>>7) / 90000
-			if first < 0 {
-				first = newest
-			}
-		}
-	}
-	return afresh && math.Abs(newest-first) < keyWait
 }
 
 // renumber: a stream's PIDs put back to the readers' ones.

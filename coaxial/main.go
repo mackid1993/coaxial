@@ -46,8 +46,8 @@ const (
 	ringMax       = 64 << 20         // ...nor more than this
 	burstSeconds  = 2.5              // the provider's opening burst is measured over this and logged
 	reopenAfter   = 30               // a stream that ran this long and ended while watched is asked for again
-	keyWait       = 5                // seconds of a stream asked for again searched for a keyframe to join at (renumber.go)
 	reopenWait    = 5                // seconds to answer when asked again (twice that to send video)
+	keyWait       = 12               // seconds of a stream asked for again searched for a keyframe (see spliceAt)
 	dropGap       = 0.1              // time a provider gets to see a hang-up before another channel is asked for
 	linger        = 0.4              // a channel in its first seconds is kept this long after its last reader (tuning)
 	readersMax    = 100              // readers served at once, all channels together
@@ -354,36 +354,82 @@ func keyStart(buf []byte) int {
 	return at
 }
 
-// keyFound: keyStart, and whether a keyframe was found.
+// keyFound: keyStart, and whether a keyframe was found. A keyframe is a video frame marked as one, or, in
+// H.264 or HEVC, a frame not marked whose first picture is one a decoder can start at (see keyNAL), the way
+// players find them in streams that mark none.
 func keyFound(buf []byte) (int, bool) {
 	start := cleanStart(buf)
-	pmtPID, vid, lastPAT := -1, -1, -1
+	pmtPID, vid, typ, lastPAT := -1, -1, byte(0), -1
+	var es []byte // the start of an unmarked frame, read for its first picture
+	esPAT := -1
 	for i := start; i+188 <= len(buf) && buf[i] == 0x47; i += 188 {
 		pkt := buf[i : i+188]
 		pid, afc, off, rai := int(pkt[1]&0x1f)<<8|int(pkt[2]), pkt[3]>>4&3, 4, false
 		if afc&2 != 0 {
 			rai, off = pkt[4] > 0 && pkt[5]&0x40 != 0, 5+int(pkt[4])
 		}
-		if afc&1 == 0 || off >= 188 || pkt[1]&0x40 == 0 {
+		if afc&1 == 0 || off >= 188 {
 			continue
 		}
-		switch body := pkt[off:]; {
+		body := pkt[off:]
+		if pid == vid && es != nil && pkt[1]&0x40 == 0 { // the frame goes on: read on, about two packets more
+			es = append(es, body...)
+			if key, done := keyNAL(es, typ); key {
+				return esPAT, true
+			} else if done || len(es) > 2*184 {
+				es = nil
+			}
+		}
+		if pkt[1]&0x40 == 0 {
+			continue
+		}
+		switch {
 		case pid == 0:
 			lastPAT = i
 			if pmt := patPMT(tableStart(body)); pmt >= 0 {
 				pmtPID = pmt
 			}
 		case pid == pmtPID && vid < 0:
-			vid = pickStream(tableStart(body))
+			vid, typ = pickType(tableStart(body))
 		case pid == vid && rai && lastPAT >= 0:
 			return lastPAT, true
+		case pid == vid:
+			es = nil
+			if lastPAT >= 0 && len(body) >= 9 && body[0] == 0 && body[1] == 0 && body[2] == 1 {
+				es, esPAT = append([]byte{}, body[min(len(body), 9+int(body[8])):]...), lastPAT
+				if key, done := keyNAL(es, typ); key {
+					return esPAT, true
+				} else if done {
+					es = nil
+				}
+			}
 		}
 	}
 	return start, false
 }
 
+// keyNAL: whether the first picture in the start of a frame (es) is one a decoder can start at: in H.264
+// (stream type 0x1b) an IDR picture, in HEVC (0x24) an IRAP picture (BLA, IDR or CRA). done: a picture
+// was found (or the stream is neither), so reading on cannot change the answer.
+func keyNAL(es []byte, typ byte) (key, done bool) {
+	if typ != 0x1b && typ != 0x24 {
+		return false, true
+	}
+	for i := 0; i+3 < len(es); i++ {
+		if es[i] != 0 || es[i+1] != 0 || es[i+2] != 1 {
+			continue
+		}
+		if n := es[i+3]; typ == 0x1b && n&0x1f >= 1 && n&0x1f <= 5 { // a picture: IDR is 5
+			return n&0x1f == 5, true
+		} else if t := n >> 1 & 0x3f; typ == 0x24 && t <= 31 { // a picture: IRAP is 16 to 21
+			return t >= 16 && t <= 21, true
+		}
+	}
+	return false, false
+}
+
 // lastPCR: the last program clock reference in b on the given stream (-1: the first one that carries one).
-func lastPCR(b []byte, want int) (int, float64, int, bool) {
+func lastPCR(b []byte, want int) (int, float64, bool) {
 	start := -1
 	for i := 0; i+376 < len(b); i++ {
 		if b[i] == 0x47 && b[i+188] == 0x47 && b[i+376] == 0x47 {
@@ -391,7 +437,7 @@ func lastPCR(b []byte, want int) (int, float64, int, bool) {
 			break
 		}
 	}
-	pid, v, at, ok := want, 0.0, 0, false
+	pid, v, ok := want, 0.0, false
 	for i := start; start >= 0 && i+188 <= len(b) && b[i] == 0x47; i += 188 {
 		p := b[i : i+188]
 		id := int(p[1]&0x1f)<<8 | int(p[2])
@@ -400,81 +446,16 @@ func lastPCR(b []byte, want int) (int, float64, int, bool) {
 		}
 		pid = id
 		v = float64(int64(p[6])<<25|int64(p[7])<<17|int64(p[8])<<9|int64(p[9])<<1|int64(p[10])>>7) / 90000
-		at, ok = i, true
+		ok = true
 	}
-	return pid, v, at, ok
-}
-
-func resumeAt(buf []byte, clock float64, past int, last, video []byte) (int, bool) {
-	if clock < 0 {
-		return 0, false
-	}
-	place := func(at int) bool {
-		return (last == nil || samePacket(buf[at-188:at], last)) && (video == nil || lastOf(buf[:at], video))
-	}
-	for i := cleanStart(buf); i+188 <= len(buf) && buf[i] == 0x47; i += 188 {
-		if p := buf[i : i+188]; p[3]&0x20 != 0 && p[4] >= 7 && p[5]&0x10 != 0 &&
-			float64(int64(p[6])<<25|int64(p[7])<<17|int64(p[8])<<9|int64(p[9])<<1|int64(p[10])>>7)/90000 == clock {
-			at := i + past // (past is whole packets: see whole)
-			if at > len(buf) {
-				return at, true
-			}
-			if place(at) {
-				return at, true
-			}
-			end := i + 2*past + 188*64
-			for k := i; k+188 <= min(len(buf), end); k += 188 {
-				if place(k + 188) {
-					return k + 188, true
-				}
-			}
-			if end > len(buf) {
-				return len(buf) + 188, true // (not come yet)
-			}
-		}
-	}
-	return 0, false
-}
-
-func lastOf(b, p []byte) bool {
-	after := map[int]bool{}
-	for i := len(b) - 188; i >= 0 && b[i] == 0x47; i -= 188 {
-		pid := int(b[i+1]&0x1f)<<8 | int(b[i+2])
-		if samePacket(b[i:i+188], p) {
-			return !after[pid]
-		}
-		after[pid] = true
-	}
-	return false
-}
-
-func samePacket(a, b []byte) bool {
-	return len(a) == 188 && len(b) == 188 && a[0] == b[0] && a[1]&0xe0 == b[1]&0xe0 && a[3]&0xf0 == b[3]&0xf0 && bytes.Equal(a[4:], b[4:])
-}
-
-func whole(b []byte) (pkts, rest []byte) {
-	out, i := b[:0], 0
-	for i+376 <= len(b) {
-		if b[i] == 0x47 && b[i+188] == 0x47 {
-			out, i = append(out, b[i:i+188]...), i+188
-			continue
-		}
-		j := bytes.IndexByte(b[i+1:], 0x47) // (out of step: the next place a packet can begin)
-		if j < 0 {
-			return out, nil
-		}
-		i += 1 + j
-	}
-	if j := bytes.IndexByte(b[i:], 0x47); j >= 0 {
-		return out, append([]byte(nil), b[i+j:]...)
-	}
-	return out, nil
+	return pid, v, ok
 }
 
 // spliceAt: where a stream the provider sent again joins on to the old one. A provider asked again starts
 // with its opening burst, seconds of video from before where the old stream stopped; passed on, the
 // stream's clock ran backwards and players froze on it. So the new stream joins at its first keyframe
-// whose clock is past the last clock passed on (pid, clock). ok=false: not there yet (wait for more).
+// whose clock is past the last clock passed on (pid, clock), or, if it has none within keyWait seconds past
+// that clock, where its clock passed it. ok=false: not there yet (wait for more).
 // A clock far from the old one (another clock entirely) is not compared: it joins at once.
 func spliceAt(buf []byte, pid int, clock float64) (int, bool) {
 	start := cleanStart(buf)
@@ -483,7 +464,7 @@ func spliceAt(buf []byte, pid int, clock float64) (int, bool) {
 	}
 	seen := false
 	for i := start; i+188 <= len(buf) && buf[i] == 0x47; i += 188 {
-		_, v, _, ok := lastPCR(buf[i:min(len(buf), i+188*3)], pid)
+		_, v, ok := lastPCR(buf[i:min(len(buf), i+188*3)], pid)
 		if !ok || (i+188*3 > len(buf)) {
 			continue
 		}
@@ -493,6 +474,11 @@ func spliceAt(buf []byte, pid int, clock float64) (int, bool) {
 		seen = true
 		if v > clock {
 			at, found := keyFound(buf[i:])
+			if !found {
+				if _, last, _ := lastPCR(buf[i:], pid); last-clock >= keyWait {
+					return i, true
+				}
+			}
 			return i + at, found
 		}
 	}
@@ -901,7 +887,7 @@ func tsSource(target string, h http.Header) source {
 						}
 					}
 					if len(data) > 0 {
-						if p, v, _, ok := lastPCR(data, clockPID); ok {
+						if p, v, ok := lastPCR(data, clockPID); ok {
 							clockPID, clock = p, v
 						}
 						got = true

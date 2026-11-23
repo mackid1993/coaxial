@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// An update that could not be fetched (here: its layer does not match its digest) is not tried again by
-// itself: otherwise the VPN is started again after every 10 quiet minutes, all night.
+// An update whose download arrives damaged (its layer does not match its digest): the VPN stays on the build it
+// had, the page still offers the newer one (Update now installs it), and it is not tried again by itself, which
+// would start the VPN again after every 10 quiet minutes, all night.
 func TestFailedUpdateNotRetriedByItself(t *testing.T) {
 	f := newFakeRegistry(t)
 	oldRegs, oldTry, oldWait := registries, tryProgram, updateWait
@@ -26,6 +27,9 @@ func TestFailedUpdateNotRetriedByItself(t *testing.T) {
 	l.autoUpdate()
 	if l.prog.Digest == f.index {
 		t.Fatalf("the spoiled build was installed")
+	}
+	if u := l.programUpdate(); u["available"] != true {
+		t.Errorf("the page no longer offers the newer build: %v", u)
 	}
 	if l.updFailed != f.index {
 		t.Errorf("the update that could not be fetched is not noted: %q", l.updFailed)

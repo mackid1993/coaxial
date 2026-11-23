@@ -268,7 +268,6 @@ func (h *hold) release() {
 	if now := mono(); h.moved && h.cutAt == 0 && h.until == 0 {
 		h.f.keepFor(h.who, h.w, now+followUpHold)
 	}
-	h.f.played(h.who, h.w, mono())
 	mu.Unlock()
 }
 
@@ -570,49 +569,13 @@ func lockLeft(locked bool, wait, changed, now float64) float64 {
 	return math.Max(0, changed+wait-now)
 }
 
-// resumeBefore: seconds before the VPN changed address in which a device's stream counts as playing then (the
-// change is seen only once the VPN is back up; the stream broke when it went down).
-const resumeBefore = 300.0
-
-// played: device who's stream w was in use at t. (mu held)
-func (f *front) played(who string, w what, t float64) {
-	if w.kind == "" || isLoop(who) {
-		return
-	}
-	if f.plays == nil {
-		f.plays = map[string]float64{}
-	}
-	if len(f.plays) > 1000 {
-		for k, at := range f.plays {
-			if t-at > 3600 {
-				delete(f.plays, k)
-			}
-		}
-	}
-	f.plays[who+" "+w.kind+" "+strings.TrimLeft(w.item, "0")] = t
-}
-
-// resumes: device who was playing w when the VPN changed address (a film the change broke, asked for again to
-// go on): while new streams wait for the provider to let go of the old address, this one takes the place of
-// its own old session there, as a live channel's reconnect does. Anything else, or another device, waits. (mu held)
-func (f *front) resumes(who string, w what) bool {
-	if w.kind == "" || isLoop(who) {
-		return false
-	}
-	for h := range holds {
-		if h.f == f && h.until == 0 && h.who == who && same(h.w, w) && h.at < vpnChanged {
-			return true
-		}
-	}
-	at, ok := f.plays[who+" "+w.kind+" "+strings.TrimLeft(w.item, "0")]
-	return ok && at >= vpnChanged-resumeBefore
-}
-
 // decide: whether device who may open a new connection to this provider for w now. What it replaces it cuts
-// here. follow: w continues a request already admitted (it is never refused at the limit, only room is made;
-// another device on the same channel or item still refuses it: the provider would end that one). (mu held)
+// here. follow: w continues a request already admitted (a redirect of it, asked for at the address the player
+// was sent to). It takes the place kept for it, and is otherwise a new connection like any other: the device's
+// own connections make room, and at the limit, or with another device on the same channel or item, it is
+// refused (the provider would end someone's stream). It waits after an address change like any other. (mu held)
 func (f *front) decide(who string, w what, follow bool, now float64) (verdict, string) {
-	if left := lockLeft(f.locked, f.lockWait, vpnChanged, now); left > 0 && !follow && !f.resumes(who, w) {
+	if left := lockLeft(f.locked, f.lockWait, vpnChanged, now); left > 0 {
 		if left > 5 {
 			return refuseNow, "lock"
 		}
@@ -685,9 +648,8 @@ func (f *front) decide(who string, w what, follow bool, now float64) (verdict, s
 				return waitNow, ""
 			case closing:
 				return waitNow, ""
-			case !follow:
-				return refuseNow, "limit"
 			}
+			return refuseNow, "limit"
 		}
 	}
 	return admitNow, ""
@@ -743,7 +705,6 @@ func (f *front) admit(ctx context.Context, who string, w what, follow bool, key 
 			if follow {
 				f.keepFor(who, w, 0) // (the place kept for it is taken)
 			}
-			f.played(who, w, h.at)
 			mu.Unlock()
 			return h, ""
 		}
@@ -835,7 +796,7 @@ type followUp struct {
 var followUps = map[string]*followUp{} // port and the address given to the player -> what it continues
 
 // followUpHold: seconds the place of a request answered with a redirect is kept for its device's request to the
-// address it was sent on to: another device taking it in between would put one stream too many at the provider. (mu)
+// address it was sent on to: another device taking it in between would leave the follow-up refused. (mu)
 var followUpHold = 10.0
 
 // remember: a redirect of an admitted request, to the address the player was given. (mu held)

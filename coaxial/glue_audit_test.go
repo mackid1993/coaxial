@@ -5,23 +5,22 @@ import (
 	"time"
 )
 
-// A live channel's admission hold ends once the channel counts it. A first reader still connected after its
-// channel was let go (a paused player whose queue has not drained) must not count as a second connection.
+// A live channel's admission hold ends once the channel counts it. A player that opened a channel and paused
+// (it reads no more, its handler stays on) is one connection at the provider, not two: at an account that
+// allows 2, another device still opens a channel of its own.
 func TestLiveHoldNotKeptAfterOpen(t *testing.T) {
 	fp := newFakeProv(t, false, nil)
-	f, base := advFront(t, fp, "ts", advanced{Connections: "2"})
-	a := ask(t, base, "192.0.2.1", "/live/tv/easy/12.ts") // read a little, then not read: a paused player
+	_, base := advFront(t, fp, "ts", advanced{Connections: "2"})
+	a := ask(t, base, "192.0.2.1", "/live/tv/easy/931.ts") // read a little, then not read: a paused player
 	defer a.Body.Close()
-	mu.Lock()
-	n := 0
-	for h := range holds {
-		if h.f == f && !h.shared && h.until == 0 {
-			n++
-		}
+	time.Sleep(time.Second)
+	b := ask(t, base, "192.0.2.2", "/live/tv/easy/932.ts")
+	defer b.Body.Close()
+	if b.StatusCode != 200 {
+		t.Errorf("another device at an account that allows 2, one channel open: %d", b.StatusCode)
 	}
-	mu.Unlock()
-	if n != 0 {
-		t.Errorf("%d live admission hold(s) still held while the channel is open", n)
+	if n := fp.count(fp.most, ""); n != 2 {
+		t.Errorf("the provider saw %d streams at once, want 2", n)
 	}
 }
 
