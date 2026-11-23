@@ -220,7 +220,7 @@ under `Advanced options` on each provider in Settings, and under `advanced` in t
 - **My provider locks my account to one address** (`locked_to_address`, off). Coaxial does not switch VPN servers on its
   own, and after a switch new streams wait `address_wait_seconds` (90) so the provider can let go of the old address.
 - **Send an app name to my provider** (`send_app_name`, off). Every request to the provider names the app in `app_name`
-  instead of the player's own. The page lists common player apps, VLC first, and `Custom...` for any other name. Plain
+  instead of the player's own. The page lists common player apps, each written the way that app really sends it, and `Custom...` for any other name. Plain
   text, up to 200 characters.
 - **Share list and guide downloads** (`share_lists`, off). The channel lists and the guide are downloaded once and the
   same copy goes to every TV for `share_minutes` (10).

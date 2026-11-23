@@ -85,6 +85,7 @@ type launcher struct {
 	ctlKey           string // for gluetun's control page, made up at each start of the VPN ("" = set by the user: not ours to use)
 	vpnUp            bool
 	vpnUpAt          time.Time // when the VPN last came up (handed to the proxy part: see locked_to_address)
+	limits           string    // the connections each provider account allows, as the proxy part learned them (see learned)
 	vpnLink          int       // the index of the VPN's interface when last seen up (0: not known)
 	vpnNote          string
 	ui               *http.Server
@@ -381,6 +382,11 @@ func (l *launcher) stopProxy() {
 	l.proxy = nil
 	l.mu.Unlock()
 	if c != nil {
+		if data, ok := askProxy("/limits", 2*time.Second); ok { // (kept for its next start)
+			l.mu.Lock()
+			l.limits = learned(l.limits + "," + string(data)) // (the newer value wins; the launcher runs no provider itself)
+			l.mu.Unlock()
+		}
 		say("stopping the proxy part")
 		l.stop(c, 3*time.Second)
 	}
@@ -405,6 +411,9 @@ func (l *launcher) startProxy() {
 	l.mu.Lock()
 	if !l.vpnUpAt.IsZero() {
 		cmd.Env = append(cmd.Env, "COAXIAL_VPN_UP_AT="+strconv.FormatInt(l.vpnUpAt.Unix(), 10))
+	}
+	if l.limits != "" {
+		cmd.Env = append(cmd.Env, "COAXIAL_LIMITS="+l.limits)
 	}
 	l.mu.Unlock()
 	if tz := os.Getenv("TZ"); tz != "" {

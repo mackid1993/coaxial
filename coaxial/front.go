@@ -48,6 +48,8 @@ type front struct {
 	app                 string  // the User-Agent sent to the provider ("": each player's own)
 	shareFor            float64 // seconds a list or the guide is shared (0: not shared)
 	movieRate           float64 // bytes a second for a movie or an episode (0: as fast as it comes)
+
+	plays map[string]float64 // device and stream -> when it was last in use (see resumes) (mu)
 }
 
 // route: what the front door worked out about one request, for the relay. Nothing in it comes from a header.
@@ -96,7 +98,7 @@ func newFront(p provider, pl player) *front {
 		loginPath:  regexp.MustCompile(`^/+(live|movie|series|timeshift)/+` + pu + `/+` + pp + `/+(.*)$`),
 		loginShort: regexp.MustCompile(`^/+` + pu + `/+` + pp + `/+([^/]+)$`),
 		loginAny:   regexp.MustCompile(`^(/+[^_/][^/]*(?:/+[^/]+)*?)/+` + pu + `/+` + pp + `/+(.+)$`),
-		chLogin:    regexp.MustCompile(`^/__ch(/+(?:live/+)?)` + pu + `/+` + pp + `/+(.+?\.m3u8)/`),
+		chLogin:    regexp.MustCompile(`^/__ch(/+(?:(?:live|movie|series|timeshift)/+)?)` + pu + `/+` + pp + `/+(.+?\.m3u8)/`),
 		// (live channels are numbered: anything else under /live/, such as a piece a provider's playlist
 		// names next to itself, is passed on to the provider, not opened as a channel)
 		liveTS: regexp.MustCompile(`^/+(live/+` + pu + `/+` + pp + `/+[0-9]+\.ts|` + pu + `/+` + pp + `/+[0-9]+(\.ts)?)$`),
@@ -435,10 +437,10 @@ func (f *front) serve(c *counted, r *http.Request) {
 	default: // everything else (movies, series, catch-up, account): straight to the provider
 		c.kind, c.server = "media", f.hostport
 		mu.Lock()
-		f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session on the provider's own server)
+		part := f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session on the provider's own server)
 		mu.Unlock()
 		w, follow := f.followed(r)
-		if !follow {
+		if !follow && !part { // (a piece is counted with its session, not as a stream of its own)
 			w = f.classify(r.URL)
 		}
 		f.stream(c, r, w, follow, f.base+up, f.scheme, f.hostport, false)
@@ -749,8 +751,10 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 	}
 	var servers []*http.Server
 	var listeners []net.Listener
+	carried := learnedBefore(os.Getenv("COAXIAL_LIMITS")) // (what the providers reported before this start)
 	for _, p := range good {
 		f := newFront(p, s.Player)
+		f.reported = carried[f.account()]
 		ln, err := net.Listen("tcp", ":"+f.port)
 		// A save can move the web interface off a port and a provider onto it: the launcher lets the old port go
 		// a moment after this part has started. That moment is waited for (a few seconds at most).

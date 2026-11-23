@@ -405,6 +405,36 @@ type session struct {
 	who        map[string]float64 // device -> its last playlist request
 	pieces     map[string]bool    // the addresses its playlist last gave the players (see inUse)
 	owner      *front             // the provider account it is opened for (see conns in advanced.go)
+	target     float64            // its playlist's target duration (0: not known yet)
+}
+
+var targetRe = regexp.MustCompile(`(?m)^\s*#EXT-X-TARGETDURATION:\s*([0-9]+(?:\.[0-9]*)?)`)
+
+// note: what a playlist of the session says about it: its target duration, which players wait between
+// asks for it (at most a minute is taken from it). (mu held)
+func (s *session) note(data []byte) {
+	if m := targetRe.FindSubmatch(data); m != nil {
+		if t, err := strconv.ParseFloat(string(m[1]), 64); err == nil && t > 0 {
+			s.target = math.Min(t, 60)
+		}
+	}
+}
+
+// held: how long after its last request the session still counts as a connection; idle: how long until it
+// is the first let go of. Players ask for a playlist about once a target duration, so a playlist with long
+// pieces is asked for less often: three and two target durations, never less than hlsHeld and hlsIdle.
+func (s *session) held() float64 { return math.Max(hlsHeld, 3*s.target) }
+func (s *session) idle() float64 { return math.Max(hlsIdle, 2*s.target) }
+
+// playlistPieces: the addresses a playlist as given to the players names.
+func playlistPieces(text string) map[string]bool {
+	pieces := map[string]bool{}
+	for _, line := range strings.Split(text, "\n") {
+		if a := strings.TrimSpace(line); a != "" && !strings.HasPrefix(a, "#") {
+			pieces[a] = true
+		}
+	}
+	return pieces
 }
 
 type hlsRow struct {
@@ -571,7 +601,7 @@ func fetchShared(ctx context.Context, target string, h http.Header, wait float64
 func forgetIdle() { // (mu held)
 	now := mono()
 	for k, s := range sessions {
-		if now-s.used > 60 {
+		if now-s.used > math.Max(60, s.held()) {
 			delete(sessions, k)
 		}
 	}
@@ -648,6 +678,28 @@ func openChannel(key, target string, h http.Header, renewFrom string) (*session,
 	return nil, &direct{r.StatusCode, r.Header, data}, err
 }
 
+// keepDirect: a catch-up playlist the provider answered itself, without sending it elsewhere. It is complete and
+// asked for once, so a session of its own counts it at the provider while its pieces are read (see inUse); it is
+// kept apart from the channel's key, so the next ask for the playlist goes to the provider as before.
+func (f *front) keepDirect(key, target, who string, want what, data []byte) {
+	if !bytes.Contains(data[:min(len(data), 1024)], []byte("#EXTM")) {
+		return // (not a playlist: nothing it names is read)
+	}
+	text, err := rewritePlaylist(string(data), target, f)
+	if err != nil {
+		return
+	}
+	s := &session{loc: target, final: target, used: mono(), opened: mono(), what: want, who: map[string]float64{},
+		pieces: playlistPieces(text), owner: f}
+	s.note(data)
+	if !isLoop(who) {
+		s.who[who] = mono()
+	}
+	mu.Lock()
+	sessions[key+" direct"] = s
+	mu.Unlock()
+}
+
 func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	provider, uri, orig, port := rt.f.base, rt.uri, rt.orig, rt.f.port
 	mu.Lock()
@@ -676,7 +728,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			m[3] = "/"
 		}
 		mu.Lock()
-		rt.f.variant(strings.ToLower(m[1])+"://"+m[2]+m[3], rt.client)
+		vs := rt.f.variant(strings.ToLower(m[1])+"://"+m[2]+m[3], rt.client)
 		mu.Unlock()
 		resp, final, err := fetchShared(ctx, strings.ToLower(m[1])+"://"+m[2]+m[3]+q, h, playlistWait)
 		if err != nil {
@@ -685,6 +737,11 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		data, err := readAll(resp, 4<<20, playlistWait)
 		if err != nil {
 			return err
+		}
+		if vs != nil && resp.StatusCode == 200 { // (the variant's pieces set how often it is asked for)
+			mu.Lock()
+			vs.note(data)
+			mu.Unlock()
 		}
 		return servePlaylist(w, resp.StatusCode, resp.Header, data, final, rt.f, film)
 	}
@@ -713,9 +770,13 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	}
 	mu.Lock()
 	s := sessions[key]
-	back := s != nil && mono()-s.used > hlsHeld // (it no longer counts: its connection may be someone else's now)
+	back := s != nil && mono()-s.used > s.held() // (it no longer counts: its connection may be someone else's now)
 	// (a variant's own playlist, named in the playlist of a session that is open: that session goes on)
-	of := s == nil && want.kind == "" && rt.f.variant(provider+strings.SplitN(uri, "?", 2)[0], who)
+	var vs *session
+	if s == nil && want.kind == "" {
+		vs = rt.f.variant(provider+strings.SplitN(uri, "?", 2)[0], who)
+	}
+	of := vs != nil
 	mu.Unlock()
 	if s == nil || back {
 		// A new session at the provider: by the rules it has on (advanced.go). Others asking for the same
@@ -741,6 +802,13 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			if s, d, err = openChannel(key, target, h, ""); err != nil {
 				return err
 			} else if d != nil {
+				if d.status == 200 && of {
+					mu.Lock()
+					vs.note(d.data)
+					mu.Unlock()
+				} else if d.status == 200 && rt.f.catchUpOf(&url.URL{Path: chanOrig, RawQuery: oquery}) != "" {
+					rt.f.keepDirect(key, target, who, want, d.data)
+				}
 				return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film)
 			}
 		}
@@ -787,7 +855,13 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			answer(w, 404, "", "")
 			return nil
 		}
-		w.Header().Set("Location", cdnAddress(u))
+		to := cdnAddress(u)
+		if rt.f.ownServer(u) { // (on the provider's own server: with the easy login, as in the playlist)
+			if p, ok := rt.f.easyForm(u); ok {
+				to = p
+			}
+		}
+		w.Header().Set("Location", to)
 		answer(w, 302, "", "")
 		return nil
 	}
@@ -835,17 +909,13 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	}
 	var pieces map[string]bool
 	if text, err := rewritePlaylist(string(data), final, rt.f); err == nil && status == 200 {
-		pieces = map[string]bool{}
-		for _, line := range strings.Split(text, "\n") {
-			if a := strings.TrimSpace(line); a != "" && !strings.HasPrefix(a, "#") {
-				pieces[a] = true
-			}
-		}
+		pieces = playlistPieces(text)
 	}
 	mu.Lock()
 	s.final = final
 	if status == 200 {
 		s.pieces = pieces
+		s.note(data)
 		hlsSeen[port+chanOrig] = mono()
 		if len(hlsSeen) > 300 {
 			for k, t := range hlsSeen {

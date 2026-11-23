@@ -800,16 +800,16 @@
   // ---------- a provider's advanced options ----------
   // App names offered for "Send an app name": [label, the exact text sent].
   var APPS = [
-    ['VLC', 'VLC/3.0.20 LibVLC/3.0.20'],
-    ['IPTV Smarters Player', 'IPTVSmartersPlayer'],
+    // (each written as the app itself sends it, taken from server logs and the apps' own documentation)
+    ['TiviMate', 'TiviMate/5.2.0 (Linux; Android 11)'],
     ['IPTV Smarters Pro', 'IPTVSmartersPro'],
-    ['XCIPTV', 'XCIPTV'],
-    ['TiviMate', 'TiviMate'],
-    ['OTT Navigator', 'OTT Navigator'],
-    ['Kodi', 'Kodi'],
+    ['VLC', 'VLC/3.0.21 LibVLC/3.0.21'],
+    ['OTT Navigator', 'OTT Navigator/1.7.5.2 (Linux;Android 12)'],
+    ['Kodi (Fire TV)', 'Kodi/21.2 (Linux; Android 9.0; AFTSSS Build/PS7714.5507N) Android TV/9.0.0 Sys_CPU/armv7l App_Bitness/32 Version/21.2-(21.2.0)-Git:20250115-d1a1d48c3c'],
+    ['Apple TV player', 'AppleCoreMedia/1.0.0.23L773 (Apple TV; U; CPU OS 26_6 like Mac OS X; en_us)'],
+    ['Android TV (Chromecast)', 'Dalvik/2.1.0 (Linux; U; Android 12; Chromecast Build/STTE.230615.004)'],
     ['MAG box', 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3'],
-    ['ExoPlayer', 'ExoPlayer'],
-    ['Chrome', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36']
+    ['Chrome (Windows)', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36']
   ];
   function appPreset(name) { for (var k = 0; k < APPS.length; k++) if (APPS[k][1] === name) return k; return -1; }
   var ADV = [
@@ -824,7 +824,7 @@
       help: 'Coaxial will not switch VPN servers on its own, and waits a moment before streaming after a switch.',
       num: { key: 'address_wait_seconds', label: 'Wait after a switch (seconds)', placeholder: '90' } },
     { key: 'send_app_name', name: 'Send an app name to my provider',
-      help: 'Some providers only let certain apps in. Pick the one your provider names, or try VLC, then IPTV Smarters.', app: true },
+      help: 'Some providers only let certain apps in. Pick the one your provider names, or try TiviMate, then IPTV Smarters.', app: true },
     { key: 'share_lists', name: 'Share list and guide downloads',
       help: 'Coaxial downloads the channel list and guide once and hands the same copy to every TV for a few minutes.',
       num: { key: 'share_minutes', label: 'Minutes', placeholder: '10' } },
@@ -916,7 +916,7 @@
       if (more) more.hidden = !sw.checked;
       sw.addEventListener('change', function () {
         a[o.key] = sw.checked;
-        // Turned on for the first time: VLC is picked, the first one to try.
+        // Turned on for the first time: the first app in the list is picked.
         if (o.app && sw.checked && !a.app_name.trim() && !ui.custom) a.app_name = APPS[0][1];
         if (more) { more.hidden = !sw.checked; if (more.paint) more.paint(); }
         if (subPath && !sw.checked) clearError(subPath); // (what is off is not checked)

@@ -22,6 +22,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,6 +31,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,7 +238,7 @@ func isLoop(who string) bool { return who == "127.0.0.1" || who == "::1" } // (t
 const (
 	grace   = 2.0  // seconds a connection cut to make room gets to close before the new one is opened
 	hlsHeld = 30.0 // an HLS session counts as a connection this long after its last playlist request...
-	hlsIdle = 12.0 // ...and once nobody has asked for it for this long, it is the first let go of
+	hlsIdle = 12.0 // ...and once nobody has asked for it for this long, it is the first let go of (both at least, see held)
 )
 
 // hold: a provider connection admitted by the rules that the relay's own tables do not show: a film, an
@@ -248,7 +251,9 @@ type hold struct {
 	at     float64
 	cutAt  float64 // when it was cut to make room (0: it was not)
 	cut    func()
-	shared bool // it joins a channel or session that is open or being opened: counted there
+	shared bool    // it joins a channel or session that is open or being opened: counted there
+	moved  bool    // it was answered with a redirect: its place is kept for the follow-up when it ends
+	until  float64 // the place kept for a follow-up until then (0: it is no such place)
 }
 
 var holds = map[*hold]bool{}
@@ -260,6 +265,10 @@ func (h *hold) release() {
 	}
 	mu.Lock()
 	delete(holds, h)
+	if now := mono(); h.moved && h.cutAt == 0 && h.until == 0 {
+		h.f.keepFor(h.who, h.w, now+followUpHold)
+	}
+	h.f.played(h.who, h.w, mono())
 	mu.Unlock()
 }
 
@@ -280,16 +289,18 @@ type conn struct {
 	idle  bool    // an HLS session nobody asked for in a while
 	cutAt float64 // cut to make room, not closed yet
 	end   func()  // cuts it (mu held)
+	kept  *hold   // the place kept for a redirect's follow-up, when it is that
 }
 
 // open: whether a channel or a session is open now under key, or being opened. A session nobody asked for in
-// hlsHeld no longer counts: whoever comes back to it is a new connection. (mu held)
+// its held time (hlsHeld, or longer for long pieces) no longer counts: whoever comes back to it is a new
+// connection. (mu held)
 func open(key string) bool {
 	if ch := channels[key]; ch != nil && !ch.done {
 		return true
 	}
 	s := sessions[key]
-	return s != nil && mono()-s.used <= hlsHeld
+	return s != nil && mono()-s.used <= s.held()
 }
 
 // conns: every connection held to this provider now. A device joining a channel that is open costs nothing:
@@ -300,12 +311,12 @@ func (f *front) conns() []*conn {
 	var out []*conn
 	live := map[string]*conn{} // live HLS sessions by channel number (a bridge to MPEG-TS rides on its channel's)
 	for k, s := range sessions {
-		if !strings.HasPrefix(k, f.base+" ") || s.owner != nil && s.owner != f || now-s.used > hlsHeld {
+		if !strings.HasPrefix(k, f.base+" ") || s.owner != nil && s.owner != f || now-s.used > s.held() {
 			continue
 		}
-		c := &conn{w: s.what, who: map[string]bool{}, since: s.opened, idle: now-s.used > hlsIdle}
+		c := &conn{w: s.what, who: map[string]bool{}, since: s.opened, idle: now-s.used > s.idle()}
 		for d, t := range s.who {
-			if now-t <= hlsHeld {
+			if now-t <= s.held() {
 				c.who[d] = true
 			}
 		}
@@ -353,6 +364,10 @@ func (f *front) conns() []*conn {
 		out = append(out, c)
 	}
 	for h := range holds {
+		if h.until > 0 && now >= h.until { // (a follow-up that never came)
+			delete(holds, h)
+			continue
+		}
 		if h.f != f || h.shared || (h.key != "" && open(h.key)) {
 			continue
 		}
@@ -364,6 +379,9 @@ func (f *front) conns() []*conn {
 				h.cut()
 			}
 		}
+		if h.until > 0 {
+			c.kept, c.end = h, func() { delete(holds, h) }
+		}
 		out = append(out, c)
 	}
 	return out
@@ -371,8 +389,8 @@ func (f *front) conns() []*conn {
 
 // variant: a playlist at target is a variant named in the playlist of an HLS session of this provider (its
 // own playlist, in the same folder or below): the player asks for that one only, and the session goes on.
-// That session is kept counted for device who. (mu held)
-func (f *front) variant(target, who string) bool {
+// That session is kept counted for device who, and returned (nil: none). (mu held)
+func (f *front) variant(target, who string) *session {
 	for k, s := range sessions {
 		final, _, _ := strings.Cut(s.final, "?")
 		dir := final[:strings.LastIndexByte(final, '/')+1]
@@ -381,24 +399,26 @@ func (f *front) variant(target, who string) bool {
 			if s.who != nil && !isLoop(who) {
 				s.who[who] = mono()
 			}
-			return true
+			return s
 		}
 	}
-	return false
+	return nil
 }
 
 // inUse: a request for an address a session's playlist gave the players (a piece, or a playlist a main
-// playlist names) keeps the session in use, with the device asking on it. A complete playlist (catch-up) is
-// asked for once, and its pieces for as long as it plays. (mu held)
-func (f *front) inUse(uri, who string) {
+// playlist names) keeps the session in use, with the device asking on it, and is part of it: true. A complete
+// playlist (catch-up) is asked for once, and its pieces for as long as it plays. (mu held)
+func (f *front) inUse(uri, who string) bool {
+	part := false
 	for k, s := range sessions {
 		if strings.HasPrefix(k, f.base+" ") && s.pieces[uri] {
-			s.used = mono()
+			s.used, part = mono(), true
 			if s.who != nil && !isLoop(who) {
 				s.who[who] = mono()
 			}
 		}
 	}
+	return part
 }
 
 func lastPart(key string) string { return key[strings.LastIndexByte(key, '/')+1:] }
@@ -459,6 +479,49 @@ func (f *front) noteMax(raw any) {
 	}
 }
 
+// account: the provider account this front door is for, named so that nothing of it shows (two providers on
+// one server can be two accounts). What it allows is handed from one start of the proxy part to the next under
+// this name (see learned).
+func (f *front) account() string {
+	sum := sha256.Sum256([]byte(f.base + "\x00" + f.user))
+	return hex.EncodeToString(sum[:8])
+}
+
+// learned: the connections each account allows, as the providers reported them: "<account>=<n>,...". The
+// launcher keeps it while the proxy part restarts (every save restarts it) and hands it to the next start in
+// COAXIAL_LIMITS; old holds what it had, which the new values replace.
+func learned(old string) string {
+	all := learnedBefore(old)
+	mu.Lock()
+	for _, f := range fronts {
+		if f.reported > 0 {
+			all[f.account()] = f.reported
+		}
+	}
+	mu.Unlock()
+	keys := make([]string, 0, len(all))
+	for k := range all {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i, k := range keys {
+		keys[i] = k + "=" + strconv.Itoa(all[k])
+	}
+	return strings.Join(keys, ",")
+}
+
+// learnedBefore: the connections each account allows, from what learned gave the previous start.
+func learnedBefore(s string) map[string]int {
+	all := map[string]int{}
+	for _, pair := range strings.Split(s, ",") {
+		k, v, _ := strings.Cut(pair, "=")
+		if n, ok := number(v).value(); ok && n > 0 && k != "" {
+			all[k] = n
+		}
+	}
+	return all
+}
+
 // capped keeps what is written to it up to max bytes and lets the rest go.
 type capped struct {
 	b   *bytes.Buffer
@@ -507,17 +570,63 @@ func lockLeft(locked bool, wait, changed, now float64) float64 {
 	return math.Max(0, changed+wait-now)
 }
 
+// resumeBefore: seconds before the VPN changed address in which a device's stream counts as playing then (the
+// change is seen only once the VPN is back up; the stream broke when it went down).
+const resumeBefore = 300.0
+
+// played: device who's stream w was in use at t. (mu held)
+func (f *front) played(who string, w what, t float64) {
+	if w.kind == "" || isLoop(who) {
+		return
+	}
+	if f.plays == nil {
+		f.plays = map[string]float64{}
+	}
+	if len(f.plays) > 1000 {
+		for k, at := range f.plays {
+			if t-at > 3600 {
+				delete(f.plays, k)
+			}
+		}
+	}
+	f.plays[who+" "+w.kind+" "+strings.TrimLeft(w.item, "0")] = t
+}
+
+// resumes: device who was playing w when the VPN changed address (a film the change broke, asked for again to
+// go on): while new streams wait for the provider to let go of the old address, this one takes the place of
+// its own old session there, as a live channel's reconnect does. Anything else, or another device, waits. (mu held)
+func (f *front) resumes(who string, w what) bool {
+	if w.kind == "" || isLoop(who) {
+		return false
+	}
+	for h := range holds {
+		if h.f == f && h.until == 0 && h.who == who && same(h.w, w) && h.at < vpnChanged {
+			return true
+		}
+	}
+	at, ok := f.plays[who+" "+w.kind+" "+strings.TrimLeft(w.item, "0")]
+	return ok && at >= vpnChanged-resumeBefore
+}
+
 // decide: whether device who may open a new connection to this provider for w now. What it replaces it cuts
 // here. follow: w continues a request already admitted (it is never refused at the limit, only room is made;
 // another device on the same channel or item still refuses it: the provider would end that one). (mu held)
 func (f *front) decide(who string, w what, follow bool, now float64) (verdict, string) {
-	if left := lockLeft(f.locked, f.lockWait, vpnChanged, now); left > 0 && !follow {
+	if left := lockLeft(f.locked, f.lockWait, vpnChanged, now); left > 0 && !follow && !f.resumes(who, w) {
 		if left > 5 {
 			return refuseNow, "lock"
 		}
 		return waitNow, "" // (a few seconds: waited out)
 	}
 	list := f.conns()
+	if follow { // (the place kept for this follow-up is its own: it takes it)
+		for i := 0; i < len(list); i++ {
+			if c := list[i]; c.kept != nil && c.kept.who == who && c.kept.w == w {
+				list = append(list[:i], list[i+1:]...)
+				i--
+			}
+		}
+	}
 	mine := func(c *conn) bool { return len(c.who) == 0 || len(c.who) == 1 && c.who[who] }
 	if w.kind == "ch" && f.oneChannel || w.kind == "vod" && f.oneItem {
 		wait, why, k := false, map[string]string{"ch": "channel", "vod": "item"}[w.kind], f.base+" "+w.kind+" "+w.item
@@ -631,6 +740,10 @@ func (f *front) admit(ctx context.Context, who string, w what, follow bool, key 
 		if v == admitNow {
 			h.at = mono()
 			holds[h] = true
+			if follow {
+				f.keepFor(who, w, 0) // (the place kept for it is taken)
+			}
+			f.played(who, w, h.at)
 			mu.Unlock()
 			return h, ""
 		}
@@ -721,6 +834,10 @@ type followUp struct {
 
 var followUps = map[string]*followUp{} // port and the address given to the player -> what it continues
 
+// followUpHold: seconds the place of a request answered with a redirect is kept for its device's request to the
+// address it was sent on to: another device taking it in between would put one stream too many at the provider. (mu)
+var followUpHold = 10.0
+
 // remember: a redirect of an admitted request, to the address the player was given. (mu held)
 func (f *front) remember(moved string, h *hold) {
 	now := mono()
@@ -732,6 +849,24 @@ func (f *front) remember(moved string, h *hold) {
 		}
 	}
 	followUps[f.port+" "+moved] = &followUp{h.who, h.w, now}
+	h.moved = true // (its place is kept for the follow-up once this request is over: see release)
+}
+
+// keepFor: the place kept for device who's follow-up of w, until then (0: none any more). (mu held)
+func (f *front) keepFor(who string, w what, until float64) {
+	for o := range holds {
+		if o.f != f || o.who != who || o.w != w {
+			continue
+		}
+		if o.until > 0 {
+			delete(holds, o)
+		} else if until == 0 {
+			o.moved = false // (its follow-up came while it was still open: nothing is kept for it)
+		}
+	}
+	if until > 0 {
+		holds[&hold{f: f, who: who, w: w, at: mono(), until: until}] = true
+	}
 }
 
 // followed: what this request continues (a redirect of an admitted one, asked for by the same device), if anything.

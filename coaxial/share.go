@@ -8,7 +8,9 @@
 // as before (pictures pointed back at the address it used, the login hidden). Only a whole answer with status
 // 200 is kept; anything else is given to the players that asked for it at that moment and then let go.
 // Small answers are kept in memory, larger ones in a file in the temporary folder (deleted as it is made, so
-// nothing is left behind); one larger than shareMax is not kept at all.
+// nothing is left behind); one larger than shareMax is not kept at all. When that file cannot be made or
+// written (a full disk, a temporary folder that cannot be written), the answer is still given whole to every
+// player following it, passed on as it comes and not kept: no player is given a broken answer for it.
 package main
 
 import (
@@ -23,6 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+var shareTempSaid atomic.Bool // (the temporary folder failing is said once)
 
 const (
 	shareSpill  = 4 << 20  // an answer larger than this is kept in a file
@@ -55,6 +59,12 @@ type shareEntry struct {
 	users int
 	gone  bool // no longer in the list: let go once its last reader is done
 	freed bool
+	// When no file can be kept (pass), what is in memory starts at base and is let go once every reader has it.
+	base    int64
+	inFile  int64                 // what the file holds: up to this
+	pass    bool                  // no file could be kept: passed on as it comes, never kept
+	took    chan struct{}         // (pass) closed when a reader moved on or left
+	readers map[*shareReader]bool // (the place each reader is at)
 }
 
 // shareKey: the key a request is shared under, "" when it is not shared.
@@ -81,7 +91,7 @@ func shared(ctx context.Context, f *front, key, target string, h http.Header) (*
 	e := shares[key]
 	if e != nil {
 		e.mu.Lock()
-		stale := e.done && (!e.whole || e.status != 200 || now >= e.until)
+		stale := e.pass || e.done && (!e.whole || e.status != 200 || now >= e.until) // (passed on: what was read is gone)
 		e.mu.Unlock()
 		if stale {
 			dropShare(e)
@@ -89,7 +99,7 @@ func shared(ctx context.Context, f *front, key, target string, h http.Header) (*
 		}
 	}
 	if e == nil {
-		e = &shareEntry{key: key, ready: make(chan struct{}), grew: make(chan struct{})}
+		e = &shareEntry{key: key, ready: make(chan struct{}), grew: make(chan struct{}), took: make(chan struct{}), readers: map[*shareReader]bool{}}
 		shares[key] = e
 		tidyShares(now)
 		hd := h.Clone()
@@ -98,21 +108,23 @@ func shared(ctx context.Context, f *front, key, target string, h http.Header) (*
 		}
 		go e.fill(target, hd, f.shareFor)
 	}
+	rd := &shareReader{e: e, ctx: ctx}
 	e.mu.Lock()
 	e.users++
+	e.readers[rd] = true
 	e.mu.Unlock()
 	shareMu.Unlock()
 	select {
 	case <-e.ready:
 	case <-ctx.Done():
-		e.leave()
+		rd.Close()
 		return nil, ctx.Err()
 	}
 	if e.err != nil {
-		e.leave()
+		rd.Close()
 		return nil, e.err
 	}
-	return &http.Response{StatusCode: e.status, Header: e.header.Clone(), Body: &shareReader{e: e, ctx: ctx}}, nil
+	return &http.Response{StatusCode: e.status, Header: e.header.Clone(), Body: rd}, nil
 }
 
 // fill downloads the answer. It goes on when the player that started it hangs up: others may be waiting.
@@ -172,24 +184,39 @@ func (e *shareEntry) write(p []byte) bool {
 	if e.size+int64(len(p)) > shareMax {
 		return false
 	}
-	if e.file == nil && (len(e.data)+len(p) > shareSpill || shareMem.Load()+int64(len(p)) > shareMemMax) {
+	if e.pass { // the readers take it as it comes: what all of them have read is let go
+		for e.users > 0 && e.size-e.lowest() > shareSpill {
+			took := e.took
+			e.mu.Unlock()
+			<-took
+			e.mu.Lock()
+		}
+		if e.users == 0 { // (nobody reads it any more, and nobody new can)
+			return false
+		}
+	} else if e.file == nil && (len(e.data)+len(p) > shareSpill || shareMem.Load()+int64(len(p)) > shareMemMax) {
 		f, err := os.CreateTemp("", "coaxial-share-*")
+		if err == nil {
+			os.Remove(f.Name()) // (open, it stays readable; closed, it is gone: nothing is ever left behind)
+			if _, err = f.Write(e.data); err != nil {
+				f.Close()
+			}
+		}
 		if err != nil {
-			return false
+			e.passOn(err)
+		} else {
+			shareMem.Add(-int64(len(e.data)))
+			e.data, e.file, e.inFile = nil, f, int64(len(e.data))
 		}
-		os.Remove(f.Name()) // (open, it stays readable; closed, it is gone: nothing is ever left behind)
-		if _, err := f.Write(e.data); err != nil {
-			f.Close()
-			return false
-		}
-		shareMem.Add(-int64(len(e.data)))
-		e.data, e.file = nil, f
 	}
-	if e.file != nil {
+	if e.file != nil && !e.pass {
 		if _, err := e.file.Write(p); err != nil {
-			return false
+			e.passOn(err) // (what is in the file already stays readable there)
+		} else {
+			e.inFile += int64(len(p))
 		}
-	} else {
+	}
+	if e.file == nil || e.pass {
 		e.data = append(e.data, p...)
 		shareMem.Add(int64(len(p)))
 	}
@@ -199,11 +226,43 @@ func (e *shareEntry) write(p []byte) bool {
 	return true
 }
 
+// passOn: no copy can be kept (err: why). The players following the download are given it as it comes, and
+// it is not kept. (e.mu held)
+func (e *shareEntry) passOn(err error) {
+	e.pass, e.base = true, e.size-int64(len(e.data))
+	if !shareTempSaid.Swap(true) {
+		say("a list or guide download could not be kept in the temporary folder (%v): large ones are passed on without a shared copy", err)
+	}
+}
+
+// lowest: the furthest back any reader of e still is. (e.mu held)
+func (e *shareEntry) lowest() int64 {
+	low := e.size
+	for rd := range e.readers {
+		low = min(low, rd.off)
+	}
+	return low
+}
+
+// letGo: passed on, what every reader has read is let go, and the download may go on. (e.mu held)
+func (e *shareEntry) letGo() {
+	if !e.pass {
+		return
+	}
+	if n := e.lowest() - e.base; n > 0 {
+		e.data = e.data[n:]
+		e.base += n
+		shareMem.Add(-n)
+	}
+	close(e.took)
+	e.took = make(chan struct{})
+}
+
 // finish: the download is over. Only a whole answer with status 200 is kept.
 func (e *shareEntry) finish(whole bool, keep float64) {
 	e.mu.Lock()
 	e.done, e.whole = true, whole && e.err == nil
-	kept := e.whole && e.status == 200 && e.size > 0 // (an empty answer is never a list or a guide: asked again)
+	kept := e.whole && e.status == 200 && e.size > 0 && !e.pass // (an empty answer is never a list or a guide: asked again)
 	if kept {
 		e.until = mono() + keep
 	}
@@ -246,9 +305,11 @@ func dropShare(e *shareEntry) {
 	}
 }
 
-func (e *shareEntry) leave() {
+func (e *shareEntry) leave(rd *shareReader) {
 	e.mu.Lock()
 	e.users--
+	delete(e.readers, rd)
+	e.letGo()
 	free := e.gone && e.users == 0
 	e.mu.Unlock()
 	if free {
@@ -312,13 +373,14 @@ func (r *shareReader) Read(p []byte) (int, error) {
 		e.mu.Lock()
 		if r.off < e.size {
 			n, err := 0, error(nil)
-			if want := min(int64(len(p)), e.size-r.off); e.file != nil {
-				n, err = e.file.ReadAt(p[:want], r.off)
+			if want := min(int64(len(p)), e.size-r.off); e.file != nil && r.off < e.inFile {
+				n, err = e.file.ReadAt(p[:min(want, e.inFile-r.off)], r.off)
 			} else {
-				n = copy(p[:want], e.data[r.off:])
+				n = copy(p[:want], e.data[r.off-e.base:])
 			}
-			e.mu.Unlock()
 			r.off += int64(n)
+			e.letGo()
+			e.mu.Unlock()
 			if err == io.EOF {
 				err = nil
 			}
@@ -345,7 +407,7 @@ func (r *shareReader) Read(p []byte) (int, error) {
 func (r *shareReader) Close() error {
 	if !r.closed {
 		r.closed = true
-		r.e.leave()
+		r.e.leave(r)
 	}
 	return nil
 }

@@ -40,6 +40,8 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 			say("the VPN reconnected; providers that lock an account to one address get new streams after a short wait")
 		}
 		answer(w, 200, "", "ok\n")
+	case "/limits": // the connections each account allows, as learned: the launcher hands them to the next start
+		answer(w, 200, "", learned(""))
 	case "/playing": // what plays, and nothing else (see playingNow)
 		data, _ := json.Marshal(map[string]any{"playing": playingNow()})
 		answer(w, 200, "application/json", string(data))

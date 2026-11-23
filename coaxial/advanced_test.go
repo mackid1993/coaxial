@@ -578,9 +578,14 @@ func TestOnePerItem(t *testing.T) {
 }
 
 // A film the provider sends on to another server: the player's request for it there (/__cdn/) carries on what
-// was admitted. It is not refused at the limit and is counted once; asked for again by the same device, it
-// replaces itself.
+// was admitted. It is not refused at the limit, even once the place kept for it is gone (see
+// TestFollowUpKeepsItsPlace), and is counted once; asked for again by the same device, it replaces itself.
 func TestFollowUpOfAdmittedFilm(t *testing.T) {
+	mu.Lock()
+	was := followUpHold
+	followUpHold = 0.3
+	mu.Unlock()
+	defer func() { mu.Lock(); followUpHold = was; mu.Unlock() }()
 	cdn := newFakeProv(t, true, nil)
 	fp := newFakeProv(t, false, func(fp *fakeProv, w http.ResponseWriter, r *http.Request) bool {
 		if strings.HasPrefix(r.URL.Path, "/movie/realU/realP/5.") {
@@ -596,7 +601,7 @@ func TestFollowUpOfAdmittedFilm(t *testing.T) {
 	if r.StatusCode != 302 || !strings.HasPrefix(loc, "/__cdn/http/") {
 		t.Fatalf("the redirect: %d %q", r.StatusCode, loc)
 	}
-	eventually(t, func() bool { // (the redirect's own request is over: it counts no more)
+	eventually(t, func() bool { // (the redirect's own request is over, and the place kept for it is let go)
 		mu.Lock()
 		defer mu.Unlock()
 		return len(f.conns()) == 0
