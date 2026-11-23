@@ -46,8 +46,8 @@ const (
 	ringMax       = 64 << 20         // ...nor more than this
 	burstSeconds  = 2.5              // the provider's opening burst is measured over this and logged
 	reopenAfter   = 30               // a stream that ran this long and ended while watched is asked for again
+	keyWait       = 5                // seconds of a stream asked for again searched for a keyframe to join at (renumber.go)
 	reopenWait    = 5                // seconds to answer when asked again (twice that to send video)
-	keyWait       = 5                // seconds of a stream asked for again searched for a keyframe to join at
 	dropGap       = 0.1              // time a provider gets to see a hang-up before another channel is asked for
 	linger        = 0.4              // a channel in its first seconds is kept this long after its last reader (tuning)
 	readersMax    = 100              // readers served at once, all channels together
@@ -68,7 +68,7 @@ var logger = log.New(os.Stdout, "coaxial: ", log.LstdFlags|log.Lmsgprefix)
 
 const quietNote = 20 // seconds a provider may send nothing before its carrying on is logged
 
-func say(format string, a ...any) { logger.Printf(format, a...) } // never a login, password or key (addresses of players and providers do appear)
+func say(format string, a ...any) { logger.Printf(format, a...) } // never an address or a login
 
 var clockStart = time.Now()
 
@@ -382,8 +382,7 @@ func keyFound(buf []byte) (int, bool) {
 	return start, false
 }
 
-// lastPCR: the last program clock reference in b on the given stream (-1: the first one that carries one),
-// and where the packet carrying it starts.
+// lastPCR: the last program clock reference in b on the given stream (-1: the first one that carries one).
 func lastPCR(b []byte, want int) (int, float64, int, bool) {
 	start := -1
 	for i := 0; i+376 < len(b); i++ {
@@ -406,23 +405,6 @@ func lastPCR(b []byte, want int) (int, float64, int, bool) {
 	return pid, v, at, ok
 }
 
-// resumeAt: where a stream asked for again carries on from exactly where the old one stopped. Asked again, a
-// provider most often sends the very same stream from its buffer, seconds back: the packet that carried the
-// last clock passed on is in it (the same clock to the 90 kHz tick; on another PID if the stream was
-// numbered afresh), and the old stream stopped past bytes after that packet began. Joined there, nothing is
-// lost or repeated (spliceAt joins at the next keyframe: up to a whole keyframe interval of video was lost,
-// and the decoders had to start again). ok=false: no packet with that clock (another clock, another server).
-// The place may lie beyond buf: it has not come yet.
-// last, the last packet of video or sound passed on, says it is the place: another server may send the same
-// stream on the same clock laid out otherwise (padded to a constant rate, or not; its tables elsewhere), and
-// past bytes on was then a few packets off, a packet of video lost or sent twice and frames broken. The
-// place is then just after that packet, looked for from the clock on; not found, ok=false.
-// video, the last packet of video passed on (nil: none), must be the last of its stream before the place.
-// Packets of sound can be the same in two streams: the same pictures encoded again (a provider's encoder
-// started afresh) carry the same clock and, their sound passed through, the same packets of sound; so do two
-// programs made from one source. Joined after such a packet, the readers' decoders went on into another
-// encoding mid-picture (broken frames up to its next keyframe), or packets were sent twice. A clock packet
-// that is not the place may be another program's on the same clock: the clock is looked for on.
 func resumeAt(buf []byte, clock float64, past int, last, video []byte) (int, bool) {
 	if clock < 0 {
 		return 0, false
@@ -454,7 +436,6 @@ func resumeAt(buf []byte, clock float64, past int, last, video []byte) (int, boo
 	return 0, false
 }
 
-// lastOf: whether p is in b and no packet of its stream comes after it there (see samePacket).
 func lastOf(b, p []byte) bool {
 	after := map[int]bool{}
 	for i := len(b) - 188; i >= 0 && b[i] == 0x47; i -= 188 {
@@ -467,22 +448,14 @@ func lastOf(b, p []byte) bool {
 	return false
 }
 
-// samePacket: whether a and b are the same packet, whatever its PID and continuity counter (a stream numbered
-// afresh, another server's counters).
 func samePacket(a, b []byte) bool {
 	return len(a) == 188 && len(b) == 188 && a[0] == b[0] && a[1]&0xe0 == b[1]&0xe0 && a[3]&0xf0 == b[3]&0xf0 && bytes.Equal(a[4:], b[4:])
 }
 
-// whole: b's whole MPEG-TS packets, passed on at once, and the rest: the start of a packet not yet whole (kept
-// for the next data). A packet that ends where b ends goes now, not when the next data arrives: providers send
-// in lumps seconds apart, and holding a lump's last packet back until the next lump delayed the end of every
-// lump by that long. Bytes that begin no packet (a provider's padding before it hung up, a broken piece) are
-// left out: they reached no decoder, and counted in past, resumeAt carried on that many bytes too far into the
-// stream asked for again. What is kept when a stream ends is sent again by the next one.
 func whole(b []byte) (pkts, rest []byte) {
 	out, i := b[:0], 0
-	for i+188 <= len(b) {
-		if b[i] == 0x47 && (i+188 == len(b) || b[i+188] == 0x47) {
+	for i+376 <= len(b) {
+		if b[i] == 0x47 && b[i+188] == 0x47 {
 			out, i = append(out, b[i:i+188]...), i+188
 			continue
 		}
@@ -502,47 +475,24 @@ func whole(b []byte) (pkts, rest []byte) {
 // with its opening burst, seconds of video from before where the old stream stopped; passed on, the
 // stream's clock ran backwards and players froze on it. So the new stream joins at its first keyframe
 // whose clock is past the last clock passed on (pid, clock). ok=false: not there yet (wait for more).
-// A clock far from the old one (another clock entirely) is not compared: it joins at its first keyframe.
+// A clock far from the old one (another clock entirely) is not compared: it joins at once.
 func spliceAt(buf []byte, pid int, clock float64) (int, bool) {
 	start := cleanStart(buf)
 	if clock < 0 {
 		return start, true
 	}
-	seen, other := false, 0
+	seen := false
 	for i := start; i+188 <= len(buf) && buf[i] == 0x47; i += 188 {
 		_, v, _, ok := lastPCR(buf[i:min(len(buf), i+188*3)], pid)
 		if !ok || (i+188*3 > len(buf)) {
-			// A stream asked for again may number its streams afresh (another server): its clock on another
-			// PID, and none on the old one, is compared from then on. (Waiting for the old PID waited for 48 MB
-			// of video, while every reader on the channel got nothing.)
-			if p, _, _, found := lastPCR(buf[i:min(len(buf), i+188*3)], -1); found && p != pid && !seen {
-				if other++; other >= 30 { // (and looked through from its start: a keyframe in its first
-					// packets was passed over, and a whole keyframe interval of video lost)
-					pid, i = p, start-188
-				}
-			}
 			continue
 		}
 		if !seen && math.Abs(v-clock) > 60 {
-			// Another clock entirely: nothing to compare, so it joins at its first keyframe. (Joined wherever
-			// it began, the players' decoders went on from the old stream's pictures and showed broken ones
-			// until the next keyframe.) A stream that marks no keyframes joins where it begins, once it has
-			// gone keyWait seconds on without a mark.
-			at, found := keyFound(buf)
-			if _, newest, _, ok := lastPCR(buf[i:], pid); !found && ok && newest-v >= keyWait {
-				return start, true
-			}
-			return at, found
+			return start, true
 		}
 		seen = true
 		if v > clock {
 			at, found := keyFound(buf[i:])
-			// A stream that marks no keyframes joins where its clock passed the old one, once it has gone
-			// keyWait seconds on without a mark (waiting for one waited for 48 MB of video, while every
-			// reader on the channel got nothing).
-			if _, newest, _, ok := lastPCR(buf[i:], pid); !found && ok && newest-clock >= keyWait {
-				return i + at, true
-			}
 			return i + at, found
 		}
 	}
@@ -820,11 +770,7 @@ func (ch *channel) join(first bool) *reader {
 		for ; n < len(take) && len(head) < 2<<20; n++ {
 			head = append(head, take[n]...)
 		}
-		// handed on in pieces the size of a read, as the rest is: one piece of up to 2 MB went at once, whatever
-		// the pace, and the joiner then got nothing for seconds while the pace caught up with it
-		for b := head[keyStart(head):]; len(b) > 0; b = b[min(len(b), 65536):] {
-			rd.push(b[:min(len(b), 65536)])
-		}
+		rd.push(head[keyStart(head):])
 		for _, d := range take[n:] {
 			rd.push(d)
 		}
@@ -1142,22 +1088,15 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 		if path == "/hls" {
 			opens = provider + " /live/" + rt.f.encU + "/" + rt.f.encP + "/" + want.item + ".m3u8"
 		}
-		// Only when a rule can apply now: otherwise the channel is opened at once, with nothing in between.
-		var h *hold
-		mu.Lock()
-		gate := rt.f.needsRules(want)
-		mu.Unlock()
-		if gate {
-			var why string
-			if h, why = rt.f.admit(r.Context(), rt.client, want, false, opens, nil); h == nil {
-				unOpen(provider, key, was)
-				if why != "" {
-					failed(w, rt.f.refusal(rt.client, want, why))
-				}
-				return
+		h, why := rt.f.admit(r.Context(), rt.client, want, false, opens, nil)
+		if h == nil {
+			unOpen(provider, key, was)
+			if why != "" {
+				failed(w, rt.f.refusal(rt.client, want, why))
 			}
-			defer h.release()
+			return
 		}
+		defer h.release()
 		mu.Lock()
 		wait := lastDrop[provider] + dropGap - mono()
 		mu.Unlock()
@@ -1198,7 +1137,6 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 		} else {
 			first = false
 		}
-		delete(holds, h) // (counted as the channel from here on)
 	}
 	if allReaders() >= readersMax {
 		if first {
@@ -1215,10 +1153,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	why, started := "the player hung up", false
 	defer func() {
 		mu.Lock()
-		still := len(ch.readers) // (a reader cut for being too slow is already off the channel)
-		if ch.readers[rd] {
-			still--
-		}
+		still := max(0, len(ch.readers)-1)
 		ch.leave(rd)
 		mu.Unlock()
 		if started {
@@ -1275,7 +1210,6 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 		mu.Lock()
 		if rd.dropped { // too slow: cut the connection, as the Python did
 			mu.Unlock()
-			why = "it was too slow to keep up and was cut off"
 			panic(http.ErrAbortHandler)
 		}
 		if p := rd.pace; len(rd.q) > 0 && p != nil { // a joiner in its first seconds: fed at a pace, until its cushion is handed over
@@ -1330,7 +1264,6 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 				dropped := rd.dropped
 				mu.Unlock()
 				if dropped {
-					why = "it was too slow to keep up and was cut off"
 					panic(http.ErrAbortHandler)
 				}
 				select {

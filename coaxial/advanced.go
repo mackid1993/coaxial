@@ -693,26 +693,6 @@ func (f *front) decide(who string, w what, follow bool, now float64) (verdict, s
 	return admitNow, ""
 }
 
-// needsRules: whether opening live channel w can be touched by the rules this provider has on right now. A
-// live tune is opened at once unless it can: the address lock is still waiting, another connection holds the
-// same channel (one_per_channel), or opening it would reach the connections the account allows. Under the
-// limit, with nothing else on the channel, admit would only say yes: it is not asked. (mu held)
-func (f *front) needsRules(w what) bool {
-	if lockLeft(f.locked, f.lockWait, vpnChanged, mono()) > 0 {
-		return true
-	}
-	list := f.conns()
-	if f.oneChannel {
-		for _, c := range list {
-			if same(c.w, w) {
-				return true
-			}
-		}
-	}
-	lim := f.limit()
-	return lim > 0 && len(list)+1 >= lim
-}
-
 // claim: a channel or an item whose device's connection was cut to make room for that device's new one: no
 // other device takes it in the moment between the two. (mu)
 type claim struct {
