@@ -34,6 +34,7 @@ type front struct {
 
 	// (loginAny: the login deeper in an address, as a provider's own playlist may write it: /hls/<login>/<piece>)
 	loginPath, loginShort, loginAny, chLogin, liveTS *regexp.Regexp
+	catchUp                                          *regexp.Regexp // catch-up of a live channel: its number
 }
 
 // route: what the front door worked out about one request, for the relay. Nothing in it comes from a header.
@@ -85,7 +86,44 @@ func newFront(p provider, pl player) *front {
 		chLogin:    regexp.MustCompile(`^/__ch(/+(?:live/+)?)` + pu + `/+` + pp + `/+(.+?\.m3u8)/`),
 		// (live channels are numbered: anything else under /live/, such as a piece a provider's playlist
 		// names next to itself, is passed on to the provider, not opened as a channel)
-		liveTS: regexp.MustCompile(`^/+(live/+` + pu + `/+` + pp + `/+[0-9]+\.ts|` + pu + `/+` + pp + `/+[0-9]+(\.ts)?)$`)}
+		liveTS: regexp.MustCompile(`^/+(live/+` + pu + `/+` + pp + `/+[0-9]+\.ts|` + pu + `/+` + pp + `/+[0-9]+(\.ts)?)$`),
+		// /timeshift/<login>/<minutes>/<start>/<channel>.ts (or .m3u8)
+		catchUp: regexp.MustCompile(`^/+timeshift/+` + pu + `/+` + pp + `/+[^/]+/+[^/]+/+([0-9]+)(\.[A-Za-z0-9]+)?$`)}
+}
+
+// catchUpOf: the channel a catch-up request is for ("" if it is not one), in either form Xtream servers take:
+// /timeshift/<login>/<minutes>/<start>/<channel>.ts, or /streaming/timeshift.php?...&stream=<channel>.
+func (f *front) catchUpOf(u *url.URL) string {
+	if m := f.catchUp.FindStringSubmatch(u.Path); m != nil {
+		return m[1]
+	}
+	if strings.EqualFold(cleanPath(u.Path), "/streaming/timeshift.php") {
+		q := u.Query()
+		if id := q.Get("stream"); q.Get("username") == f.pu && q.Get("password") == f.pp && id != "" && strings.Trim(id, "0123456789") == "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// liveOpen: whether channel id of this provider is open live here now (an MPEG-TS channel, HLS built from it, or
+// a live HLS session asked for in the last 30 s). Providers allow live and catch-up of one channel only one at a
+// time on an account: a catch-up opened ends the live stream, and the live stream asked for again ends the
+// catch-up. (mu held)
+func (f *front) liveOpen(id string) bool {
+	for _, c := range channels {
+		if c.provider == f.base && !c.done && c.key[strings.LastIndexByte(c.key, '/')+1:] == id {
+			return true
+		}
+	}
+	now := mono()
+	for k, s := range sessions {
+		if rest, ok := strings.CutPrefix(k, f.base+" "); ok && now-s.used <= 30 &&
+			strings.HasPrefix(rest, "/live/") && strings.TrimSuffix(rest[strings.LastIndexByte(rest, '/')+1:], ".m3u8") == id {
+			return true
+		}
+	}
+	return false
 }
 
 func escPath(s string) string { return (&url.URL{Path: s}).EscapedPath() }
@@ -343,6 +381,18 @@ func (f *front) serve(c *counted, r *http.Request) {
 		c.kind = "health"
 		c.WriteHeader(200)
 		return
+	}
+	if id := f.catchUpOf(r.URL); id != "" {
+		mu.Lock()
+		open := f.liveOpen(id)
+		mu.Unlock()
+		if open { // the provider would end the live stream for it (a recording among them): refused instead
+			c.kind = "media"
+			say("%s asked for catch-up of channel %s while it is open live (%s); refused, so the live stream is not cut", whoIs(r), id, hostOf(f.base))
+			answer(c, 503, "", "This channel is open live on this provider right now (being watched or recorded).\n"+
+				"The provider allows live and catch-up of one channel only one at a time, so catch-up of it is refused until live is closed.\n")
+			return
+		}
 	}
 	up, uri := f.swap(r.URL)
 	rt := &route{f: f, uri: uri, orig: r.URL.RequestURI(), client: whoIs(r)}
