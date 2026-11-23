@@ -107,9 +107,9 @@ func (f *front) catchUpOf(u *url.URL) string {
 }
 
 // liveOpen: whether channel id of this provider is open live here now (an MPEG-TS channel, HLS built from it, or
-// a live HLS session asked for in the last 30 s). Providers allow live and catch-up of one channel only one at a
-// time on an account: a catch-up opened ends the live stream, and the live stream asked for again ends the
-// catch-up. (mu held)
+// a live HLS session asked for in the last 30 s). Some providers allow one connection per channel on an account,
+// and count catch-up of a channel as that channel: a catch-up opened ends the live stream, and the live stream
+// asked for again ends the catch-up. (mu held)
 func (f *front) liveOpen(id string) bool {
 	for _, c := range channels {
 		if c.provider == f.base && !c.done && c.key[strings.LastIndexByte(c.key, '/')+1:] == id {
@@ -125,6 +125,9 @@ func (f *front) liveOpen(id string) bool {
 	}
 	return false
 }
+
+// catchUpSaid: when a refused catch-up was last logged, per provider, player and channel. (mu held)
+var catchUpSaid = map[string]float64{}
 
 func escPath(s string) string { return (&url.URL{Path: s}).EscapedPath() }
 
@@ -385,12 +388,25 @@ func (f *front) serve(c *counted, r *http.Request) {
 	if id := f.catchUpOf(r.URL); id != "" {
 		mu.Lock()
 		open := f.liveOpen(id)
+		said := catchUpSaid[f.base+" "+whoIs(r)+" "+id]
+		if open {
+			catchUpSaid[f.base+" "+whoIs(r)+" "+id] = mono()
+			if len(catchUpSaid) > 300 {
+				for k, t := range catchUpSaid {
+					if mono()-t > 60 {
+						delete(catchUpSaid, k)
+					}
+				}
+			}
+		}
 		mu.Unlock()
 		if open { // the provider would end the live stream for it (a recording among them): refused instead
 			c.kind = "media"
-			say("%s asked for catch-up of channel %s while it is open live (%s); refused, so the live stream is not cut", whoIs(r), id, hostOf(f.base))
+			if said == 0 || mono()-said > 60 { // (once a minute: players ask again every few seconds)
+				say("%s asked for catch-up of channel %s while it is open live (%s); refused, so the live stream is not cut", whoIs(r), id, hostOf(f.base))
+			}
 			answer(c, 503, "", "This channel is open live on this provider right now (being watched or recorded).\n"+
-				"The provider allows live and catch-up of one channel only one at a time, so catch-up of it is refused until live is closed.\n")
+				"The provider allows one connection per channel, catch-up included, so catch-up of it is refused until live is closed.\n")
 			return
 		}
 	}
