@@ -920,8 +920,9 @@ func tsSource(target string, h http.Header) source {
 			if errors.Is(err, errStop) || ctx.Err() != nil || (err != nil && !got) {
 				return err
 			}
-			// The provider ended it. Ask again if anyone still watches, unless it ran under reopenAfter, or another
-			// channel of this provider opened in the last 15 s (one-connection accounts: asking would end that one).
+			// The provider ended it. Ask again if anyone still watches, unless it ran under reopenAfter, or (on an
+			// account that allows one connection, or whose limit is not known) another channel of this provider opened
+			// in the last 15 s: asking would end that one.
 			mu.Lock()
 			ran, op := mono()-began, lastOpen[ch.provider]
 			if isTimeout(err) && ran < quietWait+reopenAfter { // silent twice in a row: the channel is dead
@@ -929,7 +930,9 @@ func tsSource(target string, h http.Header) source {
 			} else {
 				quiet = 0
 			}
-			stop := quiet >= 2 || len(ch.readers) == 0 || ran < reopenAfter || (op.at > math.Max(began, mono()-15) && op.key != ch.key)
+			// (an account that allows more than one connection: opening another channel did not end this one)
+			single := ch.owner == nil || ch.owner.limit() <= 1
+			stop := quiet >= 2 || len(ch.readers) == 0 || ran < reopenAfter || (single && op.at > math.Max(began, mono()-15) && op.key != ch.key)
 			mu.Unlock()
 			if quiet >= 2 {
 				say("a channel went silent twice in a row; letting its readers go")
