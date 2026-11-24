@@ -949,6 +949,7 @@ func (l *launcher) programUpdate() map[string]any {
 func (l *launcher) watchProgram() {
 	time.Sleep(20 * time.Second)
 	var asked, quietSince, downSince, pickNext time.Time
+	checkNext := time.Now().Add(idleMinutes * time.Minute) // the speed check while something plays (checkInUse)
 	bin := binDir(l.dir)
 	good := connected(bin)
 	for ; ; time.Sleep(20 * time.Second) {
@@ -998,6 +999,10 @@ func (l *launcher) watchProgram() {
 		}
 		if !nothingPlaying() {
 			quietSince = time.Time{}
+			if time.Now().After(checkNext) {
+				checkNext = time.Now().Add(pickEvery)
+				l.checkInUse()
+			}
 			continue
 		}
 		if quietSince.IsZero() {

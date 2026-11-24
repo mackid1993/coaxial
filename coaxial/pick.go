@@ -513,6 +513,27 @@ func (l *launcher) pickDue() {
 	}
 }
 
+// checkInUse: measures the server in use while something plays, without reconnecting, so the status page
+// always shows a recent speed. Called hourly by watchProgram. It never changes the server: that is left to
+// pickDue in quiet hours. Skipped when a quiet-hour check was made within the hour.
+func (l *launcher) checkInUse() {
+	l.mu.Lock()
+	recent := !l.checkAt.IsZero() && time.Since(l.checkAt) < pickEvery
+	l.mu.Unlock()
+	if recent {
+		return
+	}
+	mbps, ofo, err := measure("", nil)
+	if err != nil {
+		say("VPN server: the speed check could not measure the server in use (%s); trying again in an hour", plain(err))
+		return
+	}
+	l.mu.Lock()
+	l.checkMbps, l.checkAt = mbps, time.Now()
+	l.mu.Unlock()
+	say("VPN server: speed check while playing: %.0f Mbit/s (%.0f%% of packets out of order, not counted); nothing is changed while someone watches", mbps, ofo*100)
+}
+
 // pickStatus: for the status page. possible: the settings leave the server to Coaxial.
 func (l *launcher) pickStatus() map[string]any {
 	l.mu.Lock()
