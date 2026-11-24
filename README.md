@@ -20,9 +20,9 @@ What it does:
   whichever each device asks for.
 - **Drops are mended.** When a provider ends a stream someone is watching, Coaxial asks for it again and joins the new
   one where the old one stopped, so players and recorders carry on.
-- **The closest healthy VPN server, kept up to date.** Pick your cities and Coaxial pings every server in them every
-  5 minutes and keeps you on the closest one that is not dropping packets. It moves only once nothing is playing, or
-  when you press `Switch now`.
+- **The closest healthy VPN server, kept up to date.** Pick your cities and, whenever nothing is playing, Coaxial
+  pings every server in them every 5 minutes and keeps you on the closest one that is not dropping packets. It moves
+  only once nothing is playing, or when you press `Switch now`.
 - **The VPN client stays current.** A newer gluetun is downloaded, checked and installed by itself when nothing is
   playing, and undone if the VPN does not connect with it.
 - **Your provider login stays private.** Players only ever see the login you chose for them.
