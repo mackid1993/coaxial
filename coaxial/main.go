@@ -503,6 +503,14 @@ func writeTS(b []byte, v int64) {
 	b[4] = b[4]&0x01 | byte(v<<1)&0xfe
 }
 
+// raw: a clock passed on (seconds, offset added) on the provider's own clock again.
+func (c *clockFix) raw(clock float64) float64 {
+	if clock < 0 || c.off == 0 {
+		return clock
+	}
+	return float64(((int64(math.Round(clock*90000))-c.off)%tsWrap+tsWrap)%tsWrap) / 90000
+}
+
 // fix rewrites the timestamps in data in place and returns what to pass on. off: how many bytes of the stream
 // were passed on before data (packets are 188 bytes from the stream's start). Once the clock has jumped, the
 // start of a packet whose rest is still on its way is kept back until the rest comes, so that its timestamps
@@ -992,7 +1000,7 @@ func tsSource(target string, h http.Header) source {
 						if err == nil && len(head) < 16384 {
 							continue
 						}
-						at, ok := spliceAt(head, clockPID, clock)
+						at, ok := spliceAt(head, clockPID, clk.raw(clock)) // (a stream asked for again has the provider's own clock)
 						if !ok && err == nil && len(head) < 48<<20 {
 							continue
 						}
