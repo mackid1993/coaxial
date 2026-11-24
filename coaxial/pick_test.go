@@ -70,21 +70,20 @@ func TestCandidates(t *testing.T) {
 	}
 }
 
-// With more servers than are tried in one go, the one in use is always among those tried.
-func TestCandidatesKeepTheOneInUse(t *testing.T) {
+// Every server that fits is a candidate, with every address gluetun may use for it.
+func TestCandidatesAllWithAddresses(t *testing.T) {
 	var list []serverEntry
-	for i := 0; i < 40; i++ {
-		list = append(list, serverEntry{VPN: "wireguard", City: "New York", ServerName: "NY#" + string(rune('A'+i%26)) + string(rune('a'+i/26))})
+	for i := 0; i < 120; i++ {
+		list = append(list, serverEntry{VPN: "wireguard", City: "New York", ServerName: "NY#" + string(rune('A'+i%26)) + string(rune('a'+i/26)), IPs: []string{"192.0.2.1"}})
 	}
-	env := map[string]string{"VPN_TYPE": "wireguard", "SERVER_CITIES": "New York"}
-	for round := 0; round < 50; round++ {
-		got := candidatesFrom(list, env, "SERVER_NAMES=NY#Aa")
-		found := false
-		for _, c := range got {
-			found = found || c.env == "SERVER_NAMES=NY#Aa"
-		}
-		if len(got) != pickMost || !found {
-			t.Fatalf("round %d: %d tried, the one in use among them: %v", round, len(got), found)
+	list = append(list, serverEntry{VPN: "wireguard", City: "New York", ServerName: "NY#Aa", IPs: []string{"192.0.2.2"}})
+	got := candidatesFrom(list, map[string]string{"VPN_TYPE": "wireguard", "SERVER_CITIES": "New York"})
+	if len(got) != 120 {
+		t.Fatalf("%d candidates, want all 120", len(got))
+	}
+	for _, c := range got {
+		if c.name == "NY#Aa" && len(c.ips) != 2 {
+			t.Errorf("NY#Aa: addresses %v, want both", c.ips)
 		}
 	}
 }

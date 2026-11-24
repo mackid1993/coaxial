@@ -1,9 +1,10 @@
-# Coaxial: one Go program, standard library only, on top of the stock gluetun image (the VPN). Built in the
+# Coaxial: one Go program on top of the stock gluetun image (the VPN). Standard library only, apart from
+# pro-bing, which pings the VPN servers (see ACKNOWLEDGMENTS.md). Built in the
 # stock Go image. The program is the container's first process: it starts gluetun's own entrypoint with the
 # VPN settings from /config/settings.json, and the proxy once the VPN is up.
 FROM golang:alpine AS build
 WORKDIR /src
-COPY go.mod *.go VERSION bump-version.sh ./
+COPY go.mod go.sum *.go VERSION bump-version.sh ./
 COPY ui ./ui
 # The version is the build time (UTC): vYYYY.MM.DD.HHMM. The workflow passes one stamp to every
 # architecture as STAMP; a build made by hand stamps itself.

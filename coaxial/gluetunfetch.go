@@ -948,8 +948,7 @@ func (l *launcher) programUpdate() map[string]any {
 
 func (l *launcher) watchProgram() {
 	time.Sleep(20 * time.Second)
-	var asked, quietSince, downSince, pickNext time.Time
-	checkNext := time.Now().Add(idleMinutes * time.Minute) // the speed check while something plays (checkInUse)
+	var asked, quietSince, downSince time.Time
 	bin := binDir(l.dir)
 	good := connected(bin)
 	for ; ; time.Sleep(20 * time.Second) {
@@ -997,12 +996,16 @@ func (l *launcher) watchProgram() {
 			writeWhole(filepath.Join(bin, "good.json"), map[string]string{"digest": works})
 			good = works
 		}
-		if !nothingPlaying() {
+		// The VPN servers are pinged every few minutes, playing or not (pinging cuts nothing), and the VPN is
+		// moved to a better one once nothing has played for a while (probe.go).
+		playing := !nothingPlaying()
+		quiet := time.Duration(0)
+		if !playing && !quietSince.IsZero() {
+			quiet = time.Since(quietSince)
+		}
+		l.probeTick(quiet)
+		if playing {
 			quietSince = time.Time{}
-			if time.Now().After(checkNext) {
-				checkNext = time.Now().Add(pickEvery)
-				l.checkInUse()
-			}
 			continue
 		}
 		if quietSince.IsZero() {
@@ -1012,17 +1015,6 @@ func (l *launcher) watchProgram() {
 			quietSince = time.Time{}
 			l.autoUpdate()
 			continue
-		}
-		// The server chosen last time is kept in a file and used at once when the container starts. Looking
-		// at the server again is for quiet times only: once nothing has played for idleMinutes, an hour is
-		// waited, and then it is done every hour until someone plays. Never right after a start.
-		if time.Since(quietSince) < idleMinutes*time.Minute {
-			pickNext = time.Time{}
-		} else if pickNext.IsZero() {
-			pickNext = time.Now().Add(pickEvery)
-		} else if time.Now().After(pickNext) {
-			pickNext = time.Now().Add(pickEvery)
-			l.pickDue()
 		}
 	}
 }

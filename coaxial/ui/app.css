@@ -193,7 +193,7 @@ h2 { font-size: 15px; font-weight: 620; letter-spacing: -.01em; }
 .vpn-acts { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
 .vpn-prog, .vpn-pick { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; }
 .vpn-info { flex: 1 1 250px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; color: var(--text-3); font-size: 12.5px; text-wrap: pretty; }
-.vpn-btn { flex: 0 0 auto; display: flex; }
+.vpn-btn { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; }
 .vpn-btn .btn { min-width: 204px; }
 .vpn-prog[data-state="new"] .vpn-prog-text { color: var(--accent); }
 .vpn-prog[data-state="new"] .chip { border-color: rgba(255, 214, 10, .45); color: var(--accent); }

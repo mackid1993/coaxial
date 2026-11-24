@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// "Find the fastest server" with nothing to choose between (a city with one server, or none the list knows)
-// must not leave the launcher thinking servers are being tried: that stops update checks for good.
+// "Check servers now" with nothing to ping (a city with no server the list knows) must not leave the launcher
+// thinking a round is running.
 func TestPickNothingToChooseFrom(t *testing.T) {
 	l := &launcher{dir: t.TempDir(), quit: make(chan int, 4)}
 	l.set = &settings{}
@@ -20,11 +20,11 @@ func TestPickNothingToChooseFrom(t *testing.T) {
 	}
 	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
 		l.mu.Lock()
-		busy := l.pickBusy
+		busy := l.probing || l.probeAsked || l.pickBusy
 		l.mu.Unlock()
 		if !busy {
 			return
 		}
 	}
-	t.Errorf("still trying servers after the run ended")
+	t.Errorf("still checking servers after the round ended")
 }

@@ -171,13 +171,19 @@
     pickLine.hidden = !sv;
     if (sv) {
       if (!pickBtn.dataset.ready) { pickBtn.dataset.ready = '1'; pickBtn.querySelector('.ico').innerHTML = icon('refresh', 14); }
-      var most = sv.most || 8;
-      setText($('#vpn-pick-text'), sv.testing ? 'Trying up to ' + most + ' servers in your city. This takes about a minute.'
-        : sv.why_not === 'named' ? 'You named a server in Settings, so Coaxial uses that one and does not look for a faster one.'
-        : sv.why_not === 'city' ? 'Pick a city in Settings and Coaxial will find the fastest server there for you. It does not do this for a whole country or region: there are too many servers.'
-        : sv.name ? 'Server ' + sv.name + (sv.of > 1 ? ': the fastest of ' + sv.of + ' tried' : '') + (sv.mbps ? ', ' + Math.round(sv.mbps) + ' Mbit/s' : '') + (sv.at ? ', chosen ' + when(sv.at) : '') + (sv.checked_at ? '. Last speed check: ' + Math.round(sv.checked_mbps) + ' Mbit/s, ' + when(sv.checked_at) : '') + '. Up to ' + most + ' servers in your city are tried per run.'
-        : 'Coaxial picks the server: it tries up to ' + most + ' in your city and stays on the fastest. In quiet hours it checks that server and looks for a better one only if it has become slow. The button does it now.');
-      pickBtn.hidden = !sv.possible; pickBtn.disabled = !!sv.testing; pickBtn.classList.toggle('busy', !!sv.testing);
+      var swBtn = $('#vpn-switch-go');
+      if (!swBtn.dataset.ready) { swBtn.dataset.ready = '1'; swBtn.querySelector('.ico').innerHTML = icon('up', 14); }
+      var now = sv.now, b = sv.better, n = sv.count || 0;
+      var ping = function (p) { return Math.round(p.median_ms) + ' ms' + (p.loss > 0 ? ', ' + Math.round(p.loss) + '% of pings lost' : ''); };
+      setText($('#vpn-pick-text'), sv.switching ? 'Moving to ' + (sv.to || 'a better server') + '. Anything playing stops for a few seconds.'
+        : sv.why_not === 'named' ? 'You named a server in Settings, so Coaxial uses that one and does not look for a better one.'
+        : sv.why_not === 'city' ? 'Pick a city in Settings and Coaxial keeps you on the closest healthy server there. It does not do this for a whole country or region: there are too many servers.'
+        : (sv.name ? 'Server ' + sv.name + (now ? ': ' + ping(now) : '') + (sv.at ? ', chosen ' + when(sv.at) : '') + '. ' : '')
+          + (sv.checked_at ? 'Pinged ' + plural(n, 'server') + ' in your cities ' + when(sv.checked_at) + (b || !sv.name ? '.' : sv.best === sv.name ? ', and this one is the best of them.' : ', and this one is among the best.')
+            : 'Coaxial pings every server in your cities every 5 minutes and keeps you on the closest healthy one.')
+          + (b ? ' ' + b.name + ' looks better: ' + b.why + '. Coaxial moves there by itself once nothing has played for 2 minutes.' : ''));
+      pickBtn.hidden = !sv.possible; pickBtn.disabled = !!(sv.checking || sv.switching); pickBtn.classList.toggle('busy', !!sv.checking);
+      swBtn.hidden = !(sv.possible && b); swBtn.disabled = !!sv.switching; swBtn.classList.toggle('busy', !!sv.switching);
     }
     var text = '', state = 'ok';
     if (progBusy === 'update') { text = 'Updating. The VPN is reconnecting.'; state = 'new'; }
@@ -206,18 +212,27 @@
     if (typeof poll === "function") poll(); else if (st.data) paintProgram(st.data.vpn || {});
   }
   async function pickNow() {
-    var locked = !!(st.data && st.data.vpn && st.data.vpn.server && st.data.vpn.server.locked);
-    if (!window.confirm('Find the fastest server now? Up to 8 servers in your city are tried, and the VPN reconnects once for each. Anything playing or recording stops for a minute or two.' +
-      (locked ? ' A provider here is locked to one address, so it may refuse new streams for a while after the switch.' : ''))) return;
     try {
       var r = await api('POST', '/api/vpn/server/pick');
       var d = r.data || {};
-      toast(d.ok ? (d.message || 'Trying the servers. Watch this page.') : (d.message || 'That did not start.'), !d.ok);
+      toast(d.ok ? (d.message || 'Pinging the servers. This takes a few seconds.') : (d.message || 'That did not start.'), !d.ok);
+    } catch (e) { toast('Could not reach Coaxial.', true); }
+    if (typeof poll === 'function') { poll(); setTimeout(poll, 5000); }
+  }
+  async function switchNow() {
+    var sv = (st.data && st.data.vpn && st.data.vpn.server) || {}, b = sv.better || {};
+    if (!window.confirm('Move to ' + (b.name || 'the better server') + ' now? The VPN reconnects, so anything playing or recording stops for a few seconds.' +
+      (sv.locked ? ' A provider here is locked to one address, so it may refuse new streams for a while after the move.' : ''))) return;
+    try {
+      var r = await api('POST', '/api/vpn/server/switch');
+      var d = r.data || {};
+      toast(d.ok ? (d.message || 'Moving to the better server.') : (d.message || 'That did not start.'), !d.ok);
     } catch (e) { toast('Could not reach Coaxial.', true); }
     if (typeof poll === 'function') poll();
   }
   document.addEventListener('click', function (e) {
     if (e.target.closest && e.target.closest('#vpn-pick-go')) pickNow();
+    if (e.target.closest && e.target.closest('#vpn-switch-go')) switchNow();
     if (e.target.closest && e.target.closest('#vpn-prog-check')) programAct('check');
     if (e.target.closest && e.target.closest('#vpn-prog-update')) programAct('update');
   });
@@ -233,10 +248,10 @@
     var d = st.data, vpn = d.vpn || {}, provs = d.providers || [], playing = d.playing || [];
     var place = [vpn.city, vpn.country].filter(Boolean).join(', ');
 
-    var finding = !!(vpn.server && vpn.server.testing); // the tunnel comes and goes on purpose: one steady state, not up, down, up
+    var finding = !!(vpn.server && vpn.server.switching); // the tunnel comes and goes on purpose: one steady state, not up, down, up
     $('#vpn').dataset.state = finding ? 'finding' : vpn.up ? 'up' : 'down';
-    setText($('#vpn-state'), finding ? 'Finding the fastest server' : vpn.up ? 'Tunnel is up' : 'Tunnel is down');
-    setText($('#vpn-sub'), finding ? 'Trying the servers in your city, one after another. Streams are on hold until the fastest is chosen.'
+    setText($('#vpn-state'), finding ? 'Moving to a better server' : vpn.up ? 'Tunnel is up' : 'Tunnel is down');
+    setText($('#vpn-sub'), finding ? 'Reconnecting to a closer, healthier server. Streams are on hold for a few seconds.'
       : vpn.up ? (place ? 'Your streams leave through ' + place + '.' : 'Your streams leave through the VPN.')
       : downReason(d) || 'Waiting for the VPN to reconnect. Streams are on hold until it does.');
     setText($('#vpn-city'), vpn.up && vpn.city ? vpn.city : 'n/a');
@@ -262,7 +277,7 @@
     var devices = {};
     playing.forEach(function (p) { devices[p.device] = 1; });
     var nDev = Object.keys(devices).length;
-    setText($('#status-summary'), finding ? 'Finding the fastest server. Streams are on hold for a moment.' : !vpn.up ? 'The tunnel is down.'
+    setText($('#status-summary'), finding ? 'Moving to a better server. Streams are on hold for a moment.' : !vpn.up ? 'The tunnel is down.'
       : !provs.length ? 'The tunnel is up. Add a provider to start watching.'
       : !playing.length ? 'The tunnel is up and nothing is playing.'
       : plural(playing.length, 'stream') + ' playing on ' + plural(nDev, 'device') + '.');
@@ -1070,7 +1085,7 @@
             hint: function (has) { return has ? 'The servers in the places picked above. Leave empty for any.' : 'Comma separated. Leave empty for any.'; } }),
           combo({ label: 'Servers by name', path: 'vpn.server_names', multi: true, mono: true, placeholder: 'Any', span: true,
             options: function () { return vpnList('names'); }, get: function () { return v.server_names; }, set: function (x) { v.server_names = x; },
-            hint: function (has) { return (has ? 'For services that name their servers.' : 'Only some services name their servers.') + ' Pick a city and leave both server boxes empty, and Coaxial tries up to 8 servers in that city and stays on the fastest.'; } }),
+            hint: function (has) { return (has ? 'For services that name their servers.' : 'Only some services name their servers.') + ' Pick a city and leave both server boxes empty, and Coaxial pings every server in that city and keeps you on the closest healthy one.'; } }),
           serverRow()))),
 
       section('Extra VPN variables', 'Anything else the built-in VPN client understands, passed straight through as environment variables.', extraEditor()),

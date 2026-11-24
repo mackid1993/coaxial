@@ -20,9 +20,9 @@ What it does:
   whichever each device asks for.
 - **Drops are mended.** When a provider ends a stream someone is watching, Coaxial asks for it again and joins the new
   one where the old one stopped, so players and recorders carry on.
-- **The fastest VPN server, kept up to date.** Pick a city and Coaxial tries the servers there and stays on the
-  fastest. In quiet hours it checks that server again and moves to a better one only if it has slowed down. It never
-  does this while anything is playing.
+- **The closest healthy VPN server, kept up to date.** Pick your cities and Coaxial pings every server in them every
+  5 minutes and keeps you on the closest one that is not dropping packets. It moves only once nothing is playing, or
+  when you press `Switch now`.
 - **The VPN client stays current.** A newer gluetun is downloaded, checked and installed by itself when nothing is
   playing, and undone if the VPN does not connect with it.
 - **Your provider login stays private.** Players only ever see the login you chose for them.
@@ -132,7 +132,7 @@ you chose.
 
 **Status** shows whether the VPN is up, where it comes out (city, country, IP address, network, ping), each provider,
 what is playing right now, and the Coaxial version. It also has the gluetun version with `Check for updates` and the
-chosen VPN server with `Find the fastest server`. An open Status view loads itself again when the Coaxial version
+chosen VPN server with `Check servers now`, and `Switch now` when a better server is found. An open Status view loads itself again when the Coaxial version
 changes, unless settings are unsaved. When the VPN does not come up, Status says why: a `settings.json` that could
 not be read, VPN settings Coaxial refused, or a VPN client that stopped before it connected.
 
@@ -246,39 +246,46 @@ under `Advanced options` on each provider in Settings, and under `advanced` in t
 
 ## Choosing the VPN server
 
-VPN servers in one city can differ a lot in speed, and a fast one can slow down when it gets busy. gluetun picks one
-of the matching servers at random. Coaxial measures them instead, keeps you on the fastest, and keeps an eye on it,
-all without cutting off anything that plays.
+gluetun picks one of the matching servers at random, near or far, busy or not. Coaxial pings every one of them
+instead and keeps you on the closest healthy one, without cutting off anything that plays.
 
-If you name a server in the settings, Coaxial uses that one and leaves it alone. If you pick a city and leave both
-server boxes empty, Coaxial chooses the server for you. It does not do this for the `custom` service.
+If you name a server in the settings, Coaxial uses that one and leaves it alone. If you pick one or more cities and
+leave both server boxes empty, Coaxial chooses the server for you. It does not do this for the `custom` service.
 
 - **A city is required.** With only a country or a region picked, gluetun picks a server at random, as before.
-- **Up to 8 servers are tried per run.** When the city has more, it is a different handful each time, and the server
-  Coaxial chose before is always among them. Only servers that fit your settings are tried: the connection type, and
-  `STREAM_ONLY`, `PORT_FORWARD_ONLY` and `OWNED_ONLY` when they are on. Secure core, Tor, free and multihop servers are
-  left out unless the matching `..._ONLY` setting is on. With fewer than two servers to choose from, nothing is tried.
-- **Trying a server means connecting to it.** The VPN reconnects once for each one, and a test file is downloaded from
-  `speed.cloudflare.com` through the VPN for up to 1.5 seconds. Coaxial stays on the fastest. Only speed counts: the
-  share of packets out of order is logged but not counted. Each takes a few seconds, so 8 take about a minute. Each
-  server is measured the moment its tunnel passes traffic. One that passes nothing within 8 seconds, or cannot be
-  measured within 14, is passed over.
-- **The choice and its speed are saved** in `gluetun/pick.json` in the mounted folder. When the container starts, it
-  goes straight to that server. Nothing is tried at start, so you can watch right away.
-- **In quiet times it checks, it does not shop around.** Once nothing has played or recorded for 10 minutes, Coaxial
-  waits an hour, then measures the server in use without reconnecting, and again every hour until someone plays. The
-  other servers are tried only if no server is chosen yet for your settings, or the one in use is under 50 Mbit/s or
-  under a fifth of the speed it was chosen at, or it cannot be measured twice in a row. A server that is fast but no
-  longer the fastest is kept, because trying the others takes the VPN down for about a minute and a recording that
-  starts then could fail. Measuring the server in use does not reconnect, so nobody notices it. If someone starts
-  playing during a run, it stops on the server it was trying at that moment, and the run is done again in the next
-  quiet time.
+- **Every server that fits is checked.** That means every server in the cities you picked that fits your settings:
+  the connection type, and `STREAM_ONLY`, `PORT_FORWARD_ONLY` and `OWNED_ONLY` when they are on. Secure core, Tor,
+  free and multihop servers are left out unless the matching `..._ONLY` setting is on.
+- **Checking is pinging, not connecting.** Each server gets 10 pings, a quarter of a second apart, all servers at
+  once, so a round takes about 3 seconds however many servers there are. It needs no login and no connection to the
+  servers, sends about 1 KB per server, and goes out the way the VPN's own packets do, outside the tunnel, so each
+  server is measured as the VPN would reach it. The VPN in use is not touched, so nobody notices it.
+- **What a round measures.** For each server: how many pings were lost, the middle answer time, how much the answer
+  times spread (jitter), its lowest answer time over the last day (its distance), and how far the middle answer sits
+  above that lowest one (time spent waiting at a busy server). Servers are ranked by lost pings first, then by answer
+  time plus twice the jitter. A server that lost 10% or more in two rounds running counts as bad.
+- **How often.** Every server every 5 minutes, and the server in use every minute in between, playing or not.
+- **When Coaxial moves you.** When no server is chosen yet for your settings, when the one in use has been losing
+  pings for two rounds running, or when another server has answered at least 15 ms sooner for two full rounds in a
+  row. A server that is merely a few milliseconds closer is not worth a reconnect. Coaxial moves by itself only once
+  nothing has played or recorded for 2 minutes; until then, the Status view shows the better server and a
+  `Switch now` button, which asks first because anything playing stops for a few seconds.
+- **If the new server does not connect** within 45 seconds, Coaxial goes back to the one before and leaves the new
+  one out for an hour.
+- **The firewall.** gluetun's firewall lets nothing leave outside the tunnel but the VPN's own packets. Coaxial adds
+  one rule to it: outgoing pings that carry gluetun's own mark, on the container's network card. Nothing else is let
+  out, and the answers come back under gluetun's own rule for answers.
+- **The choice is saved** in `gluetun/pick.json` in the mounted folder. When the container starts, it goes straight to
+  that server, so you can watch right away.
 - **What counts as playing.** A live channel open on any device, a device that asked for an HLS playlist in the last
   30 seconds, and a movie, episode or catch-up until a minute after its last part was sent. The same rule decides when
   a VPN client update may install (below).
-- **`Find the fastest server`** on the Status view runs it now, and goes on even if someone starts playing. It asks
-  first, because anything playing or recording stops for a minute or two.
+- **`Check servers now`** on the Status view runs a round right away. It never reconnects anything.
+- **A provider locked to one address.** Once a server is chosen, Coaxial does not move by itself; `Switch now` still
+  works.
 - If the chosen server stops connecting for 2 minutes, Coaxial drops its choice and lets gluetun pick.
+- **The pinging** is done by [pro-bing](https://github.com/prometheus-community/pro-bing) (MIT), the ping library of
+  the Prometheus project. See `ACKNOWLEDGMENTS.md`.
 
 ## VPN client updates
 

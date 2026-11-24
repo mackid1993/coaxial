@@ -56,6 +56,41 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## pro-bing
+
+Coaxial pings the VPN servers with [pro-bing](https://github.com/prometheus-community/pro-bing), unchanged, as a Go
+module (`coaxial/probe.go`). pro-bing is the ping library of the Prometheus project, kept by the Prometheus
+community, and grew out of Cameron Sparr's go-ping. Thank you to its authors. It brings four small Go modules with it:
+`golang.org/x/net`, `golang.org/x/sync` and `golang.org/x/sys` from the Go project (BSD-3-Clause) and
+`github.com/google/uuid` (BSD-3-Clause).
+
+pro-bing's license, word for word:
+
+```
+The MIT License (MIT)
+
+Copyright 2022 The Prometheus Authors
+Copyright 2016 Cameron Sparr and contributors.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## flag-icons
 
 The country flag that the web page shows next to the VPN's exit country is from

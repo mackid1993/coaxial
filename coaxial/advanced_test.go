@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -625,28 +624,21 @@ func TestLockWait(t *testing.T) {
 	}
 }
 
-// With a provider locked to one address, the server picker never changes a chosen server on its own; the page's button
-// still does (it is not run here: it starts the VPN).
+// With a provider locked to one address, a server once chosen is never changed on Coaxial's own, even when a
+// better one is found; the page's button still can (it is not run here: it starts the VPN).
 func TestLockedProviderKeepsServer(t *testing.T) {
-	asked := 0
-	oldMeasure := measure
-	defer func() { measure = oldMeasure }()
-	measure = func(string, net.IP) (float64, float64, error) { asked++; return 100, 0, nil }
-	l := &launcher{dir: t.TempDir(), quit: make(chan int, 4), prog: builtinProgram}
+	l := &launcher{dir: t.TempDir(), quit: make(chan int, 4), prog: builtinProgram, pickLoaded: true}
 	l.set = &settings{}
 	l.set.parse([]byte(`{"providers":[{"name":"One","advanced":{"locked_to_address":true}}],` +
 		`"vpn":{"service_provider":"fakevpn","type":"wireguard","server_cities":"New York","gluetun_version":"builtin"}}`))
-	optionsMu.Lock()
-	optionsKept, optionsKey = &vpnOptions{Updated: map[string]string{}}, "built in"
-	optionsServers = map[string][]serverEntry{"fakevpn": {
-		{VPN: "wireguard", City: "New York", ServerName: "NY#1"}, {VPN: "wireguard", City: "New York", ServerName: "NY#2"}}}
-	optionsMu.Unlock()
-	defer func() { optionsMu.Lock(); optionsKept, optionsKey, optionsServers = nil, "", nil; optionsMu.Unlock() }()
-	l.pick = picked{Key: pickKey(l.set.vpnEnv()), Env: "SERVER_NAMES=NY#2", Name: "NY#2", Mbps: 100} // (chosen before)
-	l.pickServer("a test", false)
+	key := pickKey(l.set.vpnEnv())
+	l.pick = picked{Key: key, Env: "SERVER_NAMES=NY#2", Name: "NY#2"} // (chosen before)
+	l.probeKey = key
+	l.better, l.betterWhy, l.betterRuns = &probeResult{Name: "NY#1", env: "SERVER_NAMES=NY#1", Median: 3}, "a test", 5
+	l.switchServer(false)
 	_, err := os.Stat(pickFile(l.dir))
-	if asked != 0 || l.pickTry != "" || l.pick.Env != "SERVER_NAMES=NY#2" || !l.pickAt.IsZero() || err == nil {
-		t.Errorf("servers were tried on Coaxial's own: %d measured, trying %q, chose %q at %v", asked, l.pickTry, l.pick.Env, l.pickAt)
+	if l.pickTry != "" || l.pick.Env != "SERVER_NAMES=NY#2" || !l.pickAt.IsZero() || err == nil {
+		t.Errorf("the server was changed on Coaxial's own: trying %q, chose %q at %v", l.pickTry, l.pick.Env, l.pickAt)
 	}
 	if st := l.pickStatus(); st["locked"] != true {
 		t.Errorf("the status does not say a provider is locked: %v", st)

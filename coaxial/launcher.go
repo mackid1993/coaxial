@@ -101,8 +101,18 @@ type launcher struct {
 	updFailed        string // the newer program an update could not fetch: not tried again by itself
 	pick             picked // the VPN server chosen by trying them (pick.go), when, and the one being tried now
 	pickAt           time.Time
-	checkMbps        float64   // the server in use, as last measured by the quiet-hour check (pick.go)
-	checkAt          time.Time // when (zero: not measured since this start)
+	probing          bool                  // a ping round is running (probe.go)
+	probeAsked       bool                  // ...and one was asked for from the page
+	probeKey         string                // the settings the rounds below were for
+	probeAt          time.Time             // the last round of every server
+	probeInUseAt     time.Time             // the last round of the one in use
+	probeList        []probeResult         // the last round, best first
+	probeFloor       map[string]probeFloor // each server's lowest ping over the last day
+	probeLossy       map[string]bool       // each server lost pings in the last round
+	probeSkip        map[string]time.Time  // servers that would not connect, and when
+	better           *probeResult          // a server clearly better than the one in use, why, and for how many rounds
+	betterWhy        string
+	betterRuns       int
 	pickTry          string
 	pickLoaded       bool
 	pickBusy         bool
@@ -538,6 +548,7 @@ func (l *launcher) listenUI(n int) error {
 	mux.HandleFunc("/api/vpn/options", l.apiOptions)
 	mux.HandleFunc("/api/vpn/servers", l.apiServers)
 	mux.HandleFunc("/api/vpn/server/pick", l.apiPick)
+	mux.HandleFunc("/api/vpn/server/switch", l.apiSwitch)
 	mux.HandleFunc("/api/vpn/refresh", l.apiRefresh)
 	mux.HandleFunc("/api/vpn/program/check", l.apiProgramCheck)
 	mux.HandleFunc("/api/vpn/program/update", l.apiProgramUpdate)
@@ -818,14 +829,15 @@ type serverEntry struct {
 	ServerName string `json:"server_name"`
 	Hostname   string `json:"hostname"`
 	// what picking a server goes by (pick.go)
-	VPN         string `json:"vpn"`
-	SecureCore  bool   `json:"secure_core"`
-	Tor         bool   `json:"tor"`
-	Free        bool   `json:"free"`
-	MultiHop    bool   `json:"multihop"`
-	Stream      bool   `json:"stream"`
-	PortForward bool   `json:"port_forward"`
-	Owned       bool   `json:"owned"`
+	VPN         string   `json:"vpn"`
+	SecureCore  bool     `json:"secure_core"`
+	Tor         bool     `json:"tor"`
+	Free        bool     `json:"free"`
+	MultiHop    bool     `json:"multihop"`
+	Stream      bool     `json:"stream"`
+	PortForward bool     `json:"port_forward"`
+	Owned       bool     `json:"owned"`
+	IPs         []string `json:"ips"` // the server's addresses, pinged to rank it (probe.go)
 }
 
 // optionsServers: every service's servers as last read (set whole by readOptions, never changed after).
