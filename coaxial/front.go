@@ -773,6 +773,9 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 	for i, srv := range servers { // (every provider is known before the first request is answered)
 		go srv.Serve(listeners[i])
 	}
+	if backgroundAccounts {
+		go keepAccounts(stop)
+	}
 	if len(fronts) == 0 {
 		say("NO PROVIDERS STARTED: fix the settings in the web interface or in settings.json")
 	} else {

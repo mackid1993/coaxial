@@ -55,6 +55,8 @@ func TestLimitKeptAcrossRestart(t *testing.T) {
 			return a, b
 		}
 	}
+	backgroundAccounts = false // (this test is about what a login teaches and what a restart keeps)
+	defer func() { backgroundAccounts = true }()
 	t.Setenv("COAXIAL_LIMITS", "")
 	end := start()
 	r, err := devClient.Get("http://127.0.0.1:" + ports[0] + "/player_api.php?username=tv&password=easy")
