@@ -466,6 +466,8 @@ type clockFix struct {
 	videoPID int
 	started  bool
 	carry    []byte // after a jump: the start of a packet whose rest has not come yet
+	next     int64  // where in the stream the next packet starts (packets are not always 188 bytes apart: a
+	//                provider can cut one short), -1: not known, find it
 }
 
 const tsWrap = int64(1) << 33
@@ -518,18 +520,38 @@ func (c *clockFix) raw(clock float64) float64 {
 // whose clock never jumped is passed on exactly as read.
 func (c *clockFix) fix(data []byte, off int64) []byte {
 	if !c.started {
-		c.started, c.last, c.lastPTS, c.pcrPID, c.videoPID = true, -1, -1, -1, -1
+		c.started, c.last, c.lastPTS, c.pcrPID, c.videoPID, c.next = true, -1, -1, -1, -1, -1
 	}
 	if len(c.carry) > 0 {
 		data = append(c.carry, data...)
 		c.carry = nil
 	}
-	i := int((188 - off%188) % 188)
-	for ; i+188 <= len(data); i += 188 {
-		p := data[i : i+188]
-		if p[0] != 0x47 {
-			continue
+	i := -1
+	if c.next >= off && c.next-off <= int64(len(data)) {
+		i = int(c.next - off)
+	} else if g := c.next + 188 - off; c.next >= 0 && g >= 0 && g <= int64(len(data)) &&
+		(g == int64(len(data)) || data[g] == 0x47 && (g+188 >= int64(len(data)) || data[g+188] == 0x47)) {
+		i = int(g) // the last read ended inside a packet: the next one starts 188 bytes after it (when it does)
+	}
+	for ; ; i += 188 {
+		if i < 0 || i < len(data) && (data[i] != 0x47 || i+188 < len(data) && data[i+188] != 0x47) {
+			// Not on a packet start, or on the start of a packet the provider cut short (the next one does not follow
+			// 188 bytes on), or the first read: find the next place where packet starts follow 188 bytes apart. Bytes
+			// before it are passed on untouched, never rewritten.
+			from := i + 1
+			if i < 0 {
+				from = 0
+			}
+			i = syncAt(data, from)
+			if i < 0 {
+				c.next = -1
+				return data
+			}
 		}
+		if i+188 > len(data) {
+			break
+		}
+		p := data[i : i+188]
 		pid := int(p[1]&0x1f)<<8 | int(p[2])
 		pos := 4
 		if p[3]&0x20 != 0 { // an adaptation field
@@ -577,11 +599,30 @@ func (c *clockFix) fix(data []byte, off int64) []byte {
 			writeTS(e[14:19], readTS(e[14:19])+c.off)
 		}
 	}
+	c.next = off + int64(i)
 	if c.off != 0 && i < len(data) && data[i] == 0x47 {
 		c.carry = append([]byte(nil), data[i:]...)
 		data = data[:i]
 	}
 	return data
+}
+
+// syncAt: the first position at or after from where a packet starts and the next one does too, 188 bytes on (and the
+// one after that, when data reaches it). When data ends before that can be seen: the first 0x47 near the end that
+// could be a packet start, to be checked when more arrives. -1 when there is none.
+func syncAt(data []byte, from int) int {
+	j := max(from, 0)
+	for ; j+188 < len(data); j++ {
+		if data[j] == 0x47 && data[j+188] == 0x47 && (j+376 >= len(data) || data[j+376] == 0x47) {
+			return j
+		}
+	}
+	for ; j < len(data); j++ {
+		if data[j] == 0x47 {
+			return j
+		}
+	}
+	return -1
 }
 
 // spliceAt: where a stream the provider sent again joins on to the old one. A provider asked again starts
@@ -961,9 +1002,42 @@ func (ch *channel) drop() { // let go of the provider's stream now (mu held)
 }
 
 // tsSource: the provider's own MPEG-TS stream, asked for again if it ends while people watch.
+// reaskBackoff: seconds between the extra asks for a watched channel whose provider answered 404 or a server error
+// right after ending it (tsSource). About a minute in all.
+var reaskBackoff = []float64{2, 3, 5, 10, 10, 15, 15}
+
+func reaskTotal() float64 {
+	t := 0.0
+	for _, s := range reaskBackoff {
+		t += s
+	}
+	return t
+}
+
+// watched: someone still reads the channel.
+func watched(ch *channel) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return len(ch.readers) > 0
+}
+
+// reaskAllowed: whether an extra ask may still go out: not while a provider locked to one address waits after a
+// VPN change, and not (on an account that allows one connection, or whose limit is not known) once another channel
+// of this provider was opened since the drop (asking would end that one; the same rule as the first ask again).
+func reaskAllowed(ch *channel, since float64) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	f, op := ch.owner, lastOpen[ch.provider]
+	if f != nil && lockLeft(f.locked, f.lockWait, vpnChanged, mono()) > 0 {
+		return false
+	}
+	single := f == nil || f.limit() <= 1
+	return !(single && op.at > since && op.key != ch.key)
+}
+
 func tsSource(target string, h http.Header) source {
 	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
-		again, sent, quiet := false, int64(0), 0
+		again, sent, quiet, tries, dropped := false, int64(0), 0, 0, 0.0
 		clockPID, clock := -1, -1.0 // the newest stream clock passed on (see spliceAt)
 		var clk clockFix            // keeps the stream's clock running on when the provider's feed starts a new file
 		for {
@@ -973,6 +1047,30 @@ func tsSource(target string, h http.Header) source {
 				wait = reopenWait // readers are waiting
 			}
 			r, err := fetch(ctx, target, h, opts{wait: wait})
+			// A channel the provider ended while it was watched is often being restarted on the provider's side: for a
+			// few seconds up to a minute or so it answers 404 or a server error, then plays again. So while anyone still
+			// watches, it is asked again a few more times, further apart, before the readers are let go.
+			if again && tries < len(reaskBackoff) && mono()-dropped < reaskTotal() && ctx.Err() == nil &&
+				(err != nil || r.StatusCode == 404 || r.StatusCode >= 500) && watched(ch) {
+				if r != nil {
+					r.Body.Close()
+				}
+				if tries == 0 {
+					what := "no answer"
+					if err == nil {
+						what = strconv.Itoa(r.StatusCode)
+					}
+					say("a provider answered %s when a watched channel was asked for again; trying again for up to %.0f s", what, reaskTotal())
+				}
+				if err := sleep(ctx, reaskBackoff[tries]); err != nil {
+					return err
+				}
+				if !reaskAllowed(ch, dropped) {
+					return nil
+				}
+				tries++
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -981,14 +1079,18 @@ func tsSource(target string, h http.Header) source {
 				text, _ := readAll(r, 65536, 5) // what the provider said, passed on to the player
 				return &refused{status: r.StatusCode, kind: r.Header.Get("Content-Type"), text: text[:min(len(text), 65536)]}
 			}
+			if tries > 0 {
+				say("a channel asked for again plays again after %d more tries", tries)
+				tries = 0
+			}
 			err = func() error {
 				defer r.Body.Close()
 				setWait(r, quietWait)
 				if again {
 					setWait(r, 2*reopenWait)
 				}
-				clk.carry = nil // (half a packet of the old stream is of no use)
-				var head []byte // a stream opened again is joined on at a whole packet
+				clk.carry, clk.next = nil, -1 // (half a packet of the old stream is of no use; find the new one's packets)
+				var head []byte               // a stream opened again is joined on at a whole packet
 				joining := again
 				buf := make([]byte, 65536)
 				for {
@@ -1064,7 +1166,7 @@ func tsSource(target string, h http.Header) source {
 			if stop {
 				return nil
 			}
-			again = true
+			again, dropped = true, mono()
 			say("a provider ended a channel that was being watched; asking for it again")
 			if err := sleep(ctx, dropGap); err != nil {
 				return err

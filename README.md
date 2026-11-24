@@ -350,6 +350,16 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
   connection (or whose limit is not known yet), Coaxial does not ask again if another channel of the same provider was
   opened in the last 15 seconds, since asking would end that one. It also stops asking once the channel has gone
   silent twice in a row.
+- **When a provider restarts a channel.** Right after ending a stream, a provider is often restarting that channel on
+  its side, and for a few seconds it answers "not found" or a server error. While someone is still watching, Coaxial
+  asks again a few more times, further apart each time, for up to a minute, and the picture comes back on its own.
+  The same rules as above apply to every extra ask. A refusal that means the login or the channel is wrong ends the
+  stream at once, as before.
+- **24/7 channels and new episodes.** Some channels play one file after another, and the provider starts each file's
+  clock over from zero inside the same stream. Many players take that as a huge jump and loop or freeze. Coaxial
+  shifts the timestamps from that point on so the clock simply carries on, and the next episode plays. A stream whose
+  clock never starts over is passed on byte for byte. If the provider cuts a packet short, Coaxial finds where the
+  next packet starts and carries on from there.
 - **Changing channel.** A channel nobody is on any more is let go before the next one is asked for, and the provider
   gets a tenth of a second to see it, so one-connection accounts can change channel. A channel in its first seconds is
   kept for 0.4 seconds after its last reader leaves, because players often hang up and ask again while tuning.
