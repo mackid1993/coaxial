@@ -451,6 +451,34 @@ func lastPCR(b []byte, want int) (int, float64, bool) {
 	return pid, v, ok
 }
 
+// markJumps: a channel's clock jumps when the provider's own feed starts a new file (a 24/7 channel moving
+// on to the next episode) without saying so. Players that are not told take the new, earlier times for
+// video they already have and play that again. MPEG-TS has a flag for exactly this, the discontinuity
+// indicator on the packet that carries the new clock; it is set here, in place, on such a packet. Nothing
+// is added, held back or taken out, and a stream whose clock runs on normally is not touched. off: how
+// many bytes of the stream came before data (packets are 188 bytes from the stream's start).
+func markJumps(data []byte, off int64, pid *int, last *float64) {
+	for i := int((188 - off%188) % 188); i+11 <= len(data); i += 188 {
+		p := data[i:]
+		if p[0] != 0x47 || p[3]&0x20 == 0 || p[4] < 7 || p[5]&0x10 == 0 {
+			continue
+		}
+		id := int(p[1]&0x1f)<<8 | int(p[2])
+		if *pid >= 0 && id != *pid {
+			continue
+		}
+		v := float64(int64(p[6])<<25|int64(p[7])<<17|int64(p[8])<<9|int64(p[9])<<1|int64(p[10])>>7) / 90000
+		if *pid >= 0 && *last >= 0 && p[5]&0x80 == 0 {
+			back, ahead := *last-v, v-*last
+			if (back > 1 && back < 90000) || ahead > 30 { // (not the clock's own wrap after about 26 hours)
+				p[5] |= 0x80
+				say("a channel's clock jumped by %+.0f s (a new file in the provider's feed); marked for players as a new start", v-*last)
+			}
+		}
+		*pid, *last = id, v
+	}
+}
+
 // spliceAt: where a stream the provider sent again joins on to the old one. A provider asked again starts
 // with its opening burst, seconds of video from before where the old stream stopped; passed on, the
 // stream's clock ran backwards and players froze on it. So the new stream joins at its first keyframe
@@ -831,7 +859,8 @@ func (ch *channel) drop() { // let go of the provider's stream now (mu held)
 func tsSource(target string, h http.Header) source {
 	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
 		again, sent, quiet := false, int64(0), 0
-		clockPID, clock := -1, -1.0 // the newest stream clock passed on (see spliceAt)
+		clockPID, clock := -1, -1.0    // the newest stream clock passed on (see spliceAt)
+		markPID, markClock := -1, -1.0 // the stream clock as last seen packet by packet (see markJumps)
 		for {
 			began, got := mono(), false
 			wait := float64(headerWait)
@@ -887,6 +916,7 @@ func tsSource(target string, h http.Header) source {
 						}
 					}
 					if len(data) > 0 {
+						markJumps(data, sent, &markPID, &markClock)
 						if p, v, ok := lastPCR(data, clockPID); ok {
 							clockPID, clock = p, v
 						}
