@@ -1,7 +1,7 @@
 // Ranking the VPN servers by ping. Every server that fits the settings is pinged from outside the tunnel,
 // the way the VPN's own packets go, so each one is measured as the VPN would reach it. Pinging needs no
 // connection to the servers, no login and almost no data (about 1 KB a server), so every server in the
-// places picked is pinged every few minutes while nothing plays, and nothing is cut while that happens. The
+// places picked is pinged once an hour while nothing plays, and nothing is cut while that happens. The
 // VPN is moved to a better server by itself only once nothing has played for a while, or right away when
 // asked from the page. The pinging itself is pro-bing's (github.com/prometheus-community/pro-bing, MIT).
 package main
@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	probeEvery    = 5 * time.Minute        // every server that fits is pinged this often
-	probeInUse    = time.Minute            // the server in use is pinged this often in between
+	probeEvery    = time.Hour              // every server that fits is pinged this often (only while nothing plays)
+	probeInUse    = time.Hour              // (the server in use is pinged in that same round; no rounds in between)
 	probeCount    = 10                     // pings to each server per round
 	probeInUseN   = 5                      // ...and to the one in use, in between
 	probeGap      = 250 * time.Millisecond // between two pings to one server (Proton drops pings sent faster than about 5 a second)

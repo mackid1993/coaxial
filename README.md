@@ -21,8 +21,8 @@ What it does:
 - **Drops are mended.** When a provider ends a stream someone is watching, Coaxial asks for it again and joins the new
   one where the old one stopped, so players and recorders carry on.
 - **The closest healthy VPN server, kept up to date.** Pick your cities and, whenever nothing is playing, Coaxial
-  pings every server in them every 5 minutes and keeps you on the closest one that is not dropping packets. It moves
-  only once nothing is playing, or when you press `Switch now`.
+  pings every server in them once an hour and keeps you on the closest one that is not dropping packets. It moves only
+  once nothing is playing, or when you press `Switch now`.
 - **The VPN client stays current.** A newer gluetun is downloaded, checked and installed by itself when nothing is
   playing, and undone if the VPN does not connect with it.
 - **Your provider login stays private.** Players only ever see the login you chose for them.
@@ -264,11 +264,12 @@ leave both server boxes empty, Coaxial chooses the server for you. It does not d
   times spread (jitter), its lowest answer time over the last day (its distance), and how far the middle answer sits
   above that lowest one (time spent waiting at a busy server). Servers are ranked by lost pings first, then by answer
   time plus twice the jitter. A server that lost 10% or more in two rounds running counts as bad.
-- **How often.** Only while nothing plays or records: then every server every 5 minutes, and the server in use
-  every minute in between. While anything plays, nothing is pinged, so the network is left to the streams.
+- **How often.** Once an hour, and only while nothing plays or records. While anything plays, nothing is pinged, so
+  the network is left to the streams. Servers in one city rarely change places, and a constant sweep of a VPN
+  service's servers from one address can look like scanning to it, so once an hour is enough.
   `Check servers now` runs a round at any time.
 - **When Coaxial moves you.** When no server is chosen yet for your settings, when the one in use has been losing
-  pings for two rounds running, or when another server has answered at least 15 ms sooner for two full rounds in a
+  pings for two rounds running, or when another server has answered at least 15 ms sooner for two hourly rounds in a
   row. A server that is merely a few milliseconds closer is not worth a reconnect. Coaxial moves by itself only once
   nothing has played or recorded for 2 minutes; until then, the Status view shows the better server and a
   `Switch now` button, which asks first because anything playing stops for a few seconds.
