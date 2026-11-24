@@ -264,8 +264,9 @@ leave both server boxes empty, Coaxial chooses the server for you. It does not d
   times spread (jitter), its lowest answer time over the last day (its distance), and how far the middle answer sits
   above that lowest one (time spent waiting at a busy server). Servers are ranked by lost pings first, then by answer
   time plus twice the jitter. A server that lost 10% or more in two rounds running counts as bad.
-- **How often.** The first round runs about 20 seconds after the container starts, then every server every 5
-  minutes, and the server in use every minute in between, playing or not.
+- **How often.** Only while nothing plays or records: then every server every 5 minutes, and the server in use
+  every minute in between. While anything plays, nothing is pinged, so the network is left to the streams.
+  `Check servers now` runs a round at any time.
 - **When Coaxial moves you.** When no server is chosen yet for your settings, when the one in use has been losing
   pings for two rounds running, or when another server has answered at least 15 ms sooner for two full rounds in a
   row. A server that is merely a few milliseconds closer is not worth a reconnect. Coaxial moves by itself only once

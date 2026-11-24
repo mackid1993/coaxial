@@ -1,7 +1,7 @@
 // Ranking the VPN servers by ping. Every server that fits the settings is pinged from outside the tunnel,
 // the way the VPN's own packets go, so each one is measured as the VPN would reach it. Pinging needs no
 // connection to the servers, no login and almost no data (about 1 KB a server), so every server in the
-// places picked is pinged every few minutes, playing or not, and nothing is cut while that happens. The
+// places picked is pinged every few minutes while nothing plays, and nothing is cut while that happens. The
 // VPN is moved to a better server by itself only once nothing has played for a while, or right away when
 // asked from the page. The pinging itself is pro-bing's (github.com/prometheus-community/pro-bing, MIT).
 package main
@@ -416,13 +416,19 @@ func (l *launcher) switchServer(asked bool) {
 	say("VPN server: now on %s (%.0f ms, %.0f%% of pings lost), the best of %d servers pinged", b.Name, b.Median, b.Loss, n)
 }
 
-// probeTick: called by watchProgram every 20 s while the VPN is up. quiet: how long nothing has played.
+// probeTick: called by watchProgram every 20 s while the VPN is up. quiet: how long nothing has played (0 while
+// something plays).
 func (l *launcher) probeTick(quiet time.Duration) {
 	l.mu.Lock()
 	s, at, last, asked := l.set, l.probeAt, l.probeInUseAt, l.probeAsked
 	l.probeAsked = false
 	l.mu.Unlock()
 	if s == nil {
+		return
+	}
+	// Nothing is pinged while anything plays or records (quiet 0): the network is left to the streams. The
+	// rounds pick up again once it is quiet, and the page's button still runs one at any time.
+	if quiet == 0 && !asked {
 		return
 	}
 	if pickKey(s.vpnEnv()) == "" {

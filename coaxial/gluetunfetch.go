@@ -996,7 +996,7 @@ func (l *launcher) watchProgram() {
 			writeWhole(filepath.Join(bin, "good.json"), map[string]string{"digest": works})
 			good = works
 		}
-		// The VPN servers are pinged every few minutes, playing or not (pinging cuts nothing), and the VPN is
+		// The VPN servers are pinged every few minutes while nothing plays (probeTick), and the VPN is
 		// moved to a better one once nothing has played for a while (probe.go).
 		playing := !nothingPlaying()
 		quiet := time.Duration(0)
