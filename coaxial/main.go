@@ -531,11 +531,9 @@ func (c *clockFix) fix(data []byte, off int64) []byte {
 				raw := int64(p[6])<<25 | int64(p[7])<<17 | int64(p[8])<<9 | int64(p[9])<<1 | int64(p[10])>>7
 				v := (raw + c.off) % tsWrap
 				if c.jumped(v, c.last) {
-					was := c.last
 					c.off = ((c.off+tsDiff(c.last, v)+3600)%tsWrap + tsWrap) % tsWrap // (40 ms after the last one)
 					v = (raw + c.off) % tsWrap
-					say("a channel's clock started over (a new file in the provider's feed); its timestamps now carry on from where they were (PCR pid %d: was %.3f s, provider sent %.3f s, passed on as %.3f s; offset %.3f s; provider flagged it: %v)",
-						pid, float64(was)/90000, float64(raw)/90000, float64(v)/90000, float64(c.off)/90000, p[5]&0x80 != 0)
+					say("a channel's clock started over (a new file in the provider's feed); its timestamps now carry on from where they were")
 				}
 				c.last = v
 				p[6], p[7], p[8], p[9] = byte(v>>25), byte(v>>17), byte(v>>9), byte(v>>1)
@@ -558,10 +556,8 @@ func (c *clockFix) fix(data []byte, off int64) []byte {
 			c.videoPID = pid
 			v := (pts + c.off) % tsWrap
 			if c.jumped(v, c.lastPTS) {
-				was := c.lastPTS
 				c.off = ((c.off+tsDiff(c.lastPTS, v)+3600)%tsWrap + tsWrap) % tsWrap
-				say("a channel's clock started over (a new file in the provider's feed); its timestamps now carry on from where they were (video pid %d: was %.3f s, provider sent %.3f s, passed on as %.3f s; offset %.3f s)",
-					pid, float64(was)/90000, float64(pts)/90000, float64((pts+c.off)%tsWrap)/90000, float64(c.off)/90000)
+				say("a channel's clock started over (a new file in the provider's feed); its timestamps now carry on from where they were")
 			}
 			c.lastPTS = (pts + c.off) % tsWrap
 		}
