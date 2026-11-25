@@ -249,8 +249,8 @@ h2 { font-size: 15px; font-weight: 620; letter-spacing: -.01em; }
 
 /* Playing table */
 .table-card { overflow: hidden; }
-.playing { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.playing th { padding: 13px 20px 11px; text-align: left; border-bottom: 1px solid var(--line); }
+.playing { width: 100%; border-collapse: collapse; }
+.playing th { padding: 13px 20px 11px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
 .playing td { padding: 14px 20px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
 .playing tbody tr:last-child td { border-bottom: 0; }
 .playing tbody tr { transition: background-color .15s; }
@@ -258,8 +258,12 @@ h2 { font-size: 15px; font-weight: 620; letter-spacing: -.01em; }
 .playing tbody tr.enter { animation: row-in .4s var(--ease); }
 @keyframes row-in { from { opacity: 0; background: rgba(255, 214, 10, .09); } }
 .playing .r { text-align: right; }
-.c-device { width: 17%; } .c-channel { width: 28%; } .c-provider { width: 18%; }
-.c-format { width: 12%; } .c-time { width: 14%; } .c-data { width: 11%; }
+/* The short columns size to their text and never cut it; channel and provider share the rest and
+   shorten with an ellipsis (max-width: 0 lets a cell in an auto-width table do that). */
+.c-channel { width: 60%; } .c-provider { width: 25%; }
+.c-device, .c-format, .c-time, .c-data { width: 1%; }
+.playing td.c-channel, .playing td.c-provider { max-width: 0; }
+.playing td.c-device, .playing td.c-format, .playing td.c-time, .playing td.c-data { overflow: visible; text-overflow: clip; }
 td.c-device { color: var(--text-2); }
 .ch-name { font-weight: 580; }
 .ch-id { margin-left: 8px; color: var(--text-3); font-family: var(--mono); font-size: 12px; }
@@ -270,7 +274,8 @@ td.c-provider { color: var(--text-2); }
 td.c-time, td.c-data { font-variant-numeric: tabular-nums; }
 td.c-data { color: var(--text-2); }
 .chip {
-  display: inline-block; padding: 2px 7px; border: 1px solid var(--line-2); border-radius: 6px;
+  display: inline-block; white-space: nowrap; vertical-align: middle;
+  padding: 2px 7px; border: 1px solid var(--line-2); border-radius: 6px;
   color: var(--text-2); font: 600 11px/1.45 var(--mono); letter-spacing: .02em;
 }
 
@@ -610,6 +615,7 @@ body.dirty main.wrap { padding-bottom: 150px; }
   .set { grid-template-columns: 1fr; padding: 28px 0; }
   .set-info { position: static; }
   .setup { grid-template-columns: 1fr; padding: 32px; }
+  .playing th, .playing td { padding-left: 12px; padding-right: 12px; }
 }
 
 /* Phone */
@@ -644,6 +650,7 @@ body.dirty main.wrap { padding-bottom: 150px; }
   .playing tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 14px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
   .playing tbody tr:last-child { border-bottom: 0; }
   .playing td { display: block; width: auto; padding: 0; border: 0; }
+  .playing td.c-channel, .playing td.c-provider { max-width: none; }
   td.c-channel { grid-area: 1 / 1; } td.c-time { grid-area: 1 / 2; }
   td.c-device { grid-area: 2 / 1; font-size: 13px; } td.c-data { grid-area: 2 / 2; font-size: 13px; }
   td.c-provider { grid-area: 3 / 1; font-size: 13px; } td.c-format { grid-area: 3 / 2; text-align: right; }

@@ -325,12 +325,17 @@
     }, function (el, p) {
       var td = el.children;
       setText(td[0], p.device || '');
+      td[0].title = p.device || '';
       setText($('.ch-name', el), p.channel_name || 'Channel ' + p.channel_id);
+      td[1].title = (p.channel_name || 'Channel ' + p.channel_id) + (p.channel_name && p.channel_id ? ' #' + p.channel_id : '');
+      td[2].title = p.provider || '';
       setText($('.ch-id', el), p.channel_name && p.channel_id ? '#' + p.channel_id : '');
       setText($('.pv-name', el), p.provider || '');
       var pi = provs.findIndex(function (q) { return q.name === p.provider; });
       $('.tap', el).style.setProperty('--c', pi < 0 ? '' : RING[pi % RING.length]);
-      setText($('.chip', el), p.format || '');
+      // (short label in the chip; the full one on hover)
+      setText($('.chip', el), FORMAT_SHORT[p.format] || p.format || '');
+      td[3].title = p.format || '';
       el._secs = Number(p.seconds) || 0;
       setText(td[4], fmtDuration(el._secs));
       setText(td[5], fmtData(p.mb_sent));
@@ -338,6 +343,8 @@
     st.painted = true;
     renderLive();
   }
+
+  var FORMAT_SHORT = { 'MPEG-TS fed from HLS': 'TS from HLS', 'HLS built from MPEG-TS': 'HLS from TS' };
 
   // Durations tick every second between polls so the table feels live.
   function tickClock() {
