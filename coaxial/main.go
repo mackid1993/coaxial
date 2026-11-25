@@ -1272,6 +1272,77 @@ func failed(w http.ResponseWriter, err error) {
 }
 
 // live: path is "/ts" (the provider's own MPEG-TS) or "/hls" (MPEG-TS made from the channel's HLS).
+// tuneWatch: what a player got in the first tuneWatchFor seconds after it asked for a channel, logged once: seconds
+// of video (by the stream's clock) in hand at 2, 5 and 10 s, the lowest spare video (video sent minus time since
+// the first video went out) and the longest pause between sends. A spinner just after a tune shows here as spare
+// video at or below zero. It only reads what was already sent; nothing waits on it.
+type tuneWatch struct {
+	done            bool
+	pid             int
+	have            bool
+	pcr0, span      float64
+	first, last     float64 // when the first video went out, and the last send
+	gap, gapAt      float64
+	low, lowAt      float64
+	at2, at5, at10  float64
+	got2, got5, g10 bool
+}
+
+const tuneWatchFor = 30
+
+func (tw *tuneWatch) see(data []byte, rd *reader, provider string) {
+	now := mono()
+	if tw.first == 0 {
+		tw.first, tw.low = now, 1e9
+	}
+	since := now - rd.came
+	if tw.last > 0 && now-tw.last > tw.gap {
+		tw.gap, tw.gapAt = now-tw.last, since
+	}
+	tw.last = now
+	if pid, v, ok := lastPCR(data, tw.pid); ok {
+		tw.pid = pid
+		if !tw.have {
+			tw.pcr0, tw.have = v, true
+		}
+		d := v - tw.pcr0
+		if d < -1000 { // (the clock's wrap)
+			d += float64(int64(1)<<33) / 90000
+		}
+		if d > tw.span && d < 600 {
+			tw.span = d
+		}
+	}
+	if spare := tw.span - (now - tw.first); tw.have && now-tw.first >= 1 && spare < tw.low {
+		tw.low, tw.lowAt = spare, since
+	}
+	if !tw.got2 && since >= 2 {
+		tw.at2, tw.got2 = tw.span, true
+	}
+	if !tw.got5 && since >= 5 {
+		tw.at5, tw.got5 = tw.span, true
+	}
+	if !tw.g10 && since >= 10 {
+		tw.at10, tw.g10 = tw.span, true
+	}
+	if since >= tuneWatchFor {
+		tw.done = true
+		low := tw.low
+		if low == 1e9 {
+			low = 0
+		}
+		ev := lg.Info()
+		if low <= 0.5 {
+			ev = lg.Warn()
+		}
+		ev.Str("device", rd.who).Str("channel", rd.id).Str("provider", provider).Float64("video_at_2s", round1(tw.at2)).
+			Float64("video_at_5s", round1(tw.at5)).Float64("video_at_10s", round1(tw.at10)).Float64("lowest_spare_s", round1(low)).
+			Float64("lowest_at_s", round1(tw.lowAt)).Float64("longest_pause_s", round1(tw.gap)).Float64("pause_at_s", round1(tw.gapAt)).
+			Msgf("tune: %s had %.1f s of video at 2 s, %.1f at 5 s, %.1f at 10 s; lowest spare %.1f s (at %.0f s); longest pause %.1f s (at %.0f s)",
+				rd.who, tw.at2, tw.at5, tw.at10, low, tw.lowAt, tw.gap, tw.gapAt)
+	}
+}
+
 func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	provider, uri := rt.f.base, rt.uri
 	if r.Method == "HEAD" { // always 200 here: asking the provider would open a connection
@@ -1449,6 +1520,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	rd.cut = func() { rc.SetWriteDeadline(time.Now()) }
 	mu.Unlock()
 	started = true
+	tw := &tuneWatch{pid: -1}
 	if first {
 		lg.Info().Str("device", rd.who).Str("channel", rd.id).Str("provider", rt.f.name).Float64("first_video_s", round1(born-asked)).
 			Msgf("%s started channel %s (%s), first video in %.1f s", rd.who, rd.id, hostOf(provider), born-asked)
@@ -1509,6 +1581,9 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 				err = rc.Flush()
 			}
 			rd.written.Add(int64(n))
+			if err == nil && n > 0 && !tw.done {
+				tw.see(data, rd, rt.f.name)
+			}
 			if err != nil {
 				mu.Lock()
 				dropped := rd.dropped
