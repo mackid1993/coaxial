@@ -192,48 +192,6 @@ type accountState struct {
 
 var accounts = map[string]*accountState{}
 
-// keepAccounts reads every provider's account in the background: right away when Coaxial starts (again every 30
-// seconds until it answers), then every 10 minutes. So the number of connections each account allows is known
-// before anyone tunes, and the status page always has a fresh answer. One small request per provider each time; no
-// stream is opened.
-func keepAccounts(stop <-chan struct{}) {
-	mu.Lock()
-	ports := make([]string, 0, len(fronts))
-	for port := range fronts {
-		ports = append(ports, port)
-	}
-	mu.Unlock()
-	due := map[string]time.Time{} // when each account is read next (one that answered: in accountEvery)
-	for {
-		every := accountEvery
-		for _, port := range ports {
-			if time.Now().Before(due[port]) {
-				continue // (an account that answered is not read again because another one did not)
-			}
-			account(port, 25*time.Second) // (this round's answer, so one that answers is known at once)
-			mu.Lock()
-			st := accounts[port]
-			known := st != nil && st.good != nil
-			mu.Unlock()
-			if known {
-				due[port] = time.Now().Add(accountEvery)
-			} else {
-				every = accountRetry
-			}
-		}
-		select {
-		case <-stop:
-			return
-		case <-time.After(every):
-		}
-	}
-}
-
-var accountEvery, accountRetry = 10 * time.Minute, 30 * time.Second
-
-// backgroundAccounts: whether runProxy starts keepAccounts (tests of what a login teaches turn it off).
-var backgroundAccounts = true
-
 func playerAPI(ctx context.Context, port, extra string) (int, []byte, error) {
 	f := fronts[port]
 	if f == nil {

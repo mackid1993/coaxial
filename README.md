@@ -212,7 +212,7 @@ under `Advanced options` on each provider in Settings, and under `advanced` in t
 
 - **Stay under my connection limit** (`stay_under_limit`, on by default). Coaxial does not open more streams than your
   account allows, so nobody gets kicked off. `connections` is that number. Leave it empty (the default) to use what
-  your provider reports: Coaxial asks for it as soon as it starts, and again every 10 minutes.
+  your provider reports.
 - **One connection per channel** (`one_per_channel`, off). Only one stream of each channel at a time, live or catch-up.
   Rewinding a channel someone else is watching or recording waits until they finish. An older `settings.json` with
   `"catch_up_while_live": "refuse"` gets this turned on.
