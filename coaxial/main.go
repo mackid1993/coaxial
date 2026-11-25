@@ -836,7 +836,8 @@ type channel struct {
 	timer              *time.Timer
 	ring               []item
 	kept               int
-	status             int // 200 once video flows, or the refusal; 0 not yet
+	status             int         // 200 once video flows, or the refusal; 0 not yet
+	hdr                http.Header // the provider's own answer headers for this stream, passed on to readers
 	refusal            *refused
 	ready              chan struct{}
 	done, paced        bool
@@ -1154,6 +1155,24 @@ func reaskAllowed(ch *channel, since float64) bool {
 }
 
 // a: the channel, the device that opened it and the provider, for the log.
+// passHeaders: the provider's answer headers a player straight from the provider would get and that say nothing
+// about the provider (no server, address, cookie or tracking headers). Framing (length, chunking, connection) is
+// this program's own.
+func passHeaders(in http.Header) http.Header {
+	out := http.Header{}
+	for _, k := range []string{"Content-Type", "Cache-Control", "Pragma", "Expires", "Accept-Ranges",
+		"Access-Control-Allow-Origin", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods",
+		"Access-Control-Expose-Headers", "Access-Control-Allow-Credentials", "Access-Control-Max-Age"} {
+		if v := in.Values(k); len(v) > 0 {
+			if k == "Content-Type" && !strings.HasPrefix(strings.ToLower(v[0]), "video/") {
+				continue
+			}
+			out[http.CanonicalHeaderKey(k)] = append([]string(nil), v...)
+		}
+	}
+	return out
+}
+
 func tsSource(target string, h http.Header, a *askLog) source {
 	run := func(ctx context.Context, ch *channel, yield func([]byte) bool, st *streamStats) error {
 		again, sent, quiet, tries, dropped := false, int64(0), 0, 0, 0.0
@@ -1208,6 +1227,10 @@ func tsSource(target string, h http.Header, a *askLog) source {
 				}
 			}
 			tries = 0
+			passOn := passHeaders(r.Header)
+			mu.Lock()
+			ch.hdr = passOn
+			mu.Unlock()
 			err = func() error {
 				defer r.Body.Close()
 				setWait(r, quietWait)
@@ -1636,6 +1659,11 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	// Sent as the provider sends it: not chunked, ended by closing the connection. (Go's server reads
 	// "Transfer-Encoding: identity" as exactly that, and does not send the header itself.)
 	w.Header().Set("Content-Type", "video/mp2t")
+	mu.Lock()
+	for k, v := range ch.hdr { // the provider's own headers for this stream, as a player straight from it gets them
+		w.Header()[k] = append([]string(nil), v...)
+	}
+	mu.Unlock()
 	w.Header().Set("Transfer-Encoding", "identity")
 	w.Header().Set("Connection", "close")
 	w.WriteHeader(200)
