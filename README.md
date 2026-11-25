@@ -356,6 +356,11 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
   connection (or with no connections entered, or `stay_under_limit` off), Coaxial does not ask again if another
   channel of the same provider was opened in the last 15 seconds, since asking would end that one. It also stops
   asking once the channel has gone silent twice in a row.
+- **When a connection goes quiet.** A connection to a provider can stop sending without closing. Coaxial never
+  waits on one longer than a player would: a live MPEG-TS channel that sends nothing for 20 seconds is asked for
+  again at once, however long it ran. An HLS playlist or piece of video that sends nothing for 8 seconds is asked
+  for again at once on a new connection, and a piece that stopped part way is fetched on from where it stopped, so
+  the player gets it whole. A quiet playlist never opens the channel again at the provider.
 - **When a provider restarts a channel.** Right after ending a stream, a provider is often restarting that channel on
   its side, and for a few seconds it answers "not found" or a server error. While someone is still watching, Coaxial
   asks again a few more times, further apart each time, for up to a minute, and the picture comes back on its own.

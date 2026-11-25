@@ -57,7 +57,12 @@ const (
 	headerWait    = 20               // seconds for an answer's heading
 	playlistWait  = 30               // the same for a playlist
 	startWait     = 60               // seconds a reader waits for a channel's first video
-	quietWait     = 60               // seconds a stream may send nothing before it is given up on
+	// liveQuiet: seconds a live channel's provider connection may send nothing before the channel is asked for
+	// again (on a new connection; readers stay on). Above the longest pause providers make on a healthy live
+	// stream (6 to 12 s lumps, 15 to 17 s at peak load, see gapWarn), and no longer than a player's own wait
+	// for bytes (AetherEngine gives up after 20 s): a connection that went quiet without closing (through a VPN
+	// tunnel that can happen) otherwise held every reader 60 s while a player asking direct reconnects itself.
+	liveQuiet = 20
 )
 
 var mu sync.Mutex // all shared state; held only between waits (the Python ran on one thread)
@@ -98,6 +103,9 @@ func (timeoutError) Error() string { return "timed out" }
 func (timeoutError) Timeout() bool { return true }
 
 var errStop = errors.New("the feed's reader stopped")
+
+// wentQuiet: the error is a server sending nothing for too long (idleBody's or a deadline's).
+func wentQuiet(err error) bool { return errors.As(err, new(timeoutError)) || isTimeout(err) }
 
 func isTimeout(err error) bool {
 	var ne net.Error
@@ -191,6 +199,7 @@ type opts struct {
 	stay     bool              // redirects may not leave the first server
 	verify   bool              // check the certificate (only ipinfo.io)
 	shared   bool              // over the connections kept open to each server
+	fresh    bool              // on a new connection of its own (a kept one went quiet)
 	via      http.RoundTripper // answered inside this program (see inside in front.go)
 	wait     float64
 	ask      *askLog // what it is, for the log (nil: not logged)
@@ -245,6 +254,8 @@ func fetch(ctx context.Context, url string, h http.Header, o opts) (*http.Respon
 		tr = o.via
 	case o.verify:
 		tr = checkedTransport
+	case o.fresh:
+		tr = plainTransport
 	case o.shared:
 		tr = sharedTransport
 	}
@@ -1258,7 +1269,7 @@ func tsSource(target string, h http.Header, a *askLog) source {
 			mu.Unlock()
 			err = func() error {
 				defer r.Body.Close()
-				setWait(r, quietWait)
+				setWait(r, liveQuiet)
 				if again {
 					setWait(r, 2*reopenWait)
 				}
@@ -1268,7 +1279,7 @@ func tsSource(target string, h http.Header, a *askLog) source {
 				buf := make([]byte, 65536)
 				for {
 					n, err := r.Body.Read(buf)
-					setWait(r, quietWait)
+					setWait(r, liveQuiet)
 					if n > 0 {
 						st.got(n) // (a few sums; a line only after a long silence or every 10 minutes)
 					}
@@ -1327,14 +1338,16 @@ func tsSource(target string, h http.Header, a *askLog) source {
 			// in the last 15 s: asking would end that one.
 			mu.Lock()
 			ran, op := mono()-began, lastOpen[ch.provider]
-			if isTimeout(err) && ran < quietWait+reopenAfter { // silent twice in a row: the channel is dead
+			if isTimeout(err) && ran < liveQuiet+reopenAfter { // silent twice in a row: the channel is dead
 				quiet++
 			} else {
 				quiet = 0
 			}
 			// (an account that allows more than one connection: opening another channel did not end this one)
 			single := ch.owner == nil || ch.owner.limit() <= 1
-			stop := quiet >= 2 || len(ch.readers) == 0 || ran < reopenAfter || (single && op.at > math.Max(began, mono()-15) && op.key != ch.key)
+			// (a connection that went quiet is asked again however long it ran: with the old 60 s wait it always
+			// ran past reopenAfter, and the shorter liveQuiet must not turn that into letting its readers go)
+			stop := quiet >= 2 || len(ch.readers) == 0 || (ran < reopenAfter && !wentQuiet(err)) || (single && op.at > math.Max(began, mono()-15) && op.key != ch.key)
 			mu.Unlock()
 			if quiet >= 2 {
 				st.fields(lg.Warn()).Msg("a channel went silent twice in a row; letting its readers go")

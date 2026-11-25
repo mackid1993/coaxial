@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
 )
@@ -592,7 +593,8 @@ func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte
 // fetchShared fetches a playlist on a video server over the connections kept open to that server (the same
 // ones the pass-through uses), after checking where the name leads. Redirects are followed here, one hop at
 // a time, so every hop is checked. Returns the answer and where it really came from.
-func fetchShared(ctx context.Context, target string, h http.Header, wait float64, a *askLog) (*http.Response, string, error) {
+// fresh: on a new connection of its own instead (see livePlaylist).
+func fetchShared(ctx context.Context, target string, h http.Header, wait float64, a *askLog, fresh bool) (*http.Response, string, error) {
 	for hop := 0; hop < 10; hop++ {
 		u, err := url.Parse(target)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || cdnForbidden.MatchString(cdnAddress(u)) {
@@ -603,7 +605,7 @@ func fetchShared(ctx context.Context, target string, h http.Header, wait float64
 		} else if home {
 			return nil, "", &refused{status: 403}
 		}
-		r, err := fetch(ctx, target, h, opts{noFollow: true, guardAll: true, shared: true, wait: wait, ask: a})
+		r, err := fetch(ctx, target, h, opts{noFollow: true, guardAll: true, shared: !fresh, fresh: fresh, wait: wait, ask: a})
 		if err != nil || !isRedirect(r.StatusCode) || r.Header.Get("Location") == "" {
 			return r, target, err
 		}
@@ -615,6 +617,42 @@ func fetchShared(ctx context.Context, target string, h http.Header, wait float64
 		target = next.String()
 	}
 	return nil, "", &refused{status: 502}
+}
+
+// livePlaylist fetches a playlist for a player and reads it whole. A kept connection that sends nothing for
+// pieceWait (ExoPlayer's default read timeout, as for the bridge in hlsSource) is let go, and the playlist is
+// asked for again at once on a new connection with the full wait, before anything counts as failed. Otherwise
+// one quiet connection held the player's reload for the full wait, and then the channel was opened again at
+// the provider (renewOn 502), which some providers refuse for minutes.
+func livePlaylist(ctx context.Context, target string, h http.Header, wait float64, a *askLog) (int, http.Header, []byte, string, error) {
+	try := func(fresh bool) (int, http.Header, []byte, string, error) {
+		tctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		limit, w := time.Duration(math.MaxInt64), wait
+		if !fresh {
+			limit, w = secs(pieceWait), math.Min(wait, pieceWait)
+		}
+		var timed atomic.Bool
+		t := time.AfterFunc(limit, func() { timed.Store(true); cancel() })
+		defer t.Stop()
+		resp, fin, err := fetchShared(tctx, target, h, w, a, fresh)
+		var data []byte
+		if err == nil {
+			if data, err = readAll(resp, 4<<20, w); err == nil {
+				return resp.StatusCode, resp.Header, data, fin, nil
+			}
+		}
+		if timed.Load() {
+			err = timeoutError{}
+		}
+		return 0, nil, nil, "", err
+	}
+	status, hd, data, fin, err := try(false)
+	if err != nil && wentQuiet(err) && ctx.Err() == nil {
+		lg.Info().Str("server", hostOf(target)).Msgf("a playlist sent nothing for %d s; asked again on a new connection", pieceWait)
+		status, hd, data, fin, err = try(true)
+	}
+	return status, hd, data, fin, err
 }
 
 func forgetIdle() { // (mu held)
@@ -749,21 +787,17 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		mu.Lock()
 		vs := rt.f.variant(strings.ToLower(m[1])+"://"+m[2]+m[3], rt.client)
 		mu.Unlock()
-		resp, final, err := fetchShared(ctx, strings.ToLower(m[1])+"://"+m[2]+m[3]+q, h, playlistWait,
+		status, hd, data, final, err := livePlaylist(ctx, strings.ToLower(m[1])+"://"+m[2]+m[3]+q, h, playlistWait,
 			&askLog{kind: "playlist", device: rt.client, provider: rt.f.name, routine: true})
 		if err != nil {
 			return err
 		}
-		data, err := readAll(resp, 4<<20, playlistWait)
-		if err != nil {
-			return err
-		}
-		if vs != nil && resp.StatusCode == 200 { // (the variant's pieces set how often it is asked for)
+		if vs != nil && status == 200 { // (the variant's pieces set how often it is asked for)
 			mu.Lock()
 			vs.note(data)
 			mu.Unlock()
 		}
-		return servePlaylist(w, resp.StatusCode, resp.Header, data, final, rt.f, film)
+		return servePlaylist(w, status, hd, data, final, rt.f, film)
 	}
 	if rt.f.mode == "ts" { // a ts provider: live HLS is built from the shared MPEG-TS stream
 		if done, err := hlsFromTS(w, r, rt.client, provider, uri, opath, q, port, rt.f); done {
@@ -900,10 +934,9 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		mu.Unlock()
 		reload := *asked
 		reload.kind, reload.routine = asked.kind+" playlist", true
-		resp, fin, err := fetchShared(ctx, loc, h, 25, &reload)
+		st, hdr, text, fin, err := livePlaylist(ctx, loc, h, 25, &reload)
 		if err == nil {
-			data, err = readAll(resp, 4<<20, 25)
-			status, hd, final = resp.StatusCode, resp.Header, fin
+			status, hd, data, final = st, hdr, text, fin
 		}
 		if err != nil {
 			if attempt == 2 {

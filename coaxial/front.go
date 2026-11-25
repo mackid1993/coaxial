@@ -9,8 +9,10 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -324,6 +326,7 @@ type counted struct {
 	kind, server string
 	waitMS       int64
 	ask          *askLog // what is asked of the provider, for the log (nil: nothing)
+	live         bool    // a piece of a live HLS session (see forwardHeld)
 }
 
 func (c *counted) WriteHeader(s int) {
@@ -431,7 +434,7 @@ func (f *front) serve(c *counted, r *http.Request) {
 			return
 		}
 		mu.Lock()
-		f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session: it is still playing)
+		c.live = f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session: it is still playing)
 		row := f.pieceRow(r.URL.RequestURI(), whoIs(r))
 		mu.Unlock()
 		w, follow := f.followed(r) // (a redirect of a film or catch-up let through: what it continues)
@@ -464,6 +467,7 @@ func (f *front) serve(c *counted, r *http.Request) {
 		if part {
 			c.ask.kind, c.ask.routine = "piece", true
 		}
+		c.live = part
 		w, follow := f.followed(r)
 		if !follow && !part { // (a piece is counted with its session, not as a stream of its own)
 			w = f.classify(r.URL)
@@ -558,11 +562,34 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 	if f.agent(out.Header).Get("User-Agent") == "" {
 		out.Header["User-Agent"] = []string{""} // no Go-http-client name
 	}
+	// A piece of a live HLS session: its server gets pieceWait (ExoPlayer's default read timeout, as for the
+	// bridge in hlsSource), then it is asked again at once on a new connection, and a piece that goes quiet
+	// part way is fetched on from where it stopped (resume). A kept connection that went quiet otherwise held
+	// the player for the full wait while a player asking the server itself reconnects.
+	live := c.live && hd == nil && r.Method == "GET"
+	first := wait
+	if live {
+		first = math.Min(wait, pieceWait)
+	}
 	var timed atomic.Bool // (set by the timer's own goroutine)
-	t := time.AfterFunc(secs(wait), func() { timed.Store(true); cancel() })
+	t := time.AfterFunc(secs(first), func() { timed.Store(true); cancel() })
 	began := time.Now()
 	resp, err := sharedTransport.RoundTrip(out)
 	t.Stop()
+	if err != nil && live && timed.Load() && r.Context().Err() == nil {
+		lg.Info().Str("server", out.URL.Hostname()).Msgf("a piece of video sent nothing for %d s; asked again on a new connection", pieceWait)
+		var cancel2 context.CancelFunc
+		ctx, cancel2 = context.WithCancel(r.Context())
+		defer cancel2()
+		if guard {
+			ctx = context.WithValue(ctx, guardKey{}, true)
+		}
+		out = out.Clone(ctx)
+		timed.Store(false)
+		t = time.AfterFunc(secs(wait), func() { timed.Store(true); cancel2() })
+		resp, err = plainTransport.RoundTrip(out)
+		t.Stop()
+	}
 	if err != nil {
 		var rf *refused
 		switch {
@@ -614,6 +641,10 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 		h["Content-Type"] = nil // none sent, none added
 	}
 	var src io.Reader = &quietBody{resp.Body, secs(wait)}
+	if live && resp.StatusCode == 200 && resp.ContentLength > 0 && out.Header.Get("Range") == "" &&
+		resp.Header.Get("Content-Encoding") == "" {
+		src = &resumeBody{body: resp.Body, out: out, size: resp.ContentLength, wait: wait}
+	}
 	if resp.StatusCode >= 400 && !guard && r.Method != "HEAD" { // the provider's own error page (see hideLogin)
 		// Packed, as the player allowed (Apache packs its error pages): unpacked to be read, and passed on plain.
 		// Packed in a way this cannot read: the page is left out (its status still goes on).
@@ -654,6 +685,60 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 		panic(http.ErrAbortHandler) // cut off: the player must see a broken answer, not a short complete one
 	}
 }
+
+// resumeBody: a live HLS piece passed on as it arrives. If its server sends nothing for pieceWait (or the
+// connection breaks) part way, the rest is asked for once with a Range on a new connection and passed on after
+// what was sent, so the player gets the whole piece on its one answer.
+type resumeBody struct {
+	body    io.ReadCloser
+	out     *http.Request
+	size    int64 // the whole piece (Content-Length)
+	got     int64
+	wait    float64
+	resumed bool
+}
+
+func (b *resumeBody) Read(p []byte) (int, error) {
+	n, err := readWithDeadline(b.body, p, secs(pieceWait))
+	b.got += int64(n)
+	if err == nil || err == io.EOF || b.resumed || b.got >= b.size || b.out.Context().Err() != nil {
+		return n, err
+	}
+	b.resumed = true
+	b.body.Close()
+	lg.Info().Str("server", b.out.URL.Hostname()).Int64("kb", b.got>>10).
+		Msgf("a piece of video stopped part way; the rest asked for on a new connection")
+	req := b.out.Clone(b.out.Context())
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", b.got))
+	var timed atomic.Bool
+	ctx, cancel := context.WithCancel(b.out.Context())
+	req = req.WithContext(ctx)
+	t := time.AfterFunc(secs(b.wait), func() { timed.Store(true); cancel() })
+	resp, rerr := plainTransport.RoundTrip(req)
+	t.Stop()
+	if rerr != nil {
+		cancel()
+		return n, err
+	}
+	if resp.StatusCode != 206 || !strings.HasPrefix(resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", b.got)) {
+		resp.Body.Close()
+		cancel()
+		return n, err // (no way to carry on where it stopped: the player sees a broken answer, as before)
+	}
+	b.body = &cancelBody{resp.Body, cancel}
+	if n > 0 {
+		return n, nil
+	}
+	return b.Read(p)
+}
+
+// cancelBody: a body whose request context is let go when it is closed.
+type cancelBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelBody) Close() error { c.cancel(); return c.ReadCloser.Close() }
 
 // quietBody gives up on a server that sends nothing for wait.
 type quietBody struct {
