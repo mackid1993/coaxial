@@ -50,6 +50,20 @@ cleanly, and send it all through the VPN. It is a proxy, not a player.
 13. **Clean up only what you made** (never `docker image prune` on a shared host) and stop your own
     pollers before playback. Public text names no provider, host, device or person; the pre-push scan
     must block the push, not just print.
+14. **Every wait on a path a player uses is a freeze waiting to happen.** A provider connection can go
+    quiet without closing; Coaxial exists to run through a VPN tunnel, where this happens. Assume the
+    player is simple and never recovers on its own: it waits for whatever Coaxial waits, and a player
+    that does reconnect lands back on the same shared channel. So no wait on a live path may be
+    longer than a player's own (ExoPlayer reads 8 s, AetherEngine 20 s): give up, ask again at once on a
+    new connection, and carry a half-sent piece on with a Range. When one path gets a timeout fix, check
+    the same rule on every other path (live MPEG-TS, HLS playlists, HLS pieces, the HLS-to-TS bridge,
+    HLS built from TS) in the same change. Watch for these log lines; each one is a connection that went
+    quiet: `asked again on a new connection`, `stopped part way`, `a channel asked for again`.
+15. **Do not stop until the owner's freeze is found in our code.** When he reports freezes, the answer
+    is never "the provider paused" or "it can't be reproduced". List every wait, retry and timeout on
+    the path his device uses, read each one, and test each with a fake that goes quiet (not one that
+    closes or keeps sending). A log filtered for noise is not evidence that a device was absent: count
+    its lines unfiltered first.
 
 ## Incident log
 
@@ -219,6 +233,25 @@ Dates are November 2026. "Commit" is in this repository unless the entry says ot
   earlier watch loop logged in to every provider every 20 s (removed in `45a5043`).
 - **Lesson:** rule 1. Anything the user knows, the user types in; Coaxial does not poll for it.
 
+### 21. Random freezes for weeks: quiet connections held players up to a minute (Nov 25)
+- **Seen:** random freezes on live TV through Coaxial since its first build, on HLS and on MPEG-TS,
+  that came back on their own. One was logged as "sent nothing for 18 s" on a news channel.
+- **Cause:** every live path waited far longer than any player on a connection that had gone quiet
+  without closing: live MPEG-TS 60 s (`quietWait`) before asking for the channel again; an HLS piece
+  through the pass-through 60 s; an HLS playlist reload 25 s plus 10 s to connect, after which the
+  channel was opened again at the provider, which one provider refuses (403) for minutes. A player
+  asking direct would have reconnected after its own 8 to 20 s.
+- **How it went:** `c316ea1` and `2a20913` gave the HLS-to-TS bridge an 8 s limit, but nobody checked the
+  same rule on the paths players use, so the freezes went on. The agent then retracted the fix. Two
+  agents blamed the provider. One read a log filtered for noise, concluded the TV was not on Coaxial at
+  all, and built a theory on that. Every fake provider in the tests either sent data or closed; none
+  went quiet, so nothing caught it. The owner said throughout that it was our code. He was right.
+- **Fix:** `liveQuiet` (20 s) for live MPEG-TS, with a quiet connection asked again however long it ran;
+  `livePlaylist` and `resumeBody`: 8 s (`pieceWait`), then a new connection, a Range for a half-sent
+  piece, and no re-open of the channel for a quiet reload. Tests: `quiet_connection_test.go` (four
+  fail on the old code; a normal 17 s provider pause is still left alone).
+- **Lesson:** rules 14 and 15.
+
 ### Not in Coaxial (so no one re-chases them)
 - A network switch near one TV slowed down every few days (300 ms pings); a scheduled power cycle fixed
   it. Ping the player first when everything is slow. Also incidents 9 and 12 (client side), late-night
@@ -247,3 +280,5 @@ Dates are November 2026. "Commit" is in this repository unless the entry says ot
    list what changed on the playback path, and remove the biggest suspect.
 7. **Restarts under a viewer.** Deploy-observe-redeploy nights, reloads and surprise recreates made
    many of the freezes being chased. One tested deploy, only when nothing plays.
+8. **Waits longer than a player's.** A quiet connection costs the player whatever Coaxial waits. Fix a
+   timeout on every path at once, and test with a fake that goes quiet.
