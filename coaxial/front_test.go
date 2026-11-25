@@ -109,8 +109,8 @@ func TestCDN(t *testing.T) {
 
 func goodSettings() *settings {
 	s := &settings{}
-	s.parse([]byte(`{"player":{"user":"tv","password":"easy"},"providers":[{"name":"One","url":"https://provider.example","user":"u","password":"p","port":8095,"live_tv":"ts"},
-		{"name":"Two","url":"http://two.example:8080/","user":"u2","password":"p2","port":"8096","live_tv":"hls"}],"ui":{"port":8195},
+	s.parse([]byte(`{"player":{"user":"tv","password":"easy"},"providers":[{"name":"One","url":"https://provider.example","user":"u","password":"p","port":8095,"connections":2,"live_tv":"ts"},
+		{"name":"Two","url":"http://two.example:8080/","user":"u2","password":"p2","port":"8096","connections":"1","live_tv":"hls"}],"ui":{"port":8195},
 		"vpn":{"service_provider":"mullvad","type":"wireguard","wireguard_private_key":"KEY","wireguard_addresses":"10.64.0.2/32","server_countries":"","update_hours":48,
 		"extra":{"TZ":"America/New_York","OPENVPN_PASSWORD":"secret","Some_New-Name":"1","SERVER_CITIES":"Chicago IL"},"server_cities":"New York NY"}}`))
 	return s

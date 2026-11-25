@@ -118,8 +118,13 @@ func (fp *fakeProv) count(m map[string]int, k string) int {
 
 // advFront: a front door for the fake provider with these advanced options, served on a port of its own.
 func advFront(t *testing.T, fp *fakeProv, mode string, a advanced) (*front, string) {
-	f := newFront(provider{Name: "Adv", URL: fp.srv.URL, User: "realU", Password: "realP", Port: "18601", LiveTV: mode, Advanced: a},
-		player{User: "tv", Password: "easy"})
+	return limFront(t, fp, mode, "", a)
+}
+
+// limFront: advFront for a provider with this many connections typed in ("": none).
+func limFront(t *testing.T, fp *fakeProv, mode string, connections number, a advanced) (*front, string) {
+	f := newFront(provider{Name: "Adv", URL: fp.srv.URL, User: "realU", Password: "realP", Port: "18601", Connections: connections,
+		LiveTV: mode, Advanced: a}, player{User: "tv", Password: "easy"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.RemoteAddr = r.Header.Get("X-Dev") + ":5000"
 		f.ServeHTTP(w, r)
@@ -266,10 +271,8 @@ func TestAdvancedSettingsCheck(t *testing.T) {
 	}
 	for adv, want := range map[string]string{
 		`{}`:                     "",
-		`{"connections":"3"}`:    "",
-		`{"connections":2}`:      "",
-		`{"connections":"lots"}`: "providers[0].advanced.connections",
-		`{"connections":"-1"}`:   "providers[0].advanced.connections",
+		`{"connections":"3"}`:    "", // (the older place for the number: moved, see TestOldConnectionsMoved)
+		`{"connections":"lots"}`: "",
 		`{"stay_under_limit":false,"connections":"lots"}`:      "",
 		`{"locked_to_address":true}`:                           "",
 		`{"locked_to_address":true,"address_wait_seconds":5}`:  "providers[0].advanced.address_wait_seconds",
@@ -289,9 +292,9 @@ func TestAdvancedSettingsCheck(t *testing.T) {
 		}
 	}
 	s := &settings{}
-	s.parse([]byte(`{"providers":[{"name":"One","advanced":{"share_lists":true,"connections":2}}]}`))
+	s.parse([]byte(`{"providers":[{"name":"One","connections":2,"advanced":{"share_lists":true}}]}`))
 	shown, _ := json.Marshal(s.masked())
-	for _, want := range []string{`"stay_under_limit":true`, `"connections":2`, `"share_lists":true`, `"share_minutes":10`,
+	for _, want := range []string{`"stay_under_limit":true`, `"connections":2,`, `"share_lists":true`, `"share_minutes":10`,
 		`"address_wait_seconds":90`, `"movie_mbps":100`, `"one_per_channel":false`, `"app_name":""`} {
 		if !strings.Contains(string(shown), want) {
 			t.Errorf("the page is not given %s: %s", want, shown)
@@ -304,15 +307,18 @@ func TestAdvancedSettingsCheck(t *testing.T) {
 func TestAdvancedSettingsRoundTrip(t *testing.T) {
 	old := &settings{}
 	old.parse([]byte(`{"player":{"user":"tv","password":"easy"},"providers":[{"name":"One","url":"http://provider.example","user":"u",` +
-		`"password":"p","port":8095,"live_tv":"ts","advanced":{"connections":2,"one_per_item":true,"send_app_name":true,"app_name":"App/1",` +
+		`"password":"p","port":8095,"connections":2,"live_tv":"ts","advanced":{"one_per_item":true,"send_app_name":true,"app_name":"App/1",` +
 		`"limit_movie_speed":true,"movie_mbps":"30"}},{"name":"Two","url":"http://two.example","user":"u","password":"p","port":8096,` +
-		`"live_tv":"hls"}],"vpn":{"service_provider":"x"}}`))
+		`"connections":1,"live_tv":"hls"}],"vpn":{"service_provider":"x"}}`))
 	shown, _ := json.Marshal(old.masked())
 	var page map[string]any
 	json.Unmarshal(shown, &page)
 	for i, p := range page["providers"].([]any) {
 		a, _ := p.(map[string]any)["advanced"].(map[string]any)
-		for _, k := range []string{"stay_under_limit", "connections", "one_per_channel", "one_per_item", "locked_to_address", "address_wait_seconds",
+		if _, ok := a["connections"]; ok || p.(map[string]any)["connections"] == nil {
+			t.Errorf("provider %d: the connections are not given on the provider itself: %v", i, p)
+		}
+		for _, k := range []string{"stay_under_limit", "one_per_channel", "one_per_item", "locked_to_address", "address_wait_seconds",
 			"send_app_name", "app_name", "share_lists", "share_minutes", "limit_movie_speed", "movie_mbps"} {
 			if _, ok := a[k]; !ok {
 				t.Errorf("provider %d: the page is not given %s: %v", i, k, a)
@@ -327,14 +333,14 @@ func TestAdvancedSettingsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.keepSecrets(old)
-	if errs := s.validate(); len(errs) != 0 {
+	if errs := append(s.validate(), s.missingConnections()...); len(errs) != 0 {
 		t.Fatalf("the page's own settings are refused: %v", errs)
 	}
 	a := s.Providers[0].Advanced
-	if v, _ := a.Connections.value(); v != 2 || !a.OnePerItem || a.AppName != "App/1" || a.MovieMbps != "30" || !a.limitOn() || s.Providers[0].Password != "p" {
+	if v, _ := s.Providers[0].Connections.value(); v != 2 || !a.OnePerItem || a.AppName != "App/1" || a.MovieMbps != "30" || !a.limitOn() || s.Providers[0].Password != "p" {
 		t.Errorf("a value was lost on the way back: %+v", a)
 	}
-	if v, _ := s.Providers[1].Advanced.LockWait.value(); v != 90 || s.Providers[1].Advanced.Connections != "" {
+	if v, _ := s.Providers[1].Advanced.LockWait.value(); v != 90 || s.Providers[1].Connections != "1" {
 		t.Errorf("the defaults shown came back otherwise: %+v", s.Providers[1].Advanced)
 	}
 }
@@ -347,7 +353,7 @@ func TestAdvancedSettingsRoundTrip(t *testing.T) {
 // someone off); the same device asking for something else replaces its own stream, after it has closed.
 func TestLimitRefusesAndReplaces(t *testing.T) {
 	fp := newFakeProv(t, false, nil)
-	_, base := advFront(t, fp, "ts", advanced{Connections: "1"})
+	_, base := limFront(t, fp, "ts", "1", advanced{})
 	a := ask(t, base, "192.0.2.1", "/movie/tv/easy/1.mkv")
 	if a.StatusCode != 200 {
 		t.Fatalf("the first film: %d", a.StatusCode)
@@ -372,24 +378,22 @@ func TestLimitRefusesAndReplaces(t *testing.T) {
 	}
 }
 
-// Left empty, the limit is what the provider says in its login answer (read as a player logs in); a device
-// joining a live channel that is open costs nothing; a shared channel is never cut for another device.
-func TestLimitFromLoginAnswerAndLiveChannels(t *testing.T) {
+// The limit is the number typed in, whatever the provider's login answer says (it is passed on, never read
+// for this); a device joining a live channel that is open costs nothing; a shared channel is never cut for
+// another device.
+func TestLimitTypedInAndLiveChannels(t *testing.T) {
 	fp := newFakeProv(t, true, func(fp *fakeProv, w http.ResponseWriter, r *http.Request) bool {
 		if r.URL.Path == "/player_api.php" {
-			io.WriteString(w, `{"user_info":{"username":"realU","password":"realP","max_connections":"1","active_cons":"0"},"server_info":{"url":"x"}}`)
+			io.WriteString(w, `{"user_info":{"username":"realU","password":"realP","max_connections":"5","active_cons":"0"},"server_info":{"url":"x"}}`)
 			return true
 		}
 		return false
 	})
-	f, base := advFront(t, fp, "ts", advanced{})
+	f, base := limFront(t, fp, "ts", "1", advanced{})
 	a := ask(t, base, "192.0.2.1", "/live/tv/easy/12.ts")
-	b := ask(t, base, "192.0.2.2", "/live/tv/easy/13.ts")
-	if a.StatusCode != 200 || b.StatusCode != 200 { // (no limit known yet)
-		t.Fatalf("before the login answer: %d %d", a.StatusCode, b.StatusCode)
+	if a.StatusCode != 200 {
+		t.Fatalf("the first channel: %d", a.StatusCode)
 	}
-	b.Body.Close()
-	eventually(t, func() bool { return fp.count(fp.open, "ch13") == 0 }, "channel 13 closing")
 	if r := ask(t, base, "192.0.2.2", "/player_api.php?username=tv&password=easy"); r.StatusCode != 200 || strings.Contains(body(r), "realP") {
 		t.Fatalf("login")
 	}
@@ -397,7 +401,7 @@ func TestLimitFromLoginAnswerAndLiveChannels(t *testing.T) {
 	lim := f.limit()
 	mu.Unlock()
 	if lim != 1 {
-		t.Fatalf("the limit from the login answer: %d, want 1", lim)
+		t.Fatalf("after a login answer that says 5: limit %d, want the 1 typed in", lim)
 	}
 	join := ask(t, base, "192.0.2.2", "/live/tv/easy/12.ts")
 	if join.StatusCode != 200 {

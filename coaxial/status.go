@@ -183,6 +183,7 @@ func vpnPing() (float64, bool) {
 
 // ---- the provider's account page, asked of the provider with its own login: at most every 15 s while the
 // page is viewed; after failures 2, 4, 8... at most 15 minutes apart; the last good answer shown with its age.
+// It is only shown: the connection limit is the number the user typed in (see limit), never this.
 type accountState struct {
 	good, last map[string]any
 	at, tried  float64
@@ -238,9 +239,6 @@ func account(port string, wait time.Duration) map[string]any {
 					info := field(v, "user_info")
 					value = map[string]any{"answer": 200, "status": field(info, "status"), "auth": field(info, "auth"),
 						"exp": field(info, "exp_date"), "used": field(info, "active_cons"), "max": field(info, "max_connections")}
-					if f := fronts[port]; f != nil {
-						f.noteMax(field(info, "max_connections"))
-					}
 				}
 			}
 			mu.Lock()
@@ -495,6 +493,9 @@ func statusPage(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if a != nil && truthy(a["answer"]) {
 			pill = fmt.Sprintf(`<span class="pill bad">the provider answered %s</span>`, esc(a["answer"]))
+		}
+		if truthy(field(p, "connections_missing")) {
+			pill += `<span class="pill warn">Enter how many connections you bought</span>`
 		}
 		add(`<div class="provider"><div class="top"><span class="name">%s</span>%s<span class="pill">%s</span></div><div>Type this into your player: <code>http://%s:%s</code></div><div class="facts">%s</div></div>`,
 			esc(field(p, "name")), pill, map[bool]string{true: "MPEG-TS", false: "HLS"}[field(p, "mode") == "ts"], esc(host), esc(field(p, "port")), facts)

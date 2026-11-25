@@ -10,7 +10,7 @@ import (
 // the device's own, not the recording that has run the longest.
 func TestLimitReplacesNewestOwnStream(t *testing.T) {
 	fp := newFakeProv(t, false, nil)
-	_, base := advFront(t, fp, "ts", advanced{Connections: "2"})
+	_, base := limFront(t, fp, "ts", "2", advanced{})
 	rec := ask(t, base, "192.0.2.5", "/live/tv/easy/11.ts") // recording
 	defer rec.Body.Close()
 	time.Sleep(50 * time.Millisecond)
@@ -37,7 +37,7 @@ func TestLimitReplacesNewestOwnStream(t *testing.T) {
 // device holds (a recording started after the film).
 func TestLimitSeekReplacesSameFilm(t *testing.T) {
 	fp := newFakeProv(t, false, nil)
-	_, base := advFront(t, fp, "ts", advanced{Connections: "2"})
+	_, base := limFront(t, fp, "ts", "2", advanced{})
 	film := ask(t, base, "192.0.2.5", "/movie/tv/easy/7.mkv")
 	defer film.Body.Close()
 	time.Sleep(50 * time.Millisecond)

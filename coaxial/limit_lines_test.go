@@ -11,9 +11,9 @@ import (
 // connections: what one account plays is not counted against the other, and is never cut to make room there.
 func TestLimitPerAccountOnOneServer(t *testing.T) {
 	fp := newFakeProv(t, false, nil)
-	_, baseA := advFront(t, fp, "ts", advanced{Connections: "1"})
+	_, baseA := limFront(t, fp, "ts", "1", advanced{})
 	fB := newFront(provider{Name: "Line 2", URL: fp.srv.URL, User: "lineU", Password: "lineP", Port: "18602", LiveTV: "ts",
-		Advanced: advanced{Connections: "1"}}, player{User: "tv", Password: "easy"})
+		Connections: "1"}, player{User: "tv", Password: "easy"})
 	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.RemoteAddr = r.Header.Get("X-Dev") + ":5000"
 		fB.ServeHTTP(w, r)

@@ -22,7 +22,7 @@ func TestOnePerChannelHLSPausedAndResumed(t *testing.T) {
 		}
 		return false
 	})
-	f, base := advFront(t, fp, "hls", advanced{OnePerChannel: true, Connections: "1"})
+	f, base := limFront(t, fp, "hls", "1", advanced{OnePerChannel: true})
 	play := func(dev, path string) (int, string) {
 		r := ask(t, base, dev, path)
 		for r.StatusCode == 302 {

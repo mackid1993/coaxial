@@ -2,8 +2,9 @@
 //
 //	{
 //	  "player":    {"user": "", "password": ""},            the easy login typed into every player
-//	  "providers": [{"name": "", "url": "", "user": "", "password": "", "port": 8095, "live_tv": "ts",
-//	                 "advanced": {...}}],                     what a provider needs handled (see advanced)
+//	  "providers": [{"name": "", "url": "", "user": "", "password": "", "port": 8095, "connections": 2,
+//	                 "live_tv": "ts", "advanced": {...}}],     connections: how many the user bought from the provider;
+//	                                                          advanced: what a provider needs handled (see advanced)
 //	  "ui":        {"port": 8195},                          the web interface and the health check
 //	  "vpn":       {"service_provider": "", "type": "wireguard", ..., "update_hours": 24, "gluetun_version": "latest",
 //	                "extra": {"ANY_GLUETUN_VARIABLE": "value"}}
@@ -74,7 +75,10 @@ type provider struct {
 	User     string `json:"user"`
 	Password string `json:"password"`
 	Port     port   `json:"port"`
-	LiveTV   string `json:"live_tv"`
+	// Connections: how many connections the user bought (typed in; never asked of the provider). Required when
+	// the page saves; a file without it still loads, and then no limit is kept (see missingConnections).
+	Connections number `json:"connections"`
+	LiveTV      string `json:"live_tv"`
 	// Advanced: the advanced options (advanced.go). Every one is off unless set, but stay_under_limit.
 	Advanced advanced `json:"advanced"`
 	// OldCatchUp: an older form of one_per_channel, read and then dropped: "refuse" turns one_per_channel on.
@@ -183,12 +187,31 @@ func (s *settings) parse(data []byte) error {
 			p.Advanced.OnePerChannel = true
 		}
 		p.OldCatchUp = nil // (written in the new form at the next save; any other value meant "allow")
+		p.moveOldConnections()
 		if p.Advanced.StayUnder == nil {
 			on := true
 			p.Advanced.StayUnder = &on
 		}
 	}
 	return nil
+}
+
+// moveOldConnections: older settings kept the connections under "advanced", where 0 meant "no limit". A whole
+// number from 1 to 999 there becomes the provider's "connections" (unless that is already set); 0 turns
+// stay_under_limit off, as it had the same effect; anything else is dropped. It is written in the new place at
+// the next save.
+func (p *provider) moveOldConnections() {
+	old := p.Advanced.OldConnections
+	p.Advanced.OldConnections = ""
+	if old == "" || p.Connections != "" {
+		return
+	}
+	if v, ok := old.value(); ok && v == 0 {
+		off := false
+		p.Advanced.StayUnder = &off
+	} else if _, ok := old.or(0, 1, 999); ok {
+		p.Connections = old
+	}
 }
 
 func emptySettings() *settings {
@@ -331,6 +354,9 @@ func (s *settings) validate() []fieldError {
 			// (Go takes :99999 or :0 in an address, and then cannot connect to it: every request would fail)
 			bad(at+"url", "the port in the address must be a number from 1 to 65535")
 		}
+		if _, ok := p.Connections.or(0, 1, 999); !ok {
+			bad(at+"connections", "connections must be a whole number from 1 to 999: how many connections you bought")
+		}
 		if p.LiveTV != "hls" && p.LiveTV != "ts" {
 			bad(at+"live_tv", `live_tv must be "hls" if your players use HLS, or "ts" if they use MPEG-TS`)
 		}
@@ -436,13 +462,25 @@ func (s *settings) validate() []fieldError {
 	return errs
 }
 
+// missingConnections: every provider with no number of connections typed in. The page does not save one (the
+// limit could not be kept); a file that lacks it still loads, so these are not part of validate.
+func (s *settings) missingConnections() []fieldError {
+	var errs []fieldError
+	for i, p := range s.Providers {
+		if p.Connections == "" {
+			errs = append(errs, fieldError{"providers[" + strconv.Itoa(i) + "].connections", "Enter how many connections you bought"})
+		}
+	}
+	return errs
+}
+
 // masked: the settings for the web page. Every password and key is left out (""), with a note next to it
 // saying whether one is saved ("password_set": true).
 func (s *settings) masked() map[string]any {
 	provs := []any{}
 	for _, p := range s.Providers {
 		provs = append(provs, map[string]any{"name": p.Name, "url": p.URL, "user": p.User, "password": "", "password_set": p.Password != "",
-			"port": p.Port, "live_tv": p.LiveTV, "advanced": p.Advanced.view()})
+			"port": p.Port, "connections": p.Connections, "live_tv": p.LiveTV, "advanced": p.Advanced.view()})
 	}
 	hours, _ := s.updateHours()
 	tag, _ := s.gluetunVersion()
@@ -629,6 +667,7 @@ const sampleSettings = `{
       "user": "the-username-your-provider-gave-you",
       "password": "the-password-your-provider-gave-you",
       "port": 8095,
+      "connections": 1,
       "live_tv": "ts"
     }
   ],

@@ -10,7 +10,7 @@ import (
 // allows 2, another device still opens a channel of its own.
 func TestLiveHoldNotKeptAfterOpen(t *testing.T) {
 	fp := newFakeProv(t, false, nil)
-	_, base := advFront(t, fp, "ts", advanced{Connections: "2"})
+	_, base := limFront(t, fp, "ts", "2", advanced{})
 	a := ask(t, base, "192.0.2.1", "/live/tv/easy/931.ts") // read a little, then not read: a paused player
 	defer a.Body.Close()
 	time.Sleep(time.Second)
@@ -26,7 +26,7 @@ func TestLiveHoldNotKeptAfterOpen(t *testing.T) {
 
 func TestLiveDroppedChannelLeavesNoPhantom(t *testing.T) {
 	fp := newFakeProv(t, false, nil)
-	f, base := advFront(t, fp, "ts", advanced{Connections: "1"})
+	f, base := limFront(t, fp, "ts", "1", advanced{})
 	a := ask(t, base, "192.0.2.1", "/live/tv/easy/12.ts") // a paused player: its handler stays on
 	defer a.Body.Close()
 	time.Sleep(5 * time.Second) // (its queue fills)

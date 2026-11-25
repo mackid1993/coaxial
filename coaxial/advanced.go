@@ -2,8 +2,9 @@
 // unless the settings turn it on, except stay_under_limit. Nothing here asks a provider anything of its own:
 // the rules act only on what players ask for.
 //
-//	stay_under_limit       a new stream that would go over the connections the account allows is refused
-//	connections            that number ("": what the provider reports in its login answer; 0: no limit)
+//	stay_under_limit       a new stream that would go over the connections the user bought is refused (the
+//	                       number is the provider's own "connections" setting, typed in by the user; with none
+//	                       there, nothing is refused for it)
 //	one_per_channel        a second provider connection to a channel that is open (live or catch-up) is refused
 //	one_per_item           a second device on a movie or episode that is playing is refused
 //	locked_to_address      the VPN server is never changed by Coaxial on its own, and new streams wait for
@@ -20,10 +21,7 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,7 +29,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,7 +41,6 @@ import (
 
 type advanced struct {
 	StayUnder     *bool  `json:"stay_under_limit"` // (nil: left out, which means on)
-	Connections   number `json:"connections"`
 	OnePerChannel bool   `json:"one_per_channel"`
 	OnePerItem    bool   `json:"one_per_item"`
 	Locked        bool   `json:"locked_to_address"`
@@ -55,6 +51,10 @@ type advanced struct {
 	ShareMinutes  number `json:"share_minutes"`
 	SlowMovies    bool   `json:"limit_movie_speed"`
 	MovieMbps     number `json:"movie_mbps"`
+
+	// OldConnections: where older settings kept the connections the account allows. Read only to move it to the
+	// provider's own "connections" (see parse); never written.
+	OldConnections number `json:"connections,omitempty"`
 
 	channelSet bool // one_per_channel was written in the file (see parse: catch_up_while_live)
 }
@@ -127,9 +127,6 @@ var appNameRe = regexp.MustCompile(`^[\x20-\x7e]{1,200}$`)
 func (a advanced) check() []fieldError {
 	var errs []fieldError
 	bad := func(field, msg string) { errs = append(errs, fieldError{field, msg}) }
-	if _, ok := a.Connections.or(-1, 0, 999); a.limitOn() && !ok {
-		bad("connections", "the connections your account allows must be a whole number from 0 to 999 (empty: the number your provider reports)")
-	}
 	if _, ok := a.LockWait.or(defaultLockWait, 10, 600); a.Locked && !ok {
 		bad("address_wait_seconds", "the wait after the VPN changes must be a whole number of seconds from 10 to 600")
 	}
@@ -167,10 +164,7 @@ func (a advanced) view() advanced {
 
 // applyAdvanced: the options as the front door uses them.
 func (f *front) applyAdvanced(a advanced) {
-	f.limitOn, f.limitSet = a.limitOn(), -1
-	if v, ok := a.Connections.or(-1, 0, 999); ok {
-		f.limitSet = v
-	}
+	f.limitOn = a.limitOn()
 	f.oneChannel, f.oneItem, f.locked = a.OnePerChannel, a.OnePerItem, a.Locked
 	if f.locked {
 		v, _ := a.LockWait.or(defaultLockWait, 10, 600)
@@ -422,127 +416,14 @@ func (f *front) inUse(uri, who string) bool {
 
 func lastPart(key string) string { return key[strings.LastIndexByte(key, '/')+1:] }
 
-// noteAccount: the connections the account allows, as the provider's login answer gives them (max_connections
-// in user_info, a number or text). Only what Coaxial fetches anyway is read: a player's login passed on, and
-// the account shown on the status pages.
-// The answer is read up to user_info only: what is kept of it is its first megabyte, and panel_api.php's
-// lists every channel after the account.
-func (f *front) noteAccount(answer []byte) {
-	d := json.NewDecoder(bytes.NewReader(answer))
-	if t, err := d.Token(); err != nil || t != json.Delim('{') {
-		return
-	}
-	for d.More() {
-		k, err := d.Token()
-		if err != nil {
-			return
-		}
-		if k == "user_info" {
-			var info struct {
-				Max json.RawMessage `json:"max_connections"`
-			}
-			if d.Decode(&info) == nil {
-				f.noteMax(info.Max)
-			}
-			return
-		}
-		var skip json.RawMessage
-		if d.Decode(&skip) != nil {
-			return
-		}
-	}
-}
-
-func (f *front) noteMax(raw any) {
-	n, ok := 0, false
-	switch v := raw.(type) {
-	case json.RawMessage:
-		var x any
-		d := json.NewDecoder(bytes.NewReader(v))
-		d.UseNumber()
-		if d.Decode(&x) == nil {
-			f.noteMax(x)
-		}
-		return
-	case json.Number:
-		n, ok = number(v.String()).value()
-	case string:
-		n, ok = number(strings.TrimSpace(v)).value()
-	case float64:
-		n, ok = int(v), v >= 0 && v == math.Trunc(v) && v < 1e6
-	}
-	if ok {
-		mu.Lock()
-		f.reported = n
-		mu.Unlock()
-	}
-}
-
-// account: the provider account this front door is for, named so that nothing of it shows (two providers on
-// one server can be two accounts). What it allows is handed from one start of the proxy part to the next under
-// this name (see learned).
-func (f *front) account() string {
-	sum := sha256.Sum256([]byte(f.base + "\x00" + f.user))
-	return hex.EncodeToString(sum[:8])
-}
-
-// learned: the connections each account allows, as the providers reported them: "<account>=<n>,...". The
-// launcher keeps it while the proxy part restarts (every save restarts it) and hands it to the next start in
-// COAXIAL_LIMITS; old holds what it had, which the new values replace.
-func learned(old string) string {
-	all := learnedBefore(old)
-	mu.Lock()
-	for _, f := range fronts {
-		if f.reported > 0 {
-			all[f.account()] = f.reported
-		}
-	}
-	mu.Unlock()
-	keys := make([]string, 0, len(all))
-	for k := range all {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for i, k := range keys {
-		keys[i] = k + "=" + strconv.Itoa(all[k])
-	}
-	return strings.Join(keys, ",")
-}
-
-// learnedBefore: the connections each account allows, from what learned gave the previous start.
-func learnedBefore(s string) map[string]int {
-	all := map[string]int{}
-	for _, pair := range strings.Split(s, ",") {
-		k, v, _ := strings.Cut(pair, "=")
-		if n, ok := number(v).value(); ok && n > 0 && k != "" {
-			all[k] = n
-		}
-	}
-	return all
-}
-
-// capped keeps what is written to it up to max bytes and lets the rest go.
-type capped struct {
-	b   *bytes.Buffer
-	max int
-}
-
-func (c capped) Write(p []byte) (int, error) {
-	if room := c.max - c.b.Len(); room > 0 {
-		c.b.Write(p[:min(len(p), room)])
-	}
-	return len(p), nil
-}
-
-// limit: the connections this provider allows at once (0: no limit, or not known). (mu held)
+// limit: the connections this provider allows at once: the number the user typed in, while stay_under_limit is
+// on (0: no limit, because the option is off or no number was typed in). It is never asked of the provider.
+// (mu held)
 func (f *front) limit() int {
-	switch {
-	case !f.limitOn:
+	if !f.limitOn {
 		return 0
-	case f.limitSet >= 0:
-		return f.limitSet
 	}
-	return f.reported
+	return f.bought
 }
 
 // ---------------------------------------------------------------------------

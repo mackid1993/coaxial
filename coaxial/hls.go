@@ -1011,13 +1011,8 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 		}
 		body = io.MultiReader(bytes.NewReader(rt.f.hideLogin(page)), body)
 	}
-	var loginAnswer *bytes.Buffer
 	if q, _ := url.ParseQuery(r.URL.RawQuery); q.Get("action") == "" && strings.HasSuffix(strings.ToLower(r.URL.Path), "_api.php") {
 		// (the login itself: player_api.php or panel_api.php with no action)
-		if resp.StatusCode == 200 { // what it says about the account's connections is kept (see limit)
-			loginAnswer = &bytes.Buffer{}
-			body = io.TeeReader(body, capped{loginAnswer, 1 << 20})
-		}
 		if body, err = playerServer(body, home); err != nil { // (body: unpacked, if it came packed)
 			return err
 		}
@@ -1042,9 +1037,6 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 	}
 	if err := apiStream(w, body, []byte(`"http://`+home+"/__cdn/"), login, gz); err != nil {
 		panic(http.ErrAbortHandler) // cut off: the app must see a broken answer, not a short complete one
-	}
-	if loginAnswer != nil {
-		rt.f.noteAccount(loginAnswer.Bytes())
 	}
 	return nil
 }

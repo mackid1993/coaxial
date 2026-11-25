@@ -20,7 +20,7 @@ func TestFollowUpWithinLimit(t *testing.T) {
 		}
 		return false
 	})
-	_, base := advFront(t, fp, "ts", advanced{Connections: "5"})
+	_, base := limFront(t, fp, "ts", "5", advanced{})
 	atProvider := func() int { return fp.count(fp.open, "") + cdn.count(cdn.open, "") }
 	var open []*http.Response
 	defer func() {

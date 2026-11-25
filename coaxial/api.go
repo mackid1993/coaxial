@@ -40,8 +40,6 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 			say("the VPN reconnected; providers that lock an account to one address get new streams after a short wait")
 		}
 		answer(w, 200, "", "ok\n")
-	case "/limits": // the connections each account allows, as learned: the launcher hands them to the next start
-		answer(w, 200, "", learned(""))
 	case "/playing": // what plays, and nothing else (see playingNow)
 		data, _ := json.Marshal(map[string]any{"playing": playingNow()})
 		answer(w, 200, "application/json", string(data))
@@ -105,7 +103,8 @@ func statusData() map[string]any {
 		}
 		a := accts[port]
 		up := a != nil && a["answer"] == 200 && pyStr(a["auth"]) != "0"
-		provs = append(provs, map[string]any{"name": f.name, "port": atoi(port), "up": up, "live_tv": f.mode, "channels_open": open})
+		provs = append(provs, map[string]any{"name": f.name, "port": atoi(port), "up": up, "live_tv": f.mode, "channels_open": open,
+			"connections_missing": f.bought == 0}) // (no number typed in: the limit is not kept, the page says so)
 	}
 	row := func(who, id, port, kind string, seconds float64, written int64) {
 		name := ""

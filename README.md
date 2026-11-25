@@ -130,9 +130,10 @@ you chose.
 
 ## The web page
 
-**Status** shows whether the VPN is up, where it comes out (city, country, IP address, network, ping), each provider,
-what is playing right now, and the Coaxial version. It also has the gluetun version with `Check for updates` and the
-chosen VPN server with `Check servers now`, and `Switch now` when a better server is found. An open Status view loads itself again when the Coaxial version
+**Status** shows whether the VPN is up, where it comes out (city, country, IP address, network, ping), each provider
+(with `Enter how many connections you bought` under one that has no number yet), what is playing right now, and the
+Coaxial version. It also has the gluetun version with `Check for updates` and the chosen VPN server with
+`Check servers now`, and `Switch now` when a better server is found. An open Status view loads itself again when the Coaxial version
 changes, unless settings are unsaved. When the VPN does not come up, Status says why: a `settings.json` that could
 not be read, VPN settings Coaxial refused, or a VPN client that stopped before it connected.
 
@@ -142,7 +143,9 @@ so, and warns that finishing setup replaces the file. **Settings** has:
 - **Providers.** Add them, remove them, and reorder them with the up and down arrows. A new port is tried before
   saving: Coaxial listens on it for 8 seconds and the page tries to reach it from your browser. If that fails, the page
   does not save and tells you to add a `PORT_n` line for it to `.env`. Ports are tried again after a save.
-  Each provider also has `Advanced options`, closed until you open it (see below).
+  Each provider needs `Connections you bought`: how many connections your plan allows. Coaxial never opens more than
+  this, and the page does not save a provider without it. Each provider also has `Advanced options`, closed until you
+  open it (see below).
 - **VPN.** The service and the connection type. WireGuard takes a private key and addresses. OpenVPN takes a username
   and a password. Then where to connect: countries, cities, regions, servers by hostname and servers by name. All of
   these are drop-downs filled from gluetun's own server lists, and the two server lists narrow to the places you
@@ -164,7 +167,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 {
   "player": { "user": "tv", "password": "choose-your-own" },
   "providers": [
-    { "name": "Example", "url": "https://provider.example", "user": "...", "password": "...", "port": 8095, "live_tv": "ts" }
+    { "name": "Example", "url": "https://provider.example", "user": "...", "password": "...", "port": 8095, "connections": 2, "live_tv": "ts" }
   ],
   "ui": { "port": 8195 },
   "vpn": {
@@ -185,6 +188,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | --- | --- |
 | `player` | The login you type into every player. Letters, digits, `-` and `_` only. The username cannot be `live`, `movie`, `series` or `timeshift`. |
 | `providers` | One entry per provider: a name, its address (`http://name` or `https://name`, optionally `:port`, with nothing after it), the login it gave you, the port your players use for it, and `live_tv`. A name is up to 40 letters, digits, spaces, `-`, `.` or `_`, starts with a letter or digit, and is not used by another provider. The provider's username and password cannot contain `/` or a line break. Ports 53, 8000 and 9999 and the web page's port cannot be used. |
+| `connections` | How many connections you bought from this provider: a whole number from 1 to 999. Coaxial never opens more than this (see `stay_under_limit`) and never asks the provider for it. The page does not save a provider without it. A provider without it still runs, but no limit is kept and Status asks you to enter it. An older file with `connections` under `advanced` has it moved here (0 there meant no limit, and turns `stay_under_limit` off). |
 | `live_tv` | `ts` if your players watch live TV as MPEG-TS, `hls` if they use HLS. |
 | `advanced` | Options some providers need, all off but `stay_under_limit`. Left out, the defaults apply. See [Advanced options](#advanced-options-per-provider). |
 | `ui.port` | The port of the web page and of the health check. If left out, `UI_PORT` from `.env` (8195 if that is not set either). If you change it, change `UI_PORT` in `.env` to match. |
@@ -210,9 +214,9 @@ under `Advanced options` on each provider in Settings, and under `advanced` in t
 | The guide or channel list fails or is slow when several TVs start | Share list and guide downloads |
 | Your account gets warned or blocked after watching movies | Limit movie download speed |
 
-- **Stay under my connection limit** (`stay_under_limit`, on by default). Coaxial does not open more streams than your
-  account allows, so nobody gets kicked off. `connections` is that number. Leave it empty (the default) to use what
-  your provider reports.
+- **Stay under my connection limit** (`stay_under_limit`, on by default). Coaxial does not open more streams than the
+  connections you bought (`Connections you bought` on the provider, `connections` in `settings.json`), so nobody gets
+  kicked off. Turn it off only if your provider has no limit.
 - **One connection per channel** (`one_per_channel`, off). Only one stream of each channel at a time, live or catch-up.
   Rewinding a channel someone else is watching or recording waits until they finish. An older `settings.json` with
   `"catch_up_while_live": "refuse"` gets this turned on.
@@ -233,7 +237,7 @@ under `Advanced options` on each provider in Settings, and under `advanced` in t
 
 ```json
 "advanced": {
-  "stay_under_limit": true, "connections": "",
+  "stay_under_limit": true,
   "one_per_channel": false, "one_per_item": false,
   "locked_to_address": false, "address_wait_seconds": 90,
   "send_app_name": false, "app_name": "",
@@ -347,9 +351,9 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
   the part the provider repeated is left out, so the picture does not jump back. Up to one keyframe interval, often a
   second or two, is skipped there. If no keyframe comes within 12 seconds, it is joined where its clock passes the
   old one. Past the join, the new stream is passed on exactly as the provider sends it. On an account that allows one
-  connection (or whose limit is not known yet), Coaxial does not ask again if another channel of the same provider was
-  opened in the last 15 seconds, since asking would end that one. It also stops asking once the channel has gone
-  silent twice in a row.
+  connection (or with no connections entered, or `stay_under_limit` off), Coaxial does not ask again if another
+  channel of the same provider was opened in the last 15 seconds, since asking would end that one. It also stops
+  asking once the channel has gone silent twice in a row.
 - **When a provider restarts a channel.** Right after ending a stream, a provider is often restarting that channel on
   its side, and for a few seconds it answers "not found" or a server error. While someone is still watching, Coaxial
   asks again a few more times, further apart each time, for up to a minute, and the picture comes back on its own.

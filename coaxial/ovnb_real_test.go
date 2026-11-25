@@ -50,7 +50,7 @@ func TestRealRecordingProviderDropAfterTVZap(t *testing.T) {
 		}
 	}
 	fp := newFakeProv(t, false, lumps)
-	_, base := advFront(t, fp, "ts", advanced{Connections: "5", OnePerChannel: true})
+	_, base := limFront(t, fp, "ts", "5", advanced{OnePerChannel: true})
 	dvr := drain(ask(t, base, "192.0.2.50", "/live/tv/easy/200.ts"))
 	defer dvr.close()
 	time.Sleep(2 * time.Second)

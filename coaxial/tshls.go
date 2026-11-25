@@ -203,10 +203,6 @@ func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh 
 	}
 	ch := channels[key]
 	first := ch == nil
-	if e := recentRefusal(key); first && e != nil { // (refused a moment ago: the same answer, not asked again)
-		mu.Unlock()
-		return nil, &refused{status: e.status, kind: e.kind, text: f.hideLogin(e.text)}
-	}
 	if !first { // moving onto a channel already open: an HLS builder this device left goes too
 		releaseFor(provider, who, key)
 	}

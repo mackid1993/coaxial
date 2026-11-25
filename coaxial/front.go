@@ -40,8 +40,7 @@ type front struct {
 
 	// the advanced options (advanced.go)
 	limitOn             bool
-	limitSet            int // connections the settings allow (-1: what the provider reports)
-	reported            int // max_connections in the provider's login answer (0: not known) (mu)
+	bought              int // the connections the user bought, as typed in (0: none typed in)
 	oneChannel, oneItem bool
 	locked              bool
 	lockWait            float64 // seconds
@@ -107,6 +106,9 @@ func newFront(p provider, pl player) *front {
 		// /movie/<login>/<id>.<ext> and /series/<login>/<id>.<ext>
 		vodPath: regexp.MustCompile(`^/+(movie|series)/+` + pu + `/+` + pp + `/+([^/]+?)(\.[A-Za-z0-9]+)?$`)}
 	f.applyAdvanced(p.Advanced)
+	if n, ok := p.Connections.or(0, 1, 999); ok {
+		f.bought = n
+	}
 	return f
 }
 
@@ -720,7 +722,8 @@ func checkProviders(s *settings) (good []provider, notes map[string]any) {
 			list = append(list, map[string]any{"name": name, "port": "", "ok": false, "why": bad})
 		default:
 			say("PROVIDER %s on port %s -> %s", name, p.Port.String(), strings.TrimRight(p.URL, "/"))
-			list = append(list, map[string]any{"name": name, "port": p.Port.String(), "ok": true, "mode": p.LiveTV})
+			list = append(list, map[string]any{"name": name, "port": p.Port.String(), "ok": true, "mode": p.LiveTV,
+				"connections_missing": p.Connections == ""})
 			good = append(good, p)
 		}
 	}
@@ -750,10 +753,8 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 	}
 	var servers []*http.Server
 	var listeners []net.Listener
-	carried := learnedBefore(os.Getenv("COAXIAL_LIMITS")) // (what the providers reported before this start)
 	for _, p := range good {
 		f := newFront(p, s.Player)
-		f.reported = carried[f.account()]
 		ln, err := net.Listen("tcp", ":"+f.port)
 		// A save can move the web interface off a port and a provider onto it: the launcher lets the old port go
 		// a moment after this part has started. That moment is waited for (a few seconds at most).

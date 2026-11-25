@@ -293,7 +293,8 @@
         h('dl', { class: 'prov-stats' },
           h('div', null, h('dt', { text: 'Port' }), h('dd', { class: 'mono' })),
           h('div', null, h('dt', { text: 'Format' }), h('dd')),
-          h('div', null, h('dt', { text: 'Open channels' }), h('dd'))));
+          h('div', null, h('dt', { text: 'Open channels' }), h('dd'))),
+        h('p', { class: 'prov-warn', hidden: true, text: 'Enter how many connections you bought' }));
       return el;
     }, function (el, p) {
       var dd = el.querySelectorAll('dd'), pill = $('.pill', el), up = p.up ? '1' : '0';
@@ -304,6 +305,7 @@
       setText(dd[0], String(p.port));
       setText(dd[1], FORMAT[p.live_tv] || String(p.live_tv || 'n/a').toUpperCase());
       setText(dd[2], String(p.channels_open || 0));
+      $('.prov-warn', el).hidden = !p.connections_missing;
     });
 
     // Playing
@@ -433,7 +435,8 @@
       providers: (d.providers || []).map(function (q) {
         return {
           name: q.name || '', url: q.url || '', user: q.user || '', password: '', password_set: !!q.password_set,
-          port: q.port == null ? '' : String(q.port), live_tv: q.live_tv === 'hls' ? 'hls' : 'ts',
+          port: q.port == null ? '' : String(q.port), connections: q.connections == null ? '' : String(q.connections),
+          live_tv: q.live_tv === 'hls' ? 'hls' : 'ts',
           advanced: advOf(q.advanced)
         };
       }),
@@ -454,14 +457,14 @@
   // A provider's advanced options as the page keeps them: numbers as typed text. Old settings without them get
   // the defaults. Each number: [lowest, highest, default, the option it belongs to].
   var ADV_NUM = {
-    connections: [0, 999, '', 'stay_under_limit'], address_wait_seconds: [10, 600, '90', 'locked_to_address'],
+    address_wait_seconds: [10, 600, '90', 'locked_to_address'],
     share_minutes: [1, 1440, '10', 'share_lists'], movie_mbps: [1, 10000, '100', 'limit_movie_speed']
   };
   function advOf(a) {
     a = a || {};
     function num(k) { var v = a[k]; return v == null || v === '' ? ADV_NUM[k][2] : String(v); }
     return {
-      stay_under_limit: a.stay_under_limit !== false, connections: num('connections'),
+      stay_under_limit: a.stay_under_limit !== false,
       one_per_channel: !!a.one_per_channel, one_per_item: !!a.one_per_item,
       locked_to_address: !!a.locked_to_address, address_wait_seconds: num('address_wait_seconds'),
       send_app_name: !!a.send_app_name, app_name: a.app_name == null ? '' : String(a.app_name),
@@ -479,6 +482,7 @@
     var out = clone(m), extra = {};
     out.providers.forEach(function (p) {
       p.name = p.name.trim(); p.url = p.url.trim(); p.user = p.user.trim(); p.port = portOut(p.port);
+      p.connections = portOut(p.connections);
       advOut(p.advanced);
     });
     out.player.user = out.player.user.trim();
@@ -806,6 +810,8 @@
         field({ label: 'Server URL', path: base + '.url', value: p.url, placeholder: 'https://example.com', mono: true, set: function (v) { p.url = v; } }),
         field({ label: 'Username', path: base + '.user', value: p.user, set: function (v) { p.user = v; } }),
         field({ label: 'Password', path: base + '.password', value: p.password, secret: true, isSet: p.password_set, set: function (v) { p.password = v; } }),
+        field({ label: 'Connections you bought', path: base + '.connections', value: p.connections, numeric: true, mono: true, placeholder: 'Required',
+          hint: 'How many connections your plan allows. Coaxial never opens more than this.', set: function (v) { p.connections = v; } }),
         field({ label: 'Local port', path: base + '.port', value: p.port, numeric: true, mono: true, placeholder: '8095', hint: 'Players reach this provider on this port. Docker must open it too: add it as a PORT_n line in the .env file next to your compose file (or as -p in docker run).', set: function (v) { p.port = v; } }),
         segmented({ label: 'Live format', path: base + '.live_tv', value: p.live_tv, options: [['ts', 'MPEG-TS'], ['hls', 'HLS']], hint: 'How live channels are sent to players.', set: function (v) { p.live_tv = v; } })),
       advancedPanel(p, i),
@@ -829,8 +835,7 @@
   function appPreset(name) { for (var k = 0; k < APPS.length; k++) if (APPS[k][1] === name) return k; return -1; }
   var ADV = [
     { key: 'stay_under_limit', name: 'Stay under my connection limit',
-      help: 'Coaxial will not open more streams than your account allows, so nobody gets kicked off. Leave the number blank to use what your provider reports.',
-      num: { key: 'connections', label: 'Connections my account allows', placeholder: 'From provider' } },
+      help: 'Coaxial will not open more streams than the connections you bought, so nobody gets kicked off. Turn this off only if your provider has no limit.' },
     { key: 'one_per_channel', name: 'One connection per channel',
       help: 'Only one stream of each channel at a time. Rewinding a channel someone else is watching or recording waits until they finish.' },
     { key: 'one_per_item', name: 'One connection per movie or episode',
@@ -1014,7 +1019,7 @@
   function addProvider() {
     var ports = S.cur.providers.map(function (p) { return parseInt(p.port, 10) || 0; });
     var next = ports.length ? Math.max.apply(null, ports) + 1 : 8095;
-    S.cur.providers.push({ name: '', url: '', user: '', password: '', password_set: false, port: String(next), live_tv: 'ts', advanced: advOf() });
+    S.cur.providers.push({ name: '', url: '', user: '', password: '', password_set: false, port: String(next), connections: '', live_tv: 'ts', advanced: advOf() });
     renderSettings();
     var cards = document.querySelectorAll('.pcard');
     var last = cards[cards.length - 1];
@@ -1124,13 +1129,17 @@
     }
     S.cur.providers.forEach(function (p, i) {
       port('providers[' + i + '].port', p.port);
+      // How many connections were bought: needed, as Coaxial asks for it too.
+      var c = String(p.connections).trim(), cn = portOut(c);
+      if (!c) errs.push({ field: 'providers[' + i + '].connections', message: 'Enter how many connections you bought.' });
+      else if (typeof cn !== 'number' || cn < 1 || cn > 999) errs.push({ field: 'providers[' + i + '].connections', message: 'Enter a whole number from 1 to 999.' });
       // Advanced options: only what is on is checked, as Coaxial does.
       var a = p.advanced, at = 'providers[' + i + '].advanced.';
       Object.keys(ADV_NUM).forEach(function (k) {
         var r = ADV_NUM[k], v = String(a[k]).trim();
-        if (!a[r[3]] || (v === '' && k === 'connections')) return;
+        if (!a[r[3]]) return;
         var n = portOut(v);
-        if (typeof n !== 'number' || n < r[0] || n > r[1]) errs.push({ field: at + k, message: 'Enter a whole number from ' + r[0] + ' to ' + r[1] + (k === 'connections' ? ', or leave it blank.' : '.') });
+        if (typeof n !== 'number' || n < r[0] || n > r[1]) errs.push({ field: at + k, message: 'Enter a whole number from ' + r[0] + ' to ' + r[1] + '.' });
       });
       if (a.send_app_name) {
         var name = a.app_name.trim();

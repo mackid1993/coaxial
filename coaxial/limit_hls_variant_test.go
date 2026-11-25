@@ -40,7 +40,7 @@ func TestLimitHLSVariantKeepsSession(t *testing.T) {
 			}
 			return true
 		})
-		_, base := advFront(t, fp, "hls", advanced{Connections: "1"})
+		_, base := limFront(t, fp, "hls", "1", advanced{})
 		r := ask(t, base, "192.0.2.1", "/live/tv/easy/45.m3u8")
 		for r.StatusCode == 302 {
 			loc := r.Header.Get("Location")

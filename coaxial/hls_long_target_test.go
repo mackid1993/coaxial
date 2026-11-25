@@ -44,7 +44,7 @@ func TestLimitHLSLongPiecesKeepsSession(t *testing.T) {
 			}
 			return true
 		})
-		f, base := advFront(t, fp, "hls", advanced{Connections: "1"})
+		f, base := limFront(t, fp, "hls", "1", advanced{})
 		look := func(path string) (int, string) { // the player asks for the playlist
 			r := ask(t, base, "192.0.2.1", path)
 			for r.StatusCode == 302 {
