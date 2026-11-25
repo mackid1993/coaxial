@@ -457,7 +457,13 @@ func lastPCR(b []byte, want int) (int, float64, bool) {
 // nothing is added, held back or taken out, only the timestamp fields of packets already passing are
 // rewritten. The clock's own wrap after about 26 hours is not a jump.
 type clockFix struct {
-	off      int64 // added to every timestamp, modulo 2^33
+	off      int64 // added to every PES timestamp (PTS, DTS), modulo 2^33
+	offPCR   int64 // added to every PCR: the same as off unless one of the two clocks jumped alone
+	rawPCR   int64 // the newest PCR and video PTS on the provider's own clock; -1: none yet
+	rawPTS   int64
+	tryOff   int64 // the PES offset before a PCR jump moved it too (see stamp); -1: none to undo
+	tryPCR   int64 // the PCR offset before a video PTS jump moved it too; -1: none to undo
+	jumps    int   // jumps seen (for tests)
 	last     int64 // the newest PCR passed on (after the offset); -1: none yet
 	lastPTS  int64 // the newest video PTS passed on (after the offset); -1: none yet
 	pcrPID   int
@@ -466,6 +472,11 @@ type clockFix struct {
 	carry    []byte // after a jump: the start of a packet whose rest has not come yet
 	next     int64  // where in the stream the next packet starts (packets are not always 188 bytes apart: a
 	//                provider can cut one short), -1: not known, find it
+	whole bool     // the clock has jumped: from then on only whole packets are passed on
+	tail  []byte   // before that: the start of a packet the last read ended inside (read for fingerprints only)
+	rp    *replays // video frames passed on, and what is held or left out after a jump (see replay.go)
+	now   func() float64
+	tag   logTag // the channel's fields for the log
 }
 
 const tsWrap = int64(1) << 33
@@ -505,31 +516,49 @@ func writeTS(b []byte, v int64) {
 
 // raw: a clock passed on (seconds, offset added) on the provider's own clock again.
 func (c *clockFix) raw(clock float64) float64 {
-	if clock < 0 || c.off == 0 {
+	if clock < 0 || c.offPCR == 0 {
 		return clock
 	}
-	return float64(((int64(math.Round(clock*90000))-c.off)%tsWrap+tsWrap)%tsWrap) / 90000
+	return float64(((int64(math.Round(clock*90000))-c.offPCR)%tsWrap+tsWrap)%tsWrap) / 90000
 }
 
 // fix rewrites the timestamps in data in place and returns what to pass on. off: how many bytes of the stream
-// were passed on before data (packets are 188 bytes from the stream's start). Once the clock has jumped, the
-// start of a packet whose rest is still on its way is kept back until the rest comes, so that its timestamps
-// can be rewritten too; half a packet is of no use to a player, so nothing it could play waits. A stream
-// whose clock never jumped is passed on exactly as read.
+// were passed on before data. Once the clock has jumped, the start of a packet whose rest is still on its way
+// is kept back until the rest comes, so that its timestamps can be rewritten too; half a packet is of no use to
+// a player, so nothing it could play waits. Video the provider sends again after a jump is left out (see
+// replay.go). A stream whose clock never jumped is passed on exactly as read.
 func (c *clockFix) fix(data []byte, off int64) []byte {
 	if !c.started {
 		c.started, c.last, c.lastPTS, c.pcrPID, c.videoPID, c.next = true, -1, -1, -1, -1, -1
+		c.rawPCR, c.rawPTS, c.tryOff, c.tryPCR = -1, -1, -1, -1
+		c.rp = newReplays()
 	}
 	if len(c.carry) > 0 {
 		data = append(c.carry, data...)
 		c.carry = nil
 	}
-	i := -1
+	r := c.rp
+	r.data, r.res, r.pos, r.copied = data, nil, 0, false
+	defer func() { r.data, r.res = nil, nil }()
+	i, grid := -1, true // grid: i is a packet start known from the packets before it
 	if c.next >= off && c.next-off <= int64(len(data)) {
 		i = int(c.next - off)
 	} else if g := c.next + 188 - off; c.next >= 0 && g >= 0 && g <= int64(len(data)) &&
 		(g == int64(len(data)) || data[g] == 0x47 && (g+188 >= int64(len(data)) || data[g+188] == 0x47)) {
-		i = int(g) // the last read ended inside a packet: the next one starts 188 bytes after it (when it does)
+		i = int(g)                                     // the last read ended inside a packet: the next one starts 188 bytes after it (when it does)
+		if len(c.tail)+i == 188 && c.tail[0] == 0x47 { // (that packet, read whole for the fingerprints and the clock)
+			p := append(c.tail, data[:i]...)
+			c.see(p)
+			c.track(p)
+			r.ccSeen(p)
+		}
+	}
+	c.tail = nil
+	if r.ccPend >= 0 { // (the packet that ended the last read was one: the next one starts right after it)
+		if i == 0 && len(data) > 0 && data[0] == 0x47 {
+			r.cc[r.ccPend] = r.ccVal
+		}
+		r.ccPend = -1
 	}
 	for ; ; i += 188 {
 		if i < 0 || i < len(data) && (data[i] != 0x47 || i+188 < len(data) && data[i+188] != 0x47) {
@@ -540,69 +569,169 @@ func (c *clockFix) fix(data []byte, off int64) []byte {
 			if i < 0 {
 				from = 0
 			}
-			i = syncAt(data, from)
+			i, grid = syncAt(data, from), false
 			if i < 0 {
+				c.junk(len(data))
 				c.next = -1
-				return data
+				return r.output(len(data))
 			}
 		}
 		if i+188 > len(data) {
 			break
 		}
+		c.junk(i)
 		p := data[i : i+188]
-		pid := int(p[1]&0x1f)<<8 | int(p[2])
-		pos := 4
-		if p[3]&0x20 != 0 { // an adaptation field
-			pos = 5 + int(p[4])
-			if p[4] >= 7 && p[5]&0x10 != 0 && (c.pcrPID < 0 || pid == c.pcrPID) {
-				c.pcrPID = pid
-				raw := int64(p[6])<<25 | int64(p[7])<<17 | int64(p[8])<<9 | int64(p[9])<<1 | int64(p[10])>>7
-				v := (raw + c.off) % tsWrap
-				if c.jumped(v, c.last) {
-					c.off = ((c.off+tsDiff(c.last, v)+3600)%tsWrap + tsWrap) % tsWrap // (40 ms after the last one)
-					v = (raw + c.off) % tsWrap
-					say("a channel's clock started over (a new file in the provider's feed); its timestamps now carry on from where they were")
-				}
-				c.last = v
-				p[6], p[7], p[8], p[9] = byte(v>>25), byte(v>>17), byte(v>>9), byte(v>>1)
-				p[10] = p[10]&0x7f | byte(v<<7)&0x80
-			}
-		}
-		if p[1]&0x40 == 0 || p[3]&0x10 == 0 || pos+14 > 188 { // not the start of a PES packet
-			continue
-		}
-		e := p[pos:]
-		if e[0] != 0 || e[1] != 0 || e[2] != 1 || !(e[3] >= 0xc0 && e[3] <= 0xef || e[3] == 0xbd) || e[6]&0xc0 != 0x80 {
-			continue // (not audio, video or private stream 1 with an MPEG-2 header)
-		}
-		flags := e[7] >> 6
-		if flags&2 == 0 || pos+19 > 188 && flags == 3 {
-			continue
-		}
-		pts := readTS(e[9:14])
-		if e[3] >= 0xe0 && (c.videoPID < 0 || pid == c.videoPID) { // video: the jump may show here before any PCR
-			c.videoPID = pid
-			v := (pts + c.off) % tsWrap
-			if c.jumped(v, c.lastPTS) {
-				c.off = ((c.off+tsDiff(c.lastPTS, v)+3600)%tsWrap + tsWrap) % tsWrap
-				say("a channel's clock started over (a new file in the provider's feed); its timestamps now carry on from where they were")
-			}
-			c.lastPTS = (pts + c.off) % tsWrap
-		}
-		if c.off == 0 {
-			continue
-		}
-		writeTS(e[9:14], pts+c.off)
-		if flags == 3 {
-			writeTS(e[14:19], readTS(e[14:19])+c.off)
-		}
+		jumped := c.stamp(p)
+		r.sure = i+188 < len(data) && data[i+188] == 0x47
+		c.route(p, jumped)
+		r.pos, grid = i+188, true
 	}
-	c.next = off + int64(i)
-	if c.off != 0 && i < len(data) && data[i] == 0x47 {
+	c.junk(min(i, len(data)))
+	if c.whole && i < len(data) && data[i] == 0x47 {
 		c.carry = append([]byte(nil), data[i:]...)
-		data = data[:i]
+		out := r.output(i)
+		c.next = off + int64(len(out))
+		return out
 	}
-	return data
+	if i < len(data) && data[i] == 0x47 {
+		// The read ended inside a packet (before any jump: nothing is held). If its timestamps have come, they are
+		// read and written now, so that a jump in this very packet does not reach players on the provider's clock.
+		if part := data[i:]; grid && len(part) >= stampNeed(part) {
+			var p [188]byte
+			copy(p[:], part)
+			if c.stamp(p[:]) {
+				c.logJump("the jump came in a packet cut across two reads: video sent again was not looked for", 0, 0)
+			}
+			copy(part, p[:])
+		}
+		c.tail = append([]byte(nil), data[i:]...)
+	}
+	c.junk(len(data))
+	out := r.output(len(data))
+	if c.whole && i >= len(data) {
+		c.next = off + int64(len(out))
+	} else {
+		c.next = off + int64(i)
+	}
+	return out
+}
+
+// track: the clocks of a packet already passed on whole, before any jump (its timestamps could not be read in
+// time): the newest PCR and video PTS are what a jump is measured from. A jump in it went out as it was; the next
+// packet shows it as before.
+func (c *clockFix) track(p []byte) {
+	if c.whole {
+		return
+	}
+	var q [188]byte
+	copy(q[:], p)
+	if c.last < 0 || c.lastPTS < 0 {
+		return
+	}
+	last, lastPTS, rawPCR, rawPTS := c.last, c.lastPTS, c.rawPCR, c.rawPTS
+	if c.stamp(q[:]) || c.whole { // (a jump: leave it for the next packet, as it went out)
+		c.whole, c.last, c.lastPTS, c.rawPCR, c.rawPTS = false, last, lastPTS, rawPCR, rawPTS
+		c.off, c.offPCR, c.tryOff, c.tryPCR = 0, 0, -1, -1
+		c.rp.jl.set = false
+		c.rp.anchorPCR, c.rp.anchorPTS = anchor{}, anchor{}
+	}
+}
+
+// stampNeed: how much of a packet stamp reads or writes (189: not known yet).
+func stampNeed(p []byte) int {
+	if len(p) < 6 {
+		return 189
+	}
+	pos, need := 4, 4
+	if p[3]&0x20 != 0 {
+		pos, need = 5+int(p[4]), 6
+		if p[4] >= 7 {
+			need = 11
+		}
+	}
+	if p[1]&0x40 == 0 || p[3]&0x10 == 0 || pos+14 > 188 {
+		return need
+	}
+	if len(p) < pos+8 {
+		return pos + 8
+	}
+	if p[pos+7]>>6 == 3 {
+		return max(need, pos+19)
+	}
+	return max(need, pos+14)
+}
+
+// stamp writes one whole packet's timestamps with the offsets, moving them first when the clock jumped.
+// The PCR and the PES timestamps (PTS, DTS) each keep their own offset: a provider can make only one of them
+// jump (seen at ad breaks), and one offset for both then moved the other one off, back and forth. A PCR jump
+// moves the PES offset along with it at once (sound of the new stream can come before its first picture), and a
+// video PTS jump moves the PCR's; the next video PES (or PCR) undoes that when its own clock ran on.
+func (c *clockFix) stamp(p []byte) (jumped bool) {
+	pid := int(p[1]&0x1f)<<8 | int(p[2])
+	pos := 4
+	if p[3]&0x20 != 0 { // an adaptation field
+		pos = 5 + int(p[4])
+		if p[4] >= 7 && p[5]&0x10 != 0 && (c.pcrPID < 0 || pid == c.pcrPID) {
+			c.pcrPID = pid
+			raw := int64(p[6])<<25 | int64(p[7])<<17 | int64(p[8])<<9 | int64(p[9])<<1 | int64(p[10])>>7
+			if c.tryPCR >= 0 && c.rawPCR >= 0 && !rawStep(raw, c.rawPCR) {
+				c.offPCR = c.tryPCR // (only the pictures' clock jumped: the PCR runs on as it was)
+			}
+			c.tryPCR = -1
+			v := (raw + c.offPCR) % tsWrap
+			if c.jumped(v, c.last) || c.returned(true, raw, v) {
+				off := ((c.offPCR+tsDiff(c.last, v)+3600)%tsWrap + tsWrap) % tsWrap // (40 ms after the last one)
+				c.jumpedAt("PCR", c.last, c.offPCR, raw, off)
+				c.tryOff, c.offPCR, c.off = c.off, off, off
+				v = (raw + c.offPCR) % tsWrap
+				jumped = true
+			}
+			c.last, c.rawPCR = v, raw
+			p[6], p[7], p[8], p[9] = byte(v>>25), byte(v>>17), byte(v>>9), byte(v>>1)
+			p[10] = p[10]&0x7f | byte(v<<7)&0x80
+		}
+	}
+	if p[1]&0x40 == 0 || p[3]&0x10 == 0 || pos+14 > 188 { // not the start of a PES packet
+		return
+	}
+	e := p[pos:]
+	if e[0] != 0 || e[1] != 0 || e[2] != 1 || !(e[3] >= 0xc0 && e[3] <= 0xef || e[3] == 0xbd) || e[6]&0xc0 != 0x80 {
+		return // (not audio, video or private stream 1 with an MPEG-2 header)
+	}
+	flags := e[7] >> 6
+	if flags&2 == 0 || pos+19 > 188 && flags == 3 {
+		return
+	}
+	pts := readTS(e[9:14])
+	if e[3] >= 0xe0 && (c.videoPID < 0 || pid == c.videoPID) { // video: the jump may show here before any PCR
+		c.videoPID = pid
+		if c.tryOff >= 0 && c.rawPTS >= 0 && !rawStep(pts, c.rawPTS) {
+			c.off = c.tryOff // (only the PCR jumped: the pictures' clock runs on as it was)
+		}
+		v := (pts + c.off) % tsWrap
+		if c.jumped(v, c.lastPTS) || c.returned(false, pts, v) {
+			off := ((c.off+tsDiff(c.lastPTS, v)+3600)%tsWrap + tsWrap) % tsWrap
+			c.jumpedAt("video PTS", c.lastPTS, c.off, pts, off)
+			c.off, c.tryPCR, c.offPCR = off, c.offPCR, off
+			jumped = true
+		}
+		c.tryOff, c.rawPTS = -1, pts
+		c.lastPTS = (pts + c.off) % tsWrap
+	}
+	if c.off == 0 {
+		return
+	}
+	writeTS(e[9:14], pts+c.off)
+	if flags == 3 {
+		writeTS(e[14:19], readTS(e[14:19])+c.off)
+	}
+	return
+}
+
+// rawStep: whether a clock on the provider's own side stepped (back over 1 s, ahead over 2 s) rather than ran on.
+func rawStep(v, last int64) bool {
+	d := tsDiff(v, last)
+	return d < -90000 || d > 2*90000
 }
 
 // syncAt: the first position at or after from where a packet starts and the next one does too, 188 bytes on (and the
@@ -1030,6 +1159,7 @@ func tsSource(target string, h http.Header, a *askLog) source {
 		again, sent, quiet, tries, dropped := false, int64(0), 0, 0, 0.0
 		clockPID, clock := -1, -1.0 // the newest stream clock passed on (see spliceAt)
 		var clk clockFix            // keeps the stream's clock running on when the provider's feed starts a new file
+		clk.tag = st.fields
 		for {
 			began, got := mono(), false
 			wait := float64(headerWait)
@@ -1084,8 +1214,8 @@ func tsSource(target string, h http.Header, a *askLog) source {
 				if again {
 					setWait(r, 2*reopenWait)
 				}
-				clk.carry, clk.next = nil, -1 // (half a packet of the old stream is of no use; find the new one's packets)
-				var head []byte               // a stream opened again is joined on at a whole packet
+				clk.reask()     // (half a packet of the old stream is of no use; find the new one's packets)
+				var head []byte // a stream opened again is joined on at a whole packet
 				joining := again
 				buf := make([]byte, 65536)
 				for {
