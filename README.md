@@ -196,6 +196,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
 | `vpn.update_hours` | How often gluetun refreshes its list of your VPN service's servers (its `UPDATER_PERIOD`). 24 if left out, 0 for never. |
 | `vpn.gluetun_version` | Which gluetun program runs: `latest` (also when left out), a tag of gluetun's image such as `v3.41.3` to stay on one version, or `builtin` to fetch nothing and run the one in this image. |
+| `WIREGUARD_MTU` (under `vpn.extra`) | WireGuard's packet size. Coaxial sets 1320, gluetun's long-standing default, so the tunnel never depends on a size found at start. Set a number here only if your VPN service asks for one. |
 | `vpn.extra` | Any other gluetun variable under its own name, such as `OPENVPN_PROTOCOL`. It is applied last, so it wins over the settings above. Refused here and under `vpn`, because anyone who can reach the web page could use them: gluetun's `..._COMMAND` variables, OpenVPN options that run programs (such as `--up`) in `OPENVPN_FLAGS`, `HTTP_CONTROL_SERVER_*` settings other than `HTTP_CONTROL_SERVER_LOG`, and values on more than one line (except the OpenVPN certificate and keys). |
 
 gluetun keeps its server lists in `gluetun/servers` in the mounted folder, so they survive a restart.

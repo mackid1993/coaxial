@@ -185,12 +185,16 @@ func runLauncher() int {
 	return code
 }
 
-// gluetunEnv: gluetun's environment: the image's own defaults, two of this program's, then the settings.
+// gluetunEnv: gluetun's environment: the image's own defaults, this program's, then the settings.
 func (l *launcher) gluetunEnv(s *settings) (env []string, key string, names []string) {
 	set := map[string]string{
 		"HTTP_CONTROL_SERVER_ADDRESS": "127.0.0.1:8000", // gluetun's own control page stays inside the container
 		// gluetun's server lists, and the updates it makes to them, are kept in the settings folder
 		"STORAGE_SERVERS_DIRECTORY_PATH": filepath.Join(l.dir, "gluetun", "servers") + "/",
+		// A fixed WireGuard packet size, gluetun's own default for years. Left to find the size by itself, gluetun
+		// can settle on one some part of the path will not carry; a full-size packet lost at the start of a
+		// channel's opening burst stalls it until it is sent again. Set WIREGUARD_MTU under vpn.extra to change it.
+		"WIREGUARD_MTU": "1320",
 	}
 	for k, v := range s.vpnEnv() {
 		set[k] = v
