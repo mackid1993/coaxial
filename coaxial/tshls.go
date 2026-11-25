@@ -119,6 +119,7 @@ func hlsFromTS(w http.ResponseWriter, r *http.Request, who, provider, uri, opath
 			answer(w, 404, "", "")
 			return true, nil
 		}
+		providerHeaders(w, sg.ch) // (the provider's own headers for this stream, as on the MPEG-TS answer)
 		w.Header().Set("Content-Type", "video/mp2t")
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(200)
@@ -184,8 +185,11 @@ wait:
 		b.WriteString("#EXT-X-ENDLIST\n")
 	}
 	mu.Unlock()
+	providerHeaders(w, sg.ch)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	w.Header().Set("Cache-Control", "no-cache")
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	answer(w, 200, "application/vnd.apple.mpegurl", b.String())
 	return true, nil
 }
@@ -563,6 +567,21 @@ func releaseFor(provider, who, key string) {
 			sg.asked = 0       // (its loop sees this and ends)
 			sg.ch.leave(sg.rd) // let go now: the provider gets dropGap to see it before the next channel
 			sg.rd.signal()
+		}
+	}
+}
+
+// providerHeaders: the provider's own answer headers for the channel's stream (see passHeaders), on an HLS answer
+// built from it. Its content type is this answer's own.
+func providerHeaders(w http.ResponseWriter, ch *channel) {
+	if ch == nil {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for k, v := range ch.hdr {
+		if k != "Content-Type" {
+			w.Header()[k] = append([]string(nil), v...)
 		}
 	}
 }
