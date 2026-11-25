@@ -117,7 +117,12 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 	look := func(ctx context.Context) (string, playlist, error) { // always from the channel's own address
 		at := start
 		for i := 0; i < 4; i++ {
-			status, data, err := get(ctx, at, h, 2<<20, via)
+			t0 := mono()
+			status, data, err := getWithin(ctx, at, h, 2<<20, via, pieceWait) // (a quiet connection: asked again)
+			if took := mono() - t0; took > 2 && ctx.Err() == nil {
+				lg.Warn().Float64("seconds", round1(took)).Bool("got", err == nil).
+					Msgf("a playlist took %.1f s to fetch", took)
+			}
 			if err != nil {
 				return "", playlist{}, err
 			}
@@ -237,6 +242,9 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 				nap := 1.0
 				if hasLast {
 					nap = 2
+				}
+				if !errors.As(err, &r) { // (no answer at all, a quiet connection: ask again at once, on a new one)
+					nap = 0
 				}
 				if e := wait(mono()+nap, nil); e != nil {
 					return e
