@@ -194,6 +194,9 @@ type accountState struct {
 
 var accounts = map[string]*accountState{}
 
+// accountEvery: seconds between two reads of a provider's account for the status page.
+var accountEvery = 1800.0
+
 func playerAPI(ctx context.Context, port, extra string) (int, []byte, error) {
 	f := fronts[port]
 	if f == nil {
@@ -218,17 +221,21 @@ func playerAPI(ctx context.Context, port, extra string) (int, []byte, error) {
 }
 
 func account(port string, wait time.Duration) map[string]any {
+	// Each read is a login to the provider. It is made at most once every accountEvery seconds, and never while
+	// anything plays or records: a provider sees a run of logins during a stream as abuse, and the stream pays.
+	// The page shows the last answer, with its age, in between.
+	busy := len(playingNow()) > 0
 	mu.Lock()
 	st := accounts[port]
 	if st == nil {
 		st = &accountState{tried: -1e9}
 		accounts[port] = st
 	}
-	every := 15.0
+	every := accountEvery
 	if st.fails > 0 {
-		every = math.Min(60*math.Pow(2, float64(st.fails)), 900)
+		every = math.Min(60*math.Pow(2, float64(st.fails)), accountEvery)
 	}
-	if st.task == nil && mono()-st.tried >= every {
+	if !busy && st.task == nil && mono()-st.tried >= every {
 		st.tried, st.task = mono(), make(chan struct{})
 		go func(done chan struct{}) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -264,7 +271,7 @@ func account(port string, wait time.Duration) map[string]any {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if st.good != nil && mono()-st.at < 900 {
+	if st.good != nil {
 		a := map[string]any{"age": mono() - st.at}
 		for k, v := range st.good {
 			a[k] = v
