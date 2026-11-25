@@ -930,15 +930,9 @@ func (ch *channel) join(first bool) *reader {
 			rd.push(d)
 		}
 		rd.given = rd.n
-		// The cushion is handed on at playing speed (a player given seconds at once jumps through it and then
-		// stalls at the provider's next pause); joinStart seconds go at once so it can begin.
-		// A channel in its first seconds has no measured speed yet, and what it has kept is less than
-		// joinSeconds of video: paced by a guess (what is kept, taken for joinSeconds of video) the joiner
-		// was sent a first lump and then nothing for seconds. It is given what is kept at once, as the
-		// reader who opened the channel was a moment before.
-		if measured {
-			rd.pace = &pace{float64(rd.n), speed * joinStart, mono(), speed, mono()}
-		}
+		// The cushion is handed over at once, as fast as the player reads it, the way the provider hands a new
+		// connection its opening burst and other restreamers hand a new client their buffer. Pacing it (as this
+		// did before) left a joiner under a second of video in its first seconds, and its player stalled.
 		extra := ""
 		if measured {
 			extra = fmt.Sprintf(" (%d s at %d KB a second)", joinSeconds, int64(speed/1024))
