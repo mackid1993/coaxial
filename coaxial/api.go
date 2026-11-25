@@ -130,7 +130,7 @@ func statusData() map[string]any {
 	}
 	for _, h := range hlsRows {
 		if now-h.last <= 30 {
-			row(h.who, h.id, h.port, "HLS", h.last-h.first, 0)
+			row(h.who, h.id, h.port, "HLS", h.last-h.first, h.bytes)
 		}
 	}
 	sort.Slice(playing, func(i, j int) bool {

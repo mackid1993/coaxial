@@ -271,13 +271,22 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 					continue
 				}
 				var data []byte
-				for try := 0; try < 2 && data == nil; try++ {
+				for try := 0; try < 3 && data == nil; try++ {
+					t0 := mono()
 					if e := do(func(c context.Context) {
-						if status, d, err := get(c, u.String(), h, 64<<20, via); err == nil && status == 200 && len(d) > 0 {
+						if status, d, err := getWithin(c, u.String(), h, 64<<20, via, pieceWait); err == nil && status == 200 && len(d) > 0 {
 							data = d
 						}
 					}); e != nil {
 						return e
+					}
+					if took := mono() - t0; took > 2 {
+						ev := lg.Warn()
+						if data != nil {
+							ev = lg.Info()
+						}
+						ev.Str("channel", ch.id).Float64("seconds", round1(took)).Bool("got", data != nil).Int("try", try+1).
+							Msgf("a piece of video took %.1f s to fetch on channel %s", took, ch.id)
 					}
 				}
 				if data == nil {
@@ -441,6 +450,7 @@ func playlistPieces(text string) map[string]bool {
 type hlsRow struct {
 	first, last             float64
 	who, id, provider, port string
+	bytes                   int64 // video pieces sent to this player on this channel
 }
 
 // cdnAddress: this proxy's address for a full http(s) address ("" for anything else).
@@ -837,7 +847,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if row := hlsRows[rk]; row != nil && mono()-row.last <= 30 {
 			row.last = mono()
 		} else {
-			hlsRows[rk] = &hlsRow{mono(), mono(), who, channelID(uri), provider, port}
+			hlsRows[rk] = &hlsRow{first: mono(), last: mono(), who: who, id: channelID(uri), provider: provider, port: port}
 		}
 	}
 	t, said := hlsWho[who+" "+key]

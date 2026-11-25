@@ -432,9 +432,15 @@ func (f *front) serve(c *counted, r *http.Request) {
 		}
 		mu.Lock()
 		f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session: it is still playing)
+		row := f.pieceRow(r.URL.RequestURI(), whoIs(r))
 		mu.Unlock()
 		w, follow := f.followed(r) // (a redirect of a film or catch-up let through: what it continues)
 		f.stream(c, r, w, follow, target, scheme, hostport, true)
+		if row != nil {
+			mu.Lock()
+			row.bytes += c.bytes
+			mu.Unlock()
+		}
 	case strings.HasPrefix(low, "/__cdu/"):
 		c.WriteHeader(404)
 	case low == "/xmltv.php": // the guide: large, and slow for some providers to start. Its channel and programme
@@ -445,7 +451,15 @@ func (f *front) serve(c *counted, r *http.Request) {
 		c.kind, c.server = "media", f.hostport
 		mu.Lock()
 		part := f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session on the provider's own server)
+		row := f.pieceRow(r.URL.RequestURI(), whoIs(r))
 		mu.Unlock()
+		if row != nil {
+			defer func() {
+				mu.Lock()
+				row.bytes += c.bytes
+				mu.Unlock()
+			}()
+		}
 		c.ask = f.askFor(r.URL, whoIs(r))
 		if part {
 			c.ask.kind, c.ask.routine = "piece", true

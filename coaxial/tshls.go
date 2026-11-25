@@ -97,11 +97,13 @@ func hlsFromTS(w http.ResponseWriter, r *http.Request, who, provider, uri, opath
 	mu.Lock()
 	sg.asked = mono()
 	sg.players[who] = mono()
+	var row *hlsRow
 	if rk := who + " " + provider + " " + id; who != "127.0.0.1" && who != "::1" {
-		if row := hlsRows[rk]; row != nil && mono()-row.last <= 30 {
+		if row = hlsRows[rk]; row != nil && mono()-row.last <= 30 {
 			row.last = mono()
 		} else {
-			hlsRows[rk] = &hlsRow{mono(), mono(), who, id, provider, port}
+			row = &hlsRow{first: mono(), last: mono(), who: who, id: id, provider: provider, port: port}
+			hlsRows[rk] = row
 		}
 	}
 	mu.Unlock()
@@ -124,6 +126,11 @@ func hlsFromTS(w http.ResponseWriter, r *http.Request, who, provider, uri, opath
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(200)
 		w.Write(data)
+		if row != nil {
+			mu.Lock()
+			row.bytes += int64(len(data))
+			mu.Unlock()
+		}
 		return true, nil
 	}
 	deadline := time.After(segWait * time.Second) // the playlist: wait for the first pieces

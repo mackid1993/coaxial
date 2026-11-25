@@ -300,11 +300,21 @@ func readAll(r *http.Response, limit int64, wait float64) ([]byte, error) {
 
 // get fetches a whole small answer from this proxy's own front door (never sent elsewhere).
 func get(ctx context.Context, url string, h http.Header, limit int64, via http.RoundTripper) (int, []byte, error) {
-	r, err := fetch(ctx, url, h, opts{stay: true, via: via, wait: headerWait})
+	return getWithin(ctx, url, h, limit, via, headerWait)
+}
+
+// pieceWait: seconds a piece of HLS video may send nothing before its download is given up and asked again.
+// ExoPlayer's default read timeout (DefaultHttpDataSource, 8 s); a stuck download otherwise held the stream
+// for the full headerWait while the playlist already listed newer pieces.
+const pieceWait = 8
+
+// getWithin: get, giving up when the answer sends nothing for wait seconds.
+func getWithin(ctx context.Context, url string, h http.Header, limit int64, via http.RoundTripper, wait float64) (int, []byte, error) {
+	r, err := fetch(ctx, url, h, opts{stay: true, via: via, wait: wait})
 	if err != nil {
 		return 0, nil, err
 	}
-	data, err := readAll(r, limit, headerWait)
+	data, err := readAll(r, limit, wait)
 	return r.StatusCode, data, err
 }
 

@@ -414,6 +414,16 @@ func (f *front) inUse(uri, who string) bool {
 	return part
 }
 
+// pieceRow: the status page row of the player asking for a piece of an HLS session (nil: none). (mu held)
+func (f *front) pieceRow(uri, who string) *hlsRow {
+	for k, s := range sessions {
+		if strings.HasPrefix(k, f.base+" ") && s.pieces[uri] {
+			return hlsRows[who+" "+f.base+" "+channelID(strings.TrimPrefix(k, f.base+" "))]
+		}
+	}
+	return nil
+}
+
 func lastPart(key string) string { return key[strings.LastIndexByte(key, '/')+1:] }
 
 // limit: the connections this provider allows at once: the number the user typed in, while stay_under_limit is
