@@ -729,7 +729,30 @@ var (
 	channels = map[string]*channel{}
 	lastDrop = map[string]float64{} // per provider: when one of its streams was last let go
 	lastOpen = map[string]opened{}  // per provider: when a channel was last opened, and which
+	// a channel the provider answered 404 or a server error when it was opened: players ask again at once, several
+	// times (MPEG-TS, then HLS); for refusalKeep seconds they are given the same answer without asking again
+	refusedAt = map[string]refusalSeen{}
 )
+
+const refusalKeep = 3.0
+
+type refusalSeen struct {
+	at float64
+	r  *refused
+}
+
+// recentRefusal: the provider's answer to the channel key, if it refused it a moment ago. (mu held)
+func recentRefusal(key string) *refused {
+	s, ok := refusedAt[key]
+	if !ok {
+		return nil
+	}
+	if mono()-s.at >= refusalKeep {
+		delete(refusedAt, key)
+		return nil
+	}
+	return s.r
+}
 
 type opened struct {
 	at  float64
@@ -771,6 +794,14 @@ func (ch *channel) run(src source) {
 	case errors.As(err, &r):
 		if ch.status == 0 {
 			ch.status, ch.refusal = r.status, r
+			if r.status == 404 || r.status >= 500 {
+				refusedAt[ch.key] = refusalSeen{mono(), r}
+				for k, s := range refusedAt {
+					if mono()-s.at >= refusalKeep {
+						delete(refusedAt, k)
+					}
+				}
+			}
 		}
 	case isTimeout(err):
 		if ch.status == 0 {
@@ -1285,6 +1316,11 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	first := ch == nil
 	if !first { // moving onto a channel already open: an HLS builder this device left goes too
 		releaseFor(provider, rt.client, key)
+	}
+	if e := recentRefusal(key); first && e != nil { // (refused a moment ago: the same answer, not asked again)
+		mu.Unlock()
+		answer(w, e.status, e.kind, string(rt.f.hideLogin(e.text)))
+		return
 	}
 	if first {
 		// Changing channel: the hang-up on the old one and this request arrive in either order. Channels of

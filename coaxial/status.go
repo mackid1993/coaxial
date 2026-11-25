@@ -203,18 +203,23 @@ func keepAccounts(stop <-chan struct{}) {
 		ports = append(ports, port)
 	}
 	mu.Unlock()
+	due := map[string]time.Time{} // when each account is read next (one that answered: in accountEvery)
 	for {
-		known := true
+		every := accountEvery
 		for _, port := range ports {
-			account(port, 0)
+			if time.Now().Before(due[port]) {
+				continue // (an account that answered is not read again because another one did not)
+			}
+			account(port, 25*time.Second) // (this round's answer, so one that answers is known at once)
 			mu.Lock()
 			st := accounts[port]
-			known = known && st != nil && st.good != nil
+			known := st != nil && st.good != nil
 			mu.Unlock()
-		}
-		every := accountEvery
-		if !known {
-			every = accountRetry
+			if known {
+				due[port] = time.Now().Add(accountEvery)
+			} else {
+				every = accountRetry
+			}
 		}
 		select {
 		case <-stop:
