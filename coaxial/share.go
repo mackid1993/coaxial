@@ -85,7 +85,7 @@ func shareKey(f *front, r *http.Request) string {
 
 // shared: the answer for key, from a download that is under way, or done and still fresh; else one is started.
 // The caller closes its body.
-func shared(ctx context.Context, f *front, key, target string, h http.Header) (*http.Response, error) {
+func shared(ctx context.Context, f *front, key, target string, h http.Header, a *askLog) (*http.Response, error) {
 	now := mono()
 	shareMu.Lock()
 	e := shares[key]
@@ -106,7 +106,7 @@ func shared(ctx context.Context, f *front, key, target string, h http.Header) (*
 		for _, k := range []string{"If-None-Match", "If-Modified-Since", "If-Match", "If-Unmodified-Since", "If-Range"} {
 			hd.Del(k) // (the copy is for every player: the whole answer is asked for, never "not changed")
 		}
-		go e.fill(target, hd, f.shareFor)
+		go e.fill(target, hd, f.shareFor, a)
 	}
 	rd := &shareReader{e: e, ctx: ctx}
 	e.mu.Lock()
@@ -128,8 +128,8 @@ func shared(ctx context.Context, f *front, key, target string, h http.Header) (*
 }
 
 // fill downloads the answer. It goes on when the player that started it hangs up: others may be waiting.
-func (e *shareEntry) fill(target string, h http.Header, keep float64) {
-	resp, err := fetch(context.Background(), target, h, opts{guardAll: true, wait: 300})
+func (e *shareEntry) fill(target string, h http.Header, keep float64, a *askLog) {
+	resp, err := fetch(context.Background(), target, h, opts{guardAll: true, wait: 300, ask: a})
 	if err != nil {
 		e.err = err
 		close(e.ready)
@@ -231,7 +231,7 @@ func (e *shareEntry) write(p []byte) bool {
 func (e *shareEntry) passOn(err error) {
 	e.pass, e.base = true, e.size-int64(len(e.data))
 	if !shareTempSaid.Swap(true) {
-		say("a list or guide download could not be kept in the temporary folder (%v): large ones are passed on without a shared copy", err)
+		warn("a list or guide download could not be kept in the temporary folder (%v): large ones are passed on without a shared copy", err)
 	}
 }
 

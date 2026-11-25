@@ -160,14 +160,23 @@ func (f *fetcher) get(address, accept string) (*http.Response, error) {
 	if f.bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+f.bearer) // (not sent on to another host when redirected)
 	}
+	began := time.Now()
 	r, err := f.client.Do(req)
 	if err != nil {
+		lg.Warn().Str("registry", req.URL.Host).Int64("ms", time.Since(began).Milliseconds()).Str("reason", plain(err)).
+			Msg("background: the VPN program's registry could not be reached")
 		return nil, errors.New(plain(err))
 	}
 	if r.StatusCode != 200 {
 		r.Body.Close()
+		if r.StatusCode != 401 || f.bearer != "" { // (a first 401 asks for a token: the normal start of a look-up)
+			lg.Warn().Str("registry", req.URL.Host).Int("status", r.StatusCode).Int64("ms", time.Since(began).Milliseconds()).
+				Msg("background: the VPN program's registry answered " + statusWords(r.StatusCode))
+		}
 		return nil, fmt.Errorf("%s answered %d", req.URL.Host, r.StatusCode)
 	}
+	lg.Debug().Str("registry", req.URL.Host).Int("status", 200).Int64("ms", time.Since(began).Milliseconds()).
+		Msg("background: asked the VPN program's registry")
 	return r, nil
 }
 
@@ -535,7 +544,7 @@ func fetchProgram(ctx context.Context, client *http.Client, reg registry, tag, a
 		p.Source, p.Tag = "cached", tag
 		return p, f, nil
 	} else if !os.IsNotExist(err) {
-		say("VPN program: the cached copy %s is not used: %s", short(digest), plain(err))
+		warn("VPN program: the cached copy %s is not used: %s", short(digest), plain(err))
 		os.RemoveAll(filepath.Join(bin, strings.TrimPrefix(digest, "sha256:")))
 	}
 	var doc manifestDoc
@@ -644,11 +653,11 @@ func (l *launcher) chooseProgram(tag string) program {
 	skip := skipped(bin)
 	usable := func(p program) bool {
 		if skip != "" && p.Digest == skip {
-			say("VPN program: the copy %s is left alone: the VPN did not connect with it after an update", short(p.Digest))
+			warn("VPN program: the copy %s is left alone: the VPN did not connect with it after an update", short(p.Digest))
 			return false
 		}
 		if err := tryProgram(p.Path); err != nil {
-			say("VPN program: the copy %s does not run here and is not used: %s", short(p.Digest), plain(err))
+			warn("VPN program: the copy %s does not run here and is not used: %s", short(p.Digest), plain(err))
 			return false
 		}
 		return true
@@ -681,7 +690,7 @@ func (l *launcher) chooseProgram(tag string) program {
 	for _, d := range keptPrograms(bin) {
 		p, err := cached(bin, d, arch)
 		if err != nil {
-			say("VPN program: the cached copy %s is not used: %s", short(d), plain(err))
+			warn("VPN program: the cached copy %s is not used: %s", short(d), plain(err))
 			continue
 		}
 		p.Source = "cached"
@@ -863,16 +872,16 @@ func (l *launcher) autoUpdate() {
 		if got == want {
 			say("VPN program: updated to gluetun %s; the VPN is back up", short(got))
 		} else {
-			say("VPN program: the update could not be fetched; the VPN is back up on %s", short(got))
+			warn("VPN program: the update could not be fetched; the VPN is back up on %s", short(got))
 		}
 		return
 	}
 	if got == had {
-		say("VPN program: the VPN did not come back after an update attempt, on the same program as before; nothing to undo")
+		warn("VPN program: the VPN did not come back after an update attempt, on the same program as before; nothing to undo")
 		return
 	}
 	writeWhole(filepath.Join(bin, "skip.json"), map[string]string{"digest": got})
-	say("VPN program: the VPN did not connect within %d minutes on gluetun %s; going back to the one before and leaving that build alone", int(updateWait.Minutes()), short(got))
+	warn("VPN program: the VPN did not connect within %d minutes on gluetun %s; going back to the one before and leaving that build alone", int(updateWait.Minutes()), short(got))
 	l.restartForProgram("(update undone)")
 }
 
@@ -919,13 +928,17 @@ func (l *launcher) checkProgram(who string) map[string]any {
 	l.updAt = time.Now()
 	if err != nil {
 		l.updErr = plain(err)
-		say("VPN program: update check (%s) failed: %s", who, l.updErr)
+		warn("VPN program: update check (%s) failed: %s", who, l.updErr)
 	} else {
 		verdict := "the one running"
 		if d != l.prog.Digest {
 			verdict = "NEWER than the one running (" + short(l.prog.Digest) + ")"
 		}
-		say("VPN program: update check (%s): asked %s in %d ms; %q is %s, %s", who, from, time.Since(began).Milliseconds(), tag, short(d), verdict)
+		pre := ""
+		if who == "hourly" {
+			pre = "background: "
+		}
+		say(pre+"VPN program: update check (%s): asked %s in %d ms; %q is %s, %s", who, from, time.Since(began).Milliseconds(), tag, short(d), verdict)
 		if d != l.updDigest && d != l.prog.Digest {
 			say("VPN program: a newer gluetun (%s) is published for %q; it is installed once nothing has played for %d minutes, or from the web page", short(d), tag, idleMinutes)
 		}
@@ -980,7 +993,7 @@ func (l *launcher) watchProgram() {
 				downSince = time.Time{}
 				continue
 			} else if named && time.Since(downSince) > 2*time.Minute {
-				say("VPN server: the VPN has not connected for 2 minutes on the server chosen; letting gluetun choose")
+				warn("VPN server: the VPN has not connected for 2 minutes on the server chosen; letting gluetun choose")
 				l.mu.Lock()
 				l.pick, l.pickTry = picked{}, ""
 				l.mu.Unlock()
@@ -1030,7 +1043,7 @@ func (l *launcher) undoBuild(good string, down time.Duration) bool {
 		return false
 	}
 	writeWhole(filepath.Join(binDir(l.dir), "skip.json"), map[string]string{"digest": running})
-	say("VPN program: the VPN has not connected for %d minutes on gluetun %s, which it never connected with here; going back to %s and leaving that build alone",
+	warn("VPN program: the VPN has not connected for %d minutes on gluetun %s, which it never connected with here; going back to %s and leaving that build alone",
 		int(updateWait.Minutes()), short(running), short(good))
 	l.restartForProgram("(build undone)")
 	return true

@@ -152,10 +152,10 @@ so, and warns that finishing setup replaces the file. **Settings** has:
   picked. You can also type. `Refresh server list` has gluetun fetch a new list now, which needs the VPN to be running.
 - **Extra VPN variables.** Free-form names and values for any other gluetun variable, except the few Coaxial refuses
   (see `vpn.extra` below).
-- **Player login**, and the port of the web page.
+- **Player login**, the port of the web page, and the **Log detail** (see [The log](#the-log)).
 
 Saving player, provider or port settings restarts only the proxy. Saving VPN settings reconnects the VPN. Either one
-cuts off live channels that are playing. A saved password or key is never shown again: leave the field empty to keep
+cuts off live channels that are playing. Changing only the log detail restarts nothing: it applies at once. A saved password or key is never shown again: leave the field empty to keep
 it. A provider's saved password is kept only while its address stays the same.
 
 ## settings.json
@@ -169,7 +169,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
   "providers": [
     { "name": "Example", "url": "https://provider.example", "user": "...", "password": "...", "port": 8095, "connections": 2, "live_tv": "ts" }
   ],
-  "ui": { "port": 8195 },
+  "ui": { "port": 8195, "log_level": "detailed" },
   "vpn": {
     "service_provider": "mullvad",
     "type": "wireguard",
@@ -192,6 +192,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | `live_tv` | `ts` if your players watch live TV as MPEG-TS, `hls` if they use HLS. |
 | `advanced` | Options some providers need, all off but `stay_under_limit`. Left out, the defaults apply. See [Advanced options](#advanced-options-per-provider). |
 | `ui.port` | The port of the web page and of the health check. If left out, `UI_PORT` from `.env` (8195 if that is not set either). If you change it, change `UI_PORT` in `.env` to match. |
+| `ui.log_level` | How much goes into the log: `detailed` (also when left out), `normal` or `quiet`. See [The log](#the-log). |
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
 | `vpn.update_hours` | How often gluetun refreshes its list of your VPN service's servers (its `UPDATER_PERIOD`). 24 if left out, 0 for never. |
 | `vpn.gluetun_version` | Which gluetun program runs: `latest` (also when left out), a tag of gluetun's image such as `v3.41.3` to stay on one version, or `builtin` to fetch nothing and run the one in this image. |
@@ -388,7 +389,38 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
   answers.
 - **Status page.** `http://<this machine>:<any provider's port>/status` is a plain page with the VPN's exit address,
   each provider's account status and what is playing. The exit address is asked of `ipinfo.io` through the VPN.
-- **The log.** Normal pauses in a provider's sending are not logged. A silence of 20 seconds or more is.
+- **The log.** See [The log](#the-log).
+
+## The log
+
+Read it with `docker logs coaxial`. Coaxial's lines have `coaxial:` in them; the others are the VPN's own. Each line is
+the time in UTC, a level (`DBG`, `INF`, `WRN`, `ERR`), a sentence, and the facts as `key=value`:
+
+```
+2026-11-25T01:20:00Z INF coaxial: 192.0.2.20 started channel 1234 (provider.example), first video in 0.8 s channel=1234 device=192.0.2.20 first_video_s=0.8 provider=Example
+2026-11-25T01:31:12Z WRN coaxial: the provider sent nothing for 17 s on channel 1234, then carried on channel=1234 device=192.0.2.20 provider=Example seconds=17.2
+2026-11-25T01:40:03Z WRN coaxial: the provider answered 403 (forbidden) channel=5678 device=192.0.2.21 kind=stream ms=212 provider=Example status=403
+2026-11-25T01:40:09Z WRN coaxial: background: provider account read for the status page answered 429 (too many requests) kind="provider account read for the status page" ms=95 provider=Example status=429
+```
+
+Problems are `WRN` lines, so `docker logs coaxial 2>&1 | grep WRN` shows them all: every request a provider answered
+with an error (403, 404, 429, 5xx and so on) or did not answer, whatever it was for (a channel, a movie, catch-up, a
+list, the guide, the login), with what was asked (kind and number, never the address or the login), for which device
+and how long it took; and every live channel that got nothing from its provider for 15 seconds or more. Pauses of a
+few seconds between a provider's lumps of video are normal and never logged.
+
+`Log detail` in the web page (`ui.log_level` in `settings.json`) sets how much is written. It applies at once,
+without a restart:
+
+| Log detail | What is written |
+| --- | --- |
+| Detailed (the default) | Everything below, plus each answer from a provider, each stream's end (why, how long, MB, the longest pause), a line every 10 minutes per channel playing, and what Coaxial asks on its own (status page account reads, VPN server pings, the VPN program's update check, the public address look-up), marked `background:`. |
+| Normal | Who watches what, channels starting and stopping, one line per request, and every problem. |
+| Quiet | Problems only. |
+
+A line for every video piece of an HLS stream is never written. The compose file keeps Docker's log to at most three
+files of 10 MB each (`logging:` in `compose.yaml`), so the log never fills the disk; keep that block if you write
+your own compose file.
 
 ## Versions and builds
 

@@ -285,14 +285,29 @@ func (l *launcher) probeRound(all bool) {
 		cands = one
 	}
 	if err := allowPings(); err != nil {
-		say("VPN server: the servers cannot be pinged: %s", plain(err))
+		warn("VPN server: the servers cannot be pinged: %s", plain(err))
 		return
 	}
 	count := probeCount
 	if !all {
 		count = probeInUseN
 	}
+	began := time.Now()
 	got := l.probeServers(cands, count)
+	{
+		answered := 0
+		for _, p := range got {
+			if p.Loss < 100 {
+				answered++
+			}
+		}
+		e := lg.Debug()
+		if answered == 0 {
+			e = lg.Warn()
+		}
+		e.Int("servers", len(cands)).Int("answered", answered).Int("pings_each", count).Bool("all", all).
+			Int64("ms", time.Since(began).Milliseconds()).Msg("background: VPN server ping round")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if all {
@@ -397,7 +412,7 @@ func (l *launcher) switchServer(asked bool) {
 	l.mu.Unlock()
 	l.apply()
 	if !l.waitUp(switchWait) {
-		say("VPN server: %s did not connect; going back", b.Name)
+		warn("VPN server: %s did not connect; going back", b.Name)
 		l.mu.Lock()
 		if l.probeSkip == nil {
 			l.probeSkip = map[string]time.Time{}

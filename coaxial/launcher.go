@@ -46,12 +46,16 @@ func main() {
 	}
 	switch mode {
 	case "":
-		os.Exit(runLauncher())
+		code := runLauncher()
+		logFlush()
+		os.Exit(code)
 	case "proxy":
 		stop, sig := make(chan struct{}), make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 		go func() { <-sig; close(stop) }()
-		os.Exit(runProxy(os.Stdin, stop))
+		code := runProxy(os.Stdin, stop)
+		logFlush()
+		os.Exit(code)
 	case "healthcheck":
 		os.Exit(healthcheck())
 	case "version":
@@ -81,6 +85,7 @@ type launcher struct {
 	problem          string     // why not
 	vpn, proxy       *child
 	vpnKey, proxyKey string // the settings each was started with
+	proxyIn          string // what the proxy part is started with: proxyKey and the log detail
 	vpnEnv           []string
 	ctlKey           string // for gluetun's control page, made up at each start of the VPN ("" = set by the user: not ours to use)
 	vpnUp            bool
@@ -135,18 +140,19 @@ func runLauncher() int {
 		sample := filepath.Join(l.dir, "settings.sample.json")
 		if _, e := os.Stat(sample); e != nil {
 			if e := os.WriteFile(sample, []byte(sampleSettings), 0o644); e != nil {
-				say("could not write %s: %v", sample, e)
+				warn("could not write %s: %v", sample, e)
 			}
 		}
 		l.problem = "There is no settings.json yet"
 		say("no settings.json yet: fill the settings in on the web interface, or copy settings.sample.json to settings.json and edit it")
 	case err != nil:
 		l.problem = "settings.json could not be read: " + err.Error()
-		say("SETTINGS PROBLEM: %s", l.problem)
+		warn("SETTINGS PROBLEM: %s", l.problem)
 	default:
 		l.set = s
+		setLogLevel(s.UI.LogLevel)
 		for _, e := range s.validate() {
-			say("SETTINGS PROBLEM: %s: %s", e.Field, e.Message)
+			warn("SETTINGS PROBLEM: %s: %s", e.Field, e.Message)
 		}
 	}
 	l.uiPort = defaultUIPort
@@ -158,7 +164,7 @@ func runLauncher() int {
 		l.uiPort = n
 	}
 	if err := l.listenUI(l.uiPort); err != nil {
-		say("the web interface could not open port %d: %v", l.uiPort, err)
+		warn("the web interface could not open port %d: %v", l.uiPort, err)
 		return 1
 	}
 	say("WEB INTERFACE: open http://<this machine's address>:%d in a web browser", l.uiPort)
@@ -226,16 +232,17 @@ func (l *launcher) apply() {
 		}
 	}
 	var env, names []string
-	key, pkey := "", ""
+	key, pkey, pin := "", "", ""
 	if want {
 		env, key, names = l.gluetunEnv(s)
-		pkey = string(s.forProxy())
+		pkey, pin = string(s.forProxy()), string(s.proxyInput())
 		if server := l.pickOverride(s); server != "" { // the server chosen by trying them, or the one being tried
 			env = append(env, server)
 			key += "picked " + server + "\n"
 		}
 	}
 	l.mu.Lock()
+	l.proxyIn = pin // (the log detail may have changed alone: the next start of the proxy part is given it)
 	vpnSame := key == l.vpnKey && (l.vpn != nil || !want)
 	proxySame := pkey == l.proxyKey
 	l.mu.Unlock()
@@ -295,7 +302,7 @@ func (l *launcher) startVPN(env, names []string, tag string) {
 	say("starting the VPN (gluetun); set from settings.json: %s", strings.Join(names, " "))
 	c := &child{cmd: cmd, done: make(chan struct{}), prog: prog.Digest}
 	if err := cmd.Start(); err != nil {
-		say("the VPN program could not be started: %v", err)
+		warn("the VPN program could not be started: %v", err)
 		l.mu.Lock()
 		l.vpnNote = "The VPN program could not be started"
 		l.mu.Unlock()
@@ -325,7 +332,7 @@ func (l *launcher) startVPN(env, names []string, tag string) {
 		default:
 			// It never connected in this run (most often a setting gluetun refused). The web interface stays up
 			// so the setting can be put right; nothing else runs. Tried again in 30 s, or when settings are saved.
-			say("the VPN program stopped before it connected (%v); check the VPN settings. Trying again in 30 s", err)
+			warn("the VPN program stopped before it connected (%v); check the VPN settings. Trying again in 30 s", err)
 			time.AfterFunc(30*time.Second, l.apply)
 		}
 	}()
@@ -402,7 +409,7 @@ func (l *launcher) stopProxy() {
 // (l.work held)
 func (l *launcher) startProxy() {
 	l.mu.Lock()
-	ready, input := l.proxy == nil && l.proxyKey != "" && l.vpnUp, l.proxyKey
+	ready, input := l.proxy == nil && l.proxyKey != "" && l.vpnUp, or(l.proxyIn, l.proxyKey)
 	l.mu.Unlock()
 	if !ready {
 		return
@@ -430,7 +437,7 @@ func (l *launcher) startProxy() {
 	endTries() // (a provider's port tried by the page a moment ago)
 	say("starting the proxy part")
 	if err := cmd.Start(); err != nil {
-		say("the proxy part could not be started: %v", err)
+		warn("the proxy part could not be started: %v", err)
 		return
 	}
 	l.mu.Lock()
@@ -446,7 +453,7 @@ func (l *launcher) startProxy() {
 		}
 		l.mu.Unlock()
 		if !onPurpose {
-			say("the proxy part stopped by itself (%v); starting it again", err)
+			warn("the proxy part stopped by itself (%v); starting it again", err)
 			time.AfterFunc(2*time.Second, func() { l.work.Lock(); defer l.work.Unlock(); l.startProxy() })
 		}
 	}()
@@ -499,7 +506,7 @@ func (l *launcher) sawVPN(c *child, up bool, link int) (again bool) {
 	} else if up && link != 0 && l.vpnLink != 0 && link != l.vpnLink {
 		l.vpnUpAt, again = time.Now(), l.proxy != nil
 	} else if !up && l.vpnUp {
-		say("the VPN is down; gluetun lets nothing out until it is back")
+		warn("the VPN is down; gluetun lets nothing out until it is back")
 	}
 	l.vpnUp = up
 	if up {
@@ -712,11 +719,14 @@ func (l *launcher) apiSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		l.work.Unlock()
 		if err != nil {
-			say("settings.json could not be written: %v", err)
+			warn("settings.json could not be written: %v", err)
 			fail(500, fieldError{"", "The settings could not be written to the settings folder"})
 			return
 		}
 		say("settings saved from the web interface")
+		if setLogLevel(s.UI.LogLevel); !proxyToo { // the proxy part keeps running: it is told the log detail
+			go askProxy("/log-level?to="+url.QueryEscape(or(s.UI.LogLevel, logDetailed)), 5*time.Second)
+		}
 		writeJSON(w, 200, map[string]any{"ok": true, "restarting": map[string]bool{"proxy": proxyToo, "vpn": vpnToo}})
 		go func() {
 			l.apply()
@@ -725,7 +735,7 @@ func (l *launcher) apiSettings(w http.ResponseWriter, r *http.Request) {
 			l.mu.Unlock()
 			if n, _ := s.UI.Port.number(); n != now {
 				if err := l.listenUI(n); err != nil {
-					say("the web interface could not move to port %d: %v", n, err)
+					warn("the web interface could not move to port %d: %v", n, err)
 				} else {
 					say("WEB INTERFACE: now on port %d", n)
 				}

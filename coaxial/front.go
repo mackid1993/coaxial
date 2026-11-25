@@ -323,6 +323,7 @@ type counted struct {
 	bytes        int64
 	kind, server string
 	waitMS       int64
+	ask          *askLog // what is asked of the provider, for the log (nil: nothing)
 }
 
 func (c *counted) WriteHeader(s int) {
@@ -368,7 +369,11 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if c.waitMS >= 0 {
 			extra += " wait_ms=" + strconv.FormatInt(c.waitMS, 10)
 		}
-		say("access client=%s provider=%s kind=%s method=%s status=%d bytes=%d seconds=%.3f%s", clientOf(r), f.name, c.kind,
+		e := lg.Info()
+		if c.kind == "cdn" { // (one per video piece: written at no level the page offers)
+			e = lg.Trace()
+		}
+		e.Msgf("access client=%s provider=%s kind=%s method=%s status=%d bytes=%d seconds=%.3f%s", clientOf(r), f.name, c.kind,
 			notPrintable.ReplaceAllString(r.Method, ""), c.status, c.bytes, time.Since(began).Seconds(), extra)
 	}()
 	f.serve(c, r)
@@ -415,6 +420,7 @@ func (f *front) serve(c *counted, r *http.Request) {
 			return
 		}
 		c.kind, c.server = "cdn", hostport
+		c.ask = &askLog{kind: "piece", device: whoIs(r), provider: f.name, routine: true}
 		u, err := url.Parse("//" + hostport)
 		if err != nil || u.Hostname() == "" {
 			answer(c, 403, "", "No server named.\n")
@@ -440,6 +446,10 @@ func (f *front) serve(c *counted, r *http.Request) {
 		mu.Lock()
 		part := f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session on the provider's own server)
 		mu.Unlock()
+		c.ask = f.askFor(r.URL, whoIs(r))
+		if part {
+			c.ask.kind, c.ask.routine = "piece", true
+		}
 		w, follow := f.followed(r)
 		if !follow && !part { // (a piece is counted with its session, not as a stream of its own)
 			w = f.classify(r.URL)
@@ -543,18 +553,26 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 		var rf *refused
 		switch {
 		case errors.As(err, &rf):
+			c.ask.failed(rf, false, time.Since(began))
 			c.WriteHeader(rf.status)
 		case hd.wasCut(): // its device asked for something else: this made room
+			c.ask.failed(err, true, time.Since(began))
 			panic(http.ErrAbortHandler)
 		case r.Context().Err() != nil: // the player hung up first
+			c.ask.failed(err, true, time.Since(began))
 		case timed.Load() || isTimeout(err):
+			c.ask.failed(timeoutError{}, false, time.Since(began))
 			c.WriteHeader(504)
 		default:
-			say("a server could not be reached: %s", pyName(err))
+			if c.ask == nil {
+				say("a server could not be reached: %s", pyName(err))
+			}
+			c.ask.failed(err, false, time.Since(began))
 			c.WriteHeader(502)
 		}
 		return
 	}
+	c.ask.answered(resp.StatusCode, time.Since(began))
 	defer resp.Body.Close()
 	c.waitMS = time.Since(began).Milliseconds()
 	h := c.Header()
@@ -704,7 +722,7 @@ func checkProviders(s *settings) (good []provider, notes map[string]any) {
 		}
 	}
 	if stop != "" {
-		say("PROXY SETTINGS PROBLEM: %s", stop)
+		warn("PROXY SETTINGS PROBLEM: %s", stop)
 		problems = append(problems, stop+".")
 	}
 	for i, p := range s.Providers {
@@ -718,10 +736,10 @@ func checkProviders(s *settings) (good []provider, notes map[string]any) {
 		switch {
 		case stop != "":
 		case bad != "":
-			say("PROVIDER %s SKIPPED: %s", name, bad)
+			warn("PROVIDER %s SKIPPED: %s", name, bad)
 			list = append(list, map[string]any{"name": name, "port": "", "ok": false, "why": bad})
 		default:
-			say("PROVIDER %s on port %s -> %s", name, p.Port.String(), strings.TrimRight(p.URL, "/"))
+			lg.Info().Str("provider", name).Str("port", p.Port.String()).Msgf("PROVIDER %s on port %s -> %s", name, p.Port.String(), strings.TrimRight(p.URL, "/"))
 			list = append(list, map[string]any{"name": name, "port": p.Port.String(), "ok": true, "mode": p.LiveTV,
 				"connections_missing": p.Connections == ""})
 			good = append(good, p)
@@ -739,9 +757,10 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 		err = s.parse(data)
 	}
 	if err != nil {
-		say("the proxy part could not read its settings: %v", err)
+		lg.Error().Msgf("the proxy part could not read its settings: %v", err)
 		return 2
 	}
+	setLogLevel(s.UI.LogLevel)
 	good, notes := checkProviders(s)
 	startNotes = notes
 	// When the VPN came up (the launcher says): a provider that locks an account to one address gets new
@@ -763,7 +782,7 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 			ln, err = net.Listen("tcp", ":"+f.port)
 		}
 		if err != nil {
-			say("PROVIDER %s NOT STARTED: port %s could not be opened (%v)", f.name, f.port, err)
+			lg.Error().Str("provider", f.name).Msgf("PROVIDER %s NOT STARTED: port %s could not be opened (%v)", f.name, f.port, err)
 			continue
 		}
 		fronts[f.port] = f
@@ -775,7 +794,7 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 		go srv.Serve(listeners[i])
 	}
 	if len(fronts) == 0 {
-		say("NO PROVIDERS STARTED: fix the settings in the web interface or in settings.json")
+		warn("NO PROVIDERS STARTED: fix the settings in the web interface or in settings.json")
 	} else {
 		first := ""
 		for port := range fronts {

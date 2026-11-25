@@ -24,7 +24,7 @@
           limit_movie_speed: false, movie_mbps: 20 } },
       { name: 'Provider Two', url: 'https://example.net', user: 'def', port: 8096, live_tv: 'hls' }
     ],
-    ui: { port: 8195 },
+    ui: { port: 8195, log_level: 'detailed' },
     vpn: {
       service_provider: 'protonvpn', type: 'wireguard', wireguard_addresses: '10.2.0.2/32',
       server_countries: '', server_cities: 'New York', extra: { STREAM_ONLY: 'on' }
@@ -102,7 +102,7 @@
     settings = {
       player: { user: player.user },
       providers: list.map(function (p) { return { name: p.name, url: p.url, user: p.user, port: p.port, connections: p.connections, live_tv: p.live_tv, advanced: p.advanced }; }),
-      ui: { port: body.ui.port },
+      ui: { port: body.ui.port, log_level: body.ui.log_level },
       vpn: {
         service_provider: vpn.service_provider, type: vpn.type, wireguard_addresses: vpn.wireguard_addresses,
         server_countries: vpn.server_countries, server_cities: vpn.server_cities, extra: vpn.extra || {}

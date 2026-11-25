@@ -10,7 +10,7 @@
 //	nameOK           whether a /__cdn/ server name leads to this machine or a home network
 //	statusPage       the status page
 //
-// Same status codes and timing rules as the relay it grew from. Standard library only.
+// Same status codes and timing rules as the relay it grew from. Standard library only, apart from the log (zerolog, see logging.go).
 // main.go: channels and their sources. hls.go: playlists, sessions, lists. status.go: the page.
 // front.go: the provider ports. settings.go: settings.json. launcher.go: the VPN, the proxy part and the
 // web interface. passthrough.go: copying an answer on (two small functions from ah4c, see its notice).
@@ -23,12 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -63,12 +61,6 @@ const (
 )
 
 var mu sync.Mutex // all shared state; held only between waits (the Python ran on one thread)
-
-var logger = log.New(os.Stdout, "coaxial: ", log.LstdFlags|log.Lmsgprefix)
-
-const quietNote = 20 // seconds a provider may send nothing before its carrying on is logged
-
-func say(format string, a ...any) { logger.Printf(format, a...) } // never an address or a login
 
 var clockStart = time.Now()
 
@@ -201,6 +193,7 @@ type opts struct {
 	shared   bool              // over the connections kept open to each server
 	via      http.RoundTripper // answered inside this program (see inside in front.go)
 	wait     float64
+	ask      *askLog // what it is, for the log (nil: not logged)
 }
 
 // idleBody gives up when one read waits longer than wait (a stream that went quiet).
@@ -229,6 +222,7 @@ func isRedirect(s int) bool { return s == 301 || s == 302 || s == 303 || s == 30
 
 // fetch opens url with the given headers (the player's own, or just a name). The caller closes the body.
 func fetch(ctx context.Context, url string, h http.Header, o opts) (*http.Response, error) {
+	asked, began := ctx, time.Now()
 	ctx, cancel := context.WithCancel(ctx)
 	if o.guardAll {
 		ctx = context.WithValue(ctx, guardKey{}, true)
@@ -272,13 +266,17 @@ func fetch(ctx context.Context, url string, h http.Header, o opts) (*http.Respon
 		cancel()
 		var r *refused
 		if errors.As(err, &r) {
+			o.ask.failed(r, false, time.Since(began))
 			return nil, r
 		}
 		if timed.Load() {
+			o.ask.failed(timeoutError{}, false, time.Since(began))
 			return nil, timeoutError{}
 		}
+		o.ask.failed(err, asked.Err() != nil, time.Since(began))
 		return nil, err
 	}
+	o.ask.answered(resp.StatusCode, time.Since(began))
 	b := &idleBody{ReadCloser: resp.Body, cancel: cancel}
 	b.wait.Store(int64(secs(o.wait)))
 	resp.Body = b
@@ -703,6 +701,7 @@ type source func(ctx context.Context, ch *channel, yield func([]byte) bool) erro
 
 type channel struct {
 	key, provider      string
+	id                 string // the channel's number, for the log
 	owner              *front // the provider account it is opened for (see conns in advanced.go)
 	readers            map[*reader]bool
 	timer              *time.Timer
@@ -744,7 +743,7 @@ func allReaders() (n int) {
 }
 
 func newChannel(key string, src source, provider string) *channel { // (mu held)
-	ch := &channel{key: key, provider: provider, readers: map[*reader]bool{}, ready: make(chan struct{}), asked: mono()}
+	ch := &channel{key: key, provider: provider, id: channelID(key), readers: map[*reader]bool{}, ready: make(chan struct{}), asked: mono()}
 	ch.ctx, ch.cancel = context.WithCancel(context.Background())
 	go ch.run(src)
 	return ch
@@ -776,19 +775,19 @@ func (ch *channel) run(src source) {
 		if ch.status == 0 {
 			ch.status = 504
 		}
-		say("a channel sent nothing for too long and was closed")
+		lg.Warn().Str("channel", ch.id).Msg("a channel sent nothing for too long and was closed")
 	default:
 		if ch.status == 0 {
 			ch.status = 502
 		}
-		say("a channel ended: %s", pyName(err))
+		lg.Warn().Str("channel", ch.id).Str("reason", pyName(err)).Msgf("a channel ended: %s", pyName(err))
 	}
 	ch.done = true
 	lastDrop[ch.provider] = mono()
 	if channels[ch.key] == ch {
 		delete(channels, ch.key)
 	}
-	say("a channel was closed (%d open now)", len(channels))
+	lg.Info().Str("channel", ch.id).Int("open", len(channels)).Msgf("a channel was closed (%d open now)", len(channels))
 	ch.setReady()
 	for rd := range ch.readers {
 		rd.end(false)
@@ -820,11 +819,7 @@ func (ch *channel) feed(data []byte) {
 			ch.marks = ch.marks[1:]
 		}
 	}
-	// Providers send live video in lumps, with pauses of several seconds between them all day long: that is
-	// normal and is not logged. Only a silence long enough to be seen on a screen is.
-	if len(ch.ring) > 0 && now-ch.ring[len(ch.ring)-1].t >= quietNote && !ch.paced { // (a bridged channel notes this itself)
-		say("a provider sent nothing for %.0f s, then carried on", now-ch.ring[len(ch.ring)-1].t)
-	}
+	// (A provider's silence is logged by the source, outside this lock: see streamStats.)
 	if now-ch.born < burstSeconds {
 		ch.burst += int64(len(data))
 	} else if ch.burst >= 0 {
@@ -848,7 +843,7 @@ func (ch *channel) feed(data []byte) {
 			rd.behindAt = now
 		}
 		if rd.n > farBehind+rd.given || (rd.behindAt != 0 && now-rd.behindAt > behindSeconds) {
-			say("a reader was too slow to keep up with its channel and was disconnected")
+			lg.Warn().Str("channel", ch.id).Str("device", rd.who).Msg("a reader was too slow to keep up with its channel and was disconnected")
 			rd.end(true)
 			delete(ch.readers, rd)
 			ch.dropIfEmpty()
@@ -905,7 +900,7 @@ func (ch *channel) join(first bool) *reader {
 			rd.push(it.data)
 		}
 		rd.given = rd.n
-		say("a reader came back to a channel nobody else was on and was given %d KB at once", rd.n/1024)
+		lg.Debug().Str("channel", ch.id).Int("kb", rd.n/1024).Msgf("a reader came back to a channel nobody else was on and was given %d KB at once", rd.n/1024)
 	} else if first {
 		for _, it := range ch.ring {
 			rd.push(it.data)
@@ -948,7 +943,7 @@ func (ch *channel) join(first bool) *reader {
 		if measured {
 			extra = fmt.Sprintf(" (%d s at %d KB a second)", joinSeconds, int64(speed/1024))
 		}
-		say("a reader joined a channel and was given %d KB to start%s", rd.n/1024, extra)
+		lg.Debug().Str("channel", ch.id).Int("kb", rd.n/1024).Msgf("a reader joined a channel and was given %d KB to start%s", rd.n/1024, extra)
 	}
 	ch.readers[rd] = true
 	return rd
@@ -1035,8 +1030,9 @@ func reaskAllowed(ch *channel, since float64) bool {
 	return !(single && op.at > since && op.key != ch.key)
 }
 
-func tsSource(target string, h http.Header) source {
-	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
+// a: the channel, the device that opened it and the provider, for the log.
+func tsSource(target string, h http.Header, a *askLog) source {
+	run := func(ctx context.Context, ch *channel, yield func([]byte) bool, st *streamStats) error {
 		again, sent, quiet, tries, dropped := false, int64(0), 0, 0, 0.0
 		clockPID, clock := -1, -1.0 // the newest stream clock passed on (see spliceAt)
 		var clk clockFix            // keeps the stream's clock running on when the provider's feed starts a new file
@@ -1046,7 +1042,7 @@ func tsSource(target string, h http.Header) source {
 			if again {
 				wait = reopenWait // readers are waiting
 			}
-			r, err := fetch(ctx, target, h, opts{wait: wait})
+			r, err := fetch(ctx, target, h, opts{wait: wait, ask: st.asking(again)})
 			// A channel the provider ended while it was watched is often being restarted on the provider's side: for a
 			// few seconds up to a minute or so it answers 404 or a server error, then plays again. So while anyone still
 			// watches, it is asked again a few more times, further apart, before the readers are let go.
@@ -1060,12 +1056,13 @@ func tsSource(target string, h http.Header) source {
 					if err == nil {
 						what = strconv.Itoa(r.StatusCode)
 					}
-					say("a provider answered %s when a watched channel was asked for again; trying again for up to %.0f s", what, reaskTotal())
+					st.fields(lg.Warn()).Str("answer", what).Msgf("a provider answered %s when a watched channel was asked for again; trying again for up to %.0f s", what, reaskTotal())
 				}
 				if err := sleep(ctx, reaskBackoff[tries]); err != nil {
 					return err
 				}
 				if !reaskAllowed(ch, dropped) {
+					st.fields(lg.Info()).Msg("a channel is not asked for again: another channel of this provider was opened meanwhile, or it waits after a VPN change")
 					return nil
 				}
 				tries++
@@ -1074,15 +1071,19 @@ func tsSource(target string, h http.Header) source {
 			if err != nil {
 				return err
 			}
-			if r.StatusCode != 200 && r.StatusCode != 206 {
-				say("a provider answered %d when asked for a channel", r.StatusCode)
+			if r.StatusCode != 200 && r.StatusCode != 206 { // (logged as the provider's answer, see ask)
 				text, _ := readAll(r, 65536, 5) // what the provider said, passed on to the player
 				return &refused{status: r.StatusCode, kind: r.Header.Get("Content-Type"), text: text[:min(len(text), 65536)]}
 			}
-			if tries > 0 {
-				say("a channel asked for again plays again after %d more tries", tries)
-				tries = 0
+			if again {
+				e := st.fields(lg.Info()).Int64("ms", int64((mono()-began)*1000))
+				if tries > 0 {
+					e.Int("tries", tries).Msgf("a channel asked for again plays again after %d more tries", tries)
+				} else {
+					e.Msg("a channel asked for again was answered; its video carries on")
+				}
 			}
+			tries = 0
 			err = func() error {
 				defer r.Body.Close()
 				setWait(r, quietWait)
@@ -1096,6 +1097,9 @@ func tsSource(target string, h http.Header) source {
 				for {
 					n, err := r.Body.Read(buf)
 					setWait(r, quietWait)
+					if n > 0 {
+						st.got(n) // (a few sums; a line only after a long silence or every 10 minutes)
+					}
 					data := append([]byte(nil), buf[:n]...)
 					if joining {
 						head = append(head, data...)
@@ -1109,7 +1113,7 @@ func tsSource(target string, h http.Header) source {
 						if !ok {
 							at = cleanStart(head)
 						} else if clock >= 0 && at > 0 {
-							say("a channel asked for again repeated %d KB of video; it was left out", at>>10)
+							st.fields(lg.Debug()).Int("kb", at>>10).Msgf("a channel asked for again repeated %d KB of video; it was left out", at>>10)
 						}
 						data, head, joining = head[at:], nil, false
 						if len(data) > 0 && sent%188 != 0 { // the old stream stopped mid-packet: fill it out
@@ -1161,17 +1165,26 @@ func tsSource(target string, h http.Header) source {
 			stop := quiet >= 2 || len(ch.readers) == 0 || ran < reopenAfter || (single && op.at > math.Max(began, mono()-15) && op.key != ch.key)
 			mu.Unlock()
 			if quiet >= 2 {
-				say("a channel went silent twice in a row; letting its readers go")
+				st.fields(lg.Warn()).Msg("a channel went silent twice in a row; letting its readers go")
 			}
 			if stop {
 				return nil
 			}
 			again, dropped = true, mono()
-			say("a provider ended a channel that was being watched; asking for it again")
+			st.reasks++
+			why := endReason(err)
+			st.fields(lg.Warn()).Str("reason", why).Float64("seconds", round1(ran)).
+				Msg("a provider ended a channel that was being watched; asking for it again")
 			if err := sleep(ctx, dropGap); err != nil {
 				return err
 			}
 		}
+	}
+	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
+		st := newStreamStats(a)
+		err := run(ctx, ch, yield, st)
+		st.end(ctx, err)
+		return err
 	}
 }
 
@@ -1340,7 +1353,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 			}
 		}
 		if ch = channels[key]; ch == nil {
-			src := tsSource(provider+uri, sent)
+			src := tsSource(provider+uri, sent, &askLog{kind: "stream", id: channelID(uri), device: rt.client, provider: rt.f.name})
 			if path == "/hls" {
 				port := rt.f.port
 				plain, query, _ := strings.Cut(rt.orig, "?")
@@ -1387,9 +1400,12 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 		ch.leave(rd)
 		mu.Unlock()
 		if started {
-			say("%s left channel %s after %s, %.1f MB sent: %s (%d still on it)", rd.who, rd.id, hms(mono()-rd.came), float64(rd.written.Load())/1048576, why, still)
+			lg.Info().Str("device", rd.who).Str("channel", rd.id).Str("provider", rt.f.name).Float64("seconds", round1(mono()-rd.came)).
+				Float64("mb", mb(rd.written.Load())).Str("reason", why).Int("still_on", still).
+				Msgf("%s left channel %s after %s, %.1f MB sent: %s (%d still on it)", rd.who, rd.id, hms(mono()-rd.came), float64(rd.written.Load())/1048576, why, still)
 		} else {
-			say("a reader left after %d s, before any video: %s (%d still on its channel)", int64(mono()-rd.came), why, still)
+			lg.Info().Str("device", rd.who).Str("channel", rd.id).Str("provider", rt.f.name).Str("reason", why).Int("still_on", still).
+				Msgf("a reader left after %d s, before any video: %s (%d still on its channel)", int64(mono()-rd.came), why, still)
 		}
 	}()
 	t := time.NewTimer(startWait * time.Second)
@@ -1406,6 +1422,8 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	status, e, born, asked := ch.status, ch.refusal, ch.born, ch.asked
 	mu.Unlock()
 	if status != 200 {
+		lg.Info().Str("device", rd.who).Str("channel", rd.id).Str("provider", rt.f.name).Int("status", status).
+			Msg("a channel could not be opened; the player is told why")
 		switch {
 		case e != nil && e.status >= 400 && e.status < 600: // the provider's own answer, passed on
 			answer(w, e.status, e.kind, string(rt.f.hideLogin(e.text)))
@@ -1432,9 +1450,11 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	mu.Unlock()
 	started = true
 	if first {
-		say("%s started channel %s (%s), first video in %.1f s", rd.who, rd.id, hostOf(provider), born-asked)
+		lg.Info().Str("device", rd.who).Str("channel", rd.id).Str("provider", rt.f.name).Float64("first_video_s", round1(born-asked)).
+			Msgf("%s started channel %s (%s), first video in %.1f s", rd.who, rd.id, hostOf(provider), born-asked)
 	} else {
-		say("%s joined channel %s (%s)", rd.who, rd.id, hostOf(provider))
+		lg.Info().Str("device", rd.who).Str("channel", rd.id).Str("provider", rt.f.name).
+			Msgf("%s joined channel %s (%s)", rd.who, rd.id, hostOf(provider))
 	}
 	for {
 		mu.Lock()
@@ -1481,7 +1501,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 				rd.given = max(0, rd.given-len(data))
 			} else if len(rd.q) == 0 && mono()-rd.pace.since >= joinStart { // the cushion is handed over: no pace from here on
 				rd.pace, rd.given = nil, 0
-				say("a reader that joined its channel has been handed everything kept for it; it is now sent video as it arrives")
+				lg.Debug().Str("device", rd.who).Str("channel", rd.id).Msg("a reader that joined its channel has been handed everything kept for it; it is now sent video as it arrives")
 			}
 			mu.Unlock()
 			n, err := w.Write(data)

@@ -282,7 +282,7 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 				}
 				if data == nil {
 					lost++
-					say("a piece of video could not be fetched and is missing from a stream")
+					lg.Warn().Str("channel", ch.id).Msg("a piece of video could not be fetched and is missing from a stream")
 					if lost >= 3 {
 						return fail(&refused{status: 502})
 					}
@@ -293,8 +293,9 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 					sent = sent[1:]
 				}
 				now := mono()
-				if got != 0 && now-got > math.Max(quietNote, 1.5*length) { // a piece well later than its length
-					say("a provider sent nothing for %.0f s, then carried on", now-got)
+				if got != 0 && now-got > math.Max(gapWarn, 1.5*length) { // a piece well later than its length
+					lg.Warn().Str("channel", ch.id).Float64("seconds", round1(now-got)).
+						Msgf("the provider sent nothing for %.0f s on channel %s, then carried on", now-got, ch.id)
 				}
 				got, fresh = now, now
 				if p, ok := programOf(data); ok && pub.es == nil {
@@ -573,7 +574,7 @@ func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte
 // fetchShared fetches a playlist on a video server over the connections kept open to that server (the same
 // ones the pass-through uses), after checking where the name leads. Redirects are followed here, one hop at
 // a time, so every hop is checked. Returns the answer and where it really came from.
-func fetchShared(ctx context.Context, target string, h http.Header, wait float64) (*http.Response, string, error) {
+func fetchShared(ctx context.Context, target string, h http.Header, wait float64, a *askLog) (*http.Response, string, error) {
 	for hop := 0; hop < 10; hop++ {
 		u, err := url.Parse(target)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || cdnForbidden.MatchString(cdnAddress(u)) {
@@ -584,7 +585,7 @@ func fetchShared(ctx context.Context, target string, h http.Header, wait float64
 		} else if home {
 			return nil, "", &refused{status: 403}
 		}
-		r, err := fetch(ctx, target, h, opts{noFollow: true, guardAll: true, shared: true, wait: wait})
+		r, err := fetch(ctx, target, h, opts{noFollow: true, guardAll: true, shared: true, wait: wait, ask: a})
 		if err != nil || !isRedirect(r.StatusCode) || r.Header.Get("Location") == "" {
 			return r, target, err
 		}
@@ -629,7 +630,7 @@ type direct struct { // the provider answered without sending the channel elsewh
 }
 
 // openChannel asks the provider once and remembers where it sent the channel; later opens wait up to 20 s.
-func openChannel(key, target string, h http.Header, renewFrom string) (*session, *direct, error) {
+func openChannel(key, target string, h http.Header, renewFrom string, a *askLog) (*session, *direct, error) {
 	mu.Lock()
 	lock := locks[key]
 	if lock == nil {
@@ -650,7 +651,7 @@ func openChannel(key, target string, h http.Header, renewFrom string) (*session,
 		return s, nil, nil
 	}
 	mu.Unlock()
-	r, err := fetch(context.Background(), target, h, opts{noFollow: true, wait: playlistWait})
+	r, err := fetch(context.Background(), target, h, opts{noFollow: true, wait: playlistWait, ask: a})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -668,9 +669,9 @@ func openChannel(key, target string, h http.Header, renewFrom string) (*session,
 		sessions[key] = s
 		mu.Unlock()
 		if renewFrom != "" {
-			say("a live HLS channel was opened again at the provider")
+			a.fields(lg.Info()).Msg("a live HLS channel was opened again at the provider")
 		} else {
-			say("a live HLS channel was opened at the provider")
+			a.fields(lg.Info()).Msg("a live HLS channel was opened at the provider")
 		}
 		return s, nil, nil
 	}
@@ -730,7 +731,8 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		mu.Lock()
 		vs := rt.f.variant(strings.ToLower(m[1])+"://"+m[2]+m[3], rt.client)
 		mu.Unlock()
-		resp, final, err := fetchShared(ctx, strings.ToLower(m[1])+"://"+m[2]+m[3]+q, h, playlistWait)
+		resp, final, err := fetchShared(ctx, strings.ToLower(m[1])+"://"+m[2]+m[3]+q, h, playlistWait,
+			&askLog{kind: "playlist", device: rt.client, provider: rt.f.name, routine: true})
 		if err != nil {
 			return err
 		}
@@ -765,6 +767,10 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	}
 	who := rt.client
 	want := rt.f.classify(&url.URL{Path: chanOrig, RawQuery: oquery})
+	asked := rt.f.askFor(&url.URL{Path: chanOrig, RawQuery: oquery}, who)
+	if asked.kind == "other" {
+		asked.kind = "playlist"
+	}
 	if film == nil {
 		film = rt.f.filmSpeed(who, r, want)
 	}
@@ -799,7 +805,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		}
 		mu.Unlock()
 		if s == nil {
-			if s, d, err = openChannel(key, target, h, ""); err != nil {
+			if s, d, err = openChannel(key, target, h, "", asked); err != nil {
 				return err
 			} else if d != nil {
 				if d.status == 200 && of {
@@ -839,7 +845,8 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	mu.Unlock()
 	if m == nil { // the player opened the channel: give it the channel's folder
 		if !said || mono()-t > 60 { // (once a minute: some players ask the channel's own address at each refresh)
-			say("%s opened HLS channel %s (%s)", who, channelID(uri), hostOf(provider))
+			lg.Info().Str("device", who).Str("channel", channelID(uri)).Str("provider", rt.f.name).
+				Msgf("%s opened HLS channel %s (%s)", who, channelID(uri), hostOf(provider))
 		}
 		w.Header().Set("Location", "/__ch"+opath+"/__index.m3u8"+q)
 		answer(w, 302, "", "")
@@ -873,7 +880,9 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		mu.Lock()
 		loc := s.loc
 		mu.Unlock()
-		resp, fin, err := fetchShared(ctx, loc, h, 25)
+		reload := *asked
+		reload.kind, reload.routine = asked.kind+" playlist", true
+		resp, fin, err := fetchShared(ctx, loc, h, 25, &reload)
 		if err == nil {
 			data, err = readAll(resp, 4<<20, 25)
 			status, hd, final = resp.StatusCode, resp.Header, fin
@@ -891,7 +900,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if !renewOn[status] || attempt == 2 {
 			break
 		}
-		ns, d, err := openChannel(key, target, h, loc) // the remembered session is gone
+		ns, d, err := openChannel(key, target, h, loc, asked) // the remembered session is gone
 		if err != nil {
 			return err
 		} else if d != nil {
@@ -983,9 +992,9 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 	var resp *http.Response
 	var err error
 	if key := shareKey(rt.f, r); key != "" { // the same download shared by every player for a while (share.go)
-		resp, err = shared(r.Context(), rt.f, key, provider+uri, h)
+		resp, err = shared(r.Context(), rt.f, key, provider+uri, h, rt.f.askFor(r.URL, rt.client))
 	} else {
-		resp, err = fetch(r.Context(), provider+uri, h, opts{guardAll: true, wait: 300})
+		resp, err = fetch(r.Context(), provider+uri, h, opts{guardAll: true, wait: 300, ask: rt.f.askFor(r.URL, rt.client)})
 	}
 	if err != nil {
 		return err

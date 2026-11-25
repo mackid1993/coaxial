@@ -5,7 +5,8 @@
 //	  "providers": [{"name": "", "url": "", "user": "", "password": "", "port": 8095, "connections": 2,
 //	                 "live_tv": "ts", "advanced": {...}}],     connections: how many the user bought from the provider;
 //	                                                          advanced: what a provider needs handled (see advanced)
-//	  "ui":        {"port": 8195},                          the web interface and the health check
+//	  "ui":        {"port": 8195, "log_level": "detailed"}, the web interface and the health check; how much the
+//	                                                          log tells: detailed (also when not set), normal or quiet
 //	  "vpn":       {"service_provider": "", "type": "wireguard", ..., "update_hours": 24, "gluetun_version": "latest",
 //	                "extra": {"ANY_GLUETUN_VARIABLE": "value"}}
 //	}
@@ -86,7 +87,8 @@ type provider struct {
 }
 
 type uiSettings struct {
-	Port port `json:"port"`
+	Port     port   `json:"port"`
+	LogLevel string `json:"log_level,omitempty"` // detailed ("" too), normal or quiet (see logging.go)
 }
 
 // vpnSettings: gluetun's settings. Vars: the friendly keys (small letters). Extra: gluetun's own names.
@@ -320,6 +322,9 @@ func (s *settings) validate() []fieldError {
 	} else if ownPorts[ui] {
 		bad("ui.port", "port %d is used inside the VPN container itself", ui)
 	}
+	if !validLogLevel(s.UI.LogLevel) {
+		bad("ui.log_level", "log detail must be detailed, normal or quiet")
+	}
 	used, names := map[int]bool{}, map[string]bool{}
 	for i, p := range s.Providers {
 		at := "providers[" + strconv.Itoa(i) + "]."
@@ -507,7 +512,7 @@ func (s *settings) masked() map[string]any {
 	return map[string]any{
 		"player":    map[string]any{"user": s.Player.User, "password": "", "password_set": s.Player.Password != ""},
 		"providers": provs,
-		"ui":        map[string]any{"port": s.UI.Port},
+		"ui":        map[string]any{"port": s.UI.Port, "log_level": or(s.UI.LogLevel, logDetailed)},
 		"vpn":       vpn,
 	}
 }
@@ -603,8 +608,18 @@ func (s *settings) addressLocked() bool {
 	return false
 }
 
-// forProxy: what the proxy part is given: no VPN setting at all.
+// forProxy: what the proxy part is given: no VPN setting at all. The log detail is left out here, so a change of it
+// alone never starts the proxy part again (it is applied while it runs; see proxyInput).
 func (s *settings) forProxy() []byte {
+	c := *s
+	c.VPN = vpnSettings{}
+	c.UI.LogLevel = ""
+	data, _ := json.Marshal(&c)
+	return data
+}
+
+// proxyInput: forProxy with the log detail, as the proxy part is started with it.
+func (s *settings) proxyInput() []byte {
 	c := *s
 	c.VPN = vpnSettings{}
 	data, _ := json.Marshal(&c)

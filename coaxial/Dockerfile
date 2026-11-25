@@ -1,5 +1,5 @@
 # Coaxial: one Go program on top of the stock gluetun image (the VPN). Standard library only, apart from
-# pro-bing, which pings the VPN servers (see ACKNOWLEDGMENTS.md). Built in the
+# pro-bing, which pings the VPN servers, and zerolog, which writes the log (see ACKNOWLEDGMENTS.md). Built in the
 # stock Go image. The program is the container's first process: it starts gluetun's own entrypoint with the
 # VPN settings from /config/settings.json, and the proxy once the VPN is up.
 FROM golang:alpine AS build

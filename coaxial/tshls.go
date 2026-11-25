@@ -71,7 +71,8 @@ func hlsFromTS(w http.ResponseWriter, r *http.Request, who, provider, uri, opath
 		hlsWho[who+" ts "+provider+" "+id] = mono()
 		mu.Unlock()
 		if !said || mono()-t > 60 { // (once a minute: some players ask the channel's own address at each refresh)
-			say("%s opened channel %s as HLS (%s); it is built from the shared MPEG-TS stream", who, id, hostOf(provider))
+			lg.Info().Str("device", who).Str("channel", id).Str("provider", f.name).
+				Msgf("%s opened channel %s as HLS (%s); it is built from the shared MPEG-TS stream", who, id, hostOf(provider))
 		}
 		w.Header().Set("Location", "/__ch"+opath+"/__index.m3u8"+q)
 		answer(w, 302, "", "")
@@ -246,7 +247,7 @@ func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh 
 					}
 				}
 			}
-			ch = newChannel(key, tsSource(provider+tsURI, f.agent(sent)), provider)
+			ch = newChannel(key, tsSource(provider+tsURI, f.agent(sent), &askLog{kind: "stream", id: id, device: who, provider: f.name}), provider)
 			ch.owner = f
 			channels[key] = ch
 		} else {
@@ -265,9 +266,9 @@ func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh 
 	segmenters[key] = sg
 	mu.Unlock()
 	if first {
-		say("%s started channel %s (%s) for HLS from MPEG-TS", who, id, hostOf(provider))
+		lg.Info().Str("device", who).Str("channel", id).Str("provider", f.name).Msgf("%s started channel %s (%s) for HLS from MPEG-TS", who, id, hostOf(provider))
 	} else {
-		say("%s joined channel %s (%s) for HLS from MPEG-TS", who, id, hostOf(provider))
+		lg.Info().Str("device", who).Str("channel", id).Str("provider", f.name).Msgf("%s joined channel %s (%s) for HLS from MPEG-TS", who, id, hostOf(provider))
 	}
 	go sg.run()
 	return sg, nil
@@ -305,7 +306,8 @@ func (sg *segmenter) run() {
 		}
 		written := sg.rd.written.Load()
 		mu.Unlock()
-		say("%s left channel %s (HLS from MPEG-TS) after %s, %.1f MB cut into pieces", sg.who, sg.id, hms(mono()-start), float64(written)/1048576)
+		lg.Info().Str("device", sg.who).Str("channel", sg.id).Float64("seconds", round1(mono()-start)).Float64("mb", mb(written)).
+			Msgf("%s left channel %s (HLS from MPEG-TS) after %s, %.1f MB cut into pieces", sg.who, sg.id, hms(mono()-start), float64(written)/1048576)
 	}()
 	for {
 		mu.Lock()

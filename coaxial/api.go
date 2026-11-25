@@ -40,6 +40,13 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 			say("the VPN reconnected; providers that lock an account to one address get new streams after a short wait")
 		}
 		answer(w, 200, "", "ok\n")
+	case "/log-level": // the log detail was changed in the web interface: applied at once, nothing restarts
+		if to := r.URL.Query().Get("to"); validLogLevel(to) {
+			setLogLevel(to)
+			answer(w, 200, "", "ok\n")
+		} else {
+			answer(w, 400, "", "")
+		}
 	case "/playing": // what plays, and nothing else (see playingNow)
 		data, _ := json.Marshal(map[string]any{"playing": playingNow()})
 		answer(w, 200, "application/json", string(data))

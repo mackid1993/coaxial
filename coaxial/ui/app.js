@@ -440,7 +440,7 @@
           advanced: advOf(q.advanced)
         };
       }),
-      ui: { port: d.ui && d.ui.port != null ? String(d.ui.port) : '' },
+      ui: { port: d.ui && d.ui.port != null ? String(d.ui.port) : '', log_level: LOGLEVELS.some(function (x) { return d.ui && x[0] === d.ui.log_level; }) ? d.ui.log_level : 'detailed' },
       vpn: {
         // type as saved: none means gluetun's own default (OpenVPN), and is sent back as none
         service_provider: v.service_provider || '', type: v.type == null ? '' : String(v.type),
@@ -496,6 +496,13 @@
   }
   function isDirty() { return !!S.cur && JSON.stringify(payload(S.cur)) !== JSON.stringify(payload(S.base)); }
   function vpnChanged() { return !!S.cur && JSON.stringify(payload(S.cur).vpn) !== JSON.stringify(payload(S.base).vpn); }
+  function onlyLogChanged() { // the log detail alone: applied at once, nothing restarts
+    if (!S.cur) return false;
+    var a = payload(S.cur), b = payload(S.base);
+    if (a.ui.log_level === b.ui.log_level) return false;
+    a.ui.log_level = b.ui.log_level;
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
 
   function refreshBar() {
     var dirty = isDirty(), onSettings = route() === 'settings';
@@ -507,6 +514,7 @@
     setText($('#save-title'), nErr ? plural(nErr, 'thing') + ' to fix before saving' : 'Unsaved changes');
     setText($('#save-sub'), S.general.length ? S.general.join(' ')
       : nErr ? 'Check the fields marked in red.'
+      : onlyLogChanged() ? 'The new log detail is applied at once. Nothing restarts.'
       : vpnChanged() ? 'Saving restarts the proxy and reconnects the VPN.'
       : 'Saving restarts the proxy. The VPN stays connected.');
     $('#save').classList.toggle('busy', S.saving);
@@ -915,6 +923,28 @@
     return box;
   }
 
+  // How much Coaxial writes to the container's log (ui.log_level).
+  var LOGLEVELS = [['detailed', 'Detailed'], ['normal', 'Normal'], ['quiet', 'Quiet']];
+  var LOGHINT = {
+    detailed: 'Every stream start and end, every answer from your providers, pauses of 15 s or more and what Coaxial does in the background. Problems stand out as WRN lines.',
+    normal: 'Who watches what, when channels start and stop, and every problem.',
+    quiet: 'Problems only.'
+  };
+  function logLevelField(m) {
+    var id = 'f' + (++uid);
+    var sel = h('select', { id: id, class: 'input select', 'aria-describedby': id + '-m' });
+    LOGLEVELS.forEach(function (x) { sel.appendChild(h('option', { value: x[0], text: x[1] })); });
+    sel.value = m.ui.log_level;
+    var hint = h('span', { class: 'hint' });
+    function paint() { setText(hint, LOGHINT[m.ui.log_level] + ' Applied at once, without a restart. With the compose file, Docker keeps at most 30 MB of log.'); }
+    sel.addEventListener('change', function () { m.ui.log_level = sel.value; paint(); touched('ui.log_level'); });
+    paint();
+    return h('div', { class: 'field', 'data-path': 'ui.log_level' },
+      h('label', { for: id, text: 'Log detail' }),
+      h('div', { class: 'control' }, sel, h('span', { class: 'combo-caret', html: icon('chevron') })),
+      h('p', { class: 'msg', id: id + '-m' }, hint, h('span', { class: 'err' })));
+  }
+
   function advancedPanel(p, i) {
     var a = p.advanced, base = 'providers[' + i + '].advanced', ui = advState(p, i), rows = {};
     var count = h('span', { class: 'count adv-count' });
@@ -1100,9 +1130,10 @@
           field({ label: 'Username', path: 'player.user', value: m.player.user, set: function (x) { m.player.user = x; } }),
           field({ label: 'Password', path: 'player.password', value: m.player.password, secret: true, isSet: m.player.password_set, set: function (x) { m.player.password = x; } })))),
 
-      section('Web interface', 'Where this page is served.',
+      section('Web interface', 'Where this page is served, and how much goes into the container\'s log.',
         h('div', { class: 'card panel' }, h('div', { class: 'grid' },
-          field({ label: 'Port', path: 'ui.port', value: m.ui.port, numeric: true, mono: true, placeholder: '8195', hint: 'Docker must open it too: UI_PORT in the .env file. After a change, this page is served on the new port only: open it there.', set: function (x) { m.ui.port = x; } }))))
+          field({ label: 'Port', path: 'ui.port', value: m.ui.port, numeric: true, mono: true, placeholder: '8195', hint: 'Docker must open it too: UI_PORT in the .env file. After a change, this page is served on the new port only: open it there.', set: function (x) { m.ui.port = x; } }),
+          logLevelField(m))))
     ]);
     paintErrors(); paintServers();
     paintPortWarn();
@@ -1242,7 +1273,8 @@
       if (r.ok) {
         S.setup = false;
         await loadSettings();
-        toast(vpnToo ? 'Saved. The proxy is restarting and the VPN is reconnecting.' : 'Saved. The proxy is restarting.');
+        var rs = r.data && r.data.restarting;
+        toast(vpnToo ? 'Saved. The proxy is restarting and the VPN is reconnecting.' : rs && !rs.proxy ? 'Saved. Nothing had to restart.' : 'Saved. The proxy is restarting.');
         if (/^[1-9][0-9]{0,4}$/.test(uiNew) && uiNew !== uiOld) { // (this address stops answering in a moment)
           toast('Saved. This page now answers at ' + location.protocol + '//' + location.hostname + ':' + uiNew + '/ only. Open it there.');
           return;
