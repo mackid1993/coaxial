@@ -636,7 +636,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 // askProxy asks the proxy part (inside the container, over its own socket).
 // apiNames: "refresh channel names" on a provider's card. The proxy part fetches that provider's live list now
-// (one login and the list) and keeps the names. Not while anything plays or records: the page says so.
+// (one login and the list) and keeps the names. It is never refused: when something is playing the page warns
+// first, and the user decides.
 func (l *launcher) apiNames(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeJSON(w, 405, map[string]any{"ok": false})
@@ -655,8 +656,6 @@ func (l *launcher) apiNames(w http.ResponseWriter, r *http.Request) {
 		}
 		json.Unmarshal(data, &v)
 		writeJSON(w, 200, map[string]any{"ok": true, "channels": v.Channels})
-	case strings.TrimSpace(string(data)) == "playing":
-		writeJSON(w, 409, map[string]any{"ok": false, "message": "Something is playing or recording. Try again when nothing is."})
 	default:
 		writeJSON(w, 502, map[string]any{"ok": false, "message": "The provider did not hand over its channel list."})
 	}

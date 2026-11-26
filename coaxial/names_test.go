@@ -125,9 +125,9 @@ func TestChannelNamesAreFetchedOnlyAfterAnIdleHour(t *testing.T) {
 	}
 }
 
-// The button on a provider's card fetches its names now. It is refused while anything plays or records (a login
-// during a stream is what a provider reads as abuse), and it works when nothing does.
-func TestNamesButtonWaitsForNothingPlaying(t *testing.T) {
+// The button on a provider's card fetches its names now, whether or not something plays: the page warns first
+// and the user decides. (Only what Coaxial does unasked waits for an idle hour.)
+func TestNamesButtonIsNeverRefused(t *testing.T) {
 	const port = "18773"
 	lists, undo := namesProvider(t, port)
 	defer undo()
@@ -137,12 +137,12 @@ func TestNamesButtonWaitsForNothingPlaying(t *testing.T) {
 		return w.Code, strings.TrimSpace(w.Body.String())
 	}
 	stopPlaying := playOn(port)
-	if code, body := ask(); code != 409 || body != "playing" || lists.Load() != 0 {
-		t.Errorf("a channel plays and the button got %d %q, with %d fetch(es); want 409 \"playing\" and none", code, body, lists.Load())
+	if code, body := ask(); code != 200 || body != `{"channels":2}` || lists.Load() != 1 {
+		t.Errorf("a channel plays and the button got %d %q, with %d fetch(es); want 200 with 2 channels and one fetch", code, body, lists.Load())
 	}
 	stopPlaying()
-	if code, body := ask(); code != 200 || body != `{"channels":2}` || lists.Load() != 1 {
-		t.Errorf("nothing plays and the button got %d %q, with %d fetch(es); want 200 with 2 channels and one fetch", code, body, lists.Load())
+	if code, body := ask(); code != 200 || body != `{"channels":2}` || lists.Load() != 2 {
+		t.Errorf("nothing plays and the button got %d %q, with %d fetch(es); want 200 with 2 channels and a second fetch", code, body, lists.Load())
 	}
 	if code, _ := ask2(port + "9"); code != 404 {
 		t.Errorf("a port no provider has: got %d, want 404", code)

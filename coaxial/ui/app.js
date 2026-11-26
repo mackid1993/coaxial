@@ -202,7 +202,9 @@
   async function namesAct(el) {
     var btn = $('.pn-btn', el);
     if (btn.disabled) return;
-    if (!window.confirm('Refresh the channel names for ' + (el.dataset.name || 'this provider') + ' now?\n\nThis contacts your provider once: one login and its channel list. Coaxial also does this by itself once a day, after an hour with nothing playing.')) return;
+    var busy = !!(st.data && st.data.playing && st.data.playing.length);
+    if (!window.confirm('Refresh the channel names for ' + (el.dataset.name || 'this provider') + ' now?\n\nThis contacts your provider once: one login and its channel list. Coaxial also does this by itself once a day, after an hour with nothing playing.' +
+      (busy ? '\n\nSomething is playing or recording right now. A login to your provider during a stream can disturb it. To be safe, do this when nothing is playing.' : ''))) return;
     btn.disabled = true; btn.classList.add('busy');
     try {
       var r = await api('POST', '/api/provider/names?port=' + encodeURIComponent(el.dataset.port));
@@ -311,7 +313,7 @@
         h('p', { class: 'prov-warn', hidden: true, text: 'Enter how many connections you bought' }),
         h('div', { class: 'prov-names' }, h('span', { class: 'pn-text' }),
           h('button', { type: 'button', class: 'btn sm pn-btn', text: 'Refresh channel names',
-            title: 'Contacts this provider once for its channel list. Also done by itself once a day, after an hour with nothing playing.' })));
+            title: 'Contacts this provider once for its channel list. Best done when nothing is playing. Also done by itself once a day, after an hour with nothing playing.' })));
       $('.pn-btn', el).addEventListener('click', function () { namesAct(el); });
       return el;
     }, function (el, p) {

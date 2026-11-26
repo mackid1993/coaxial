@@ -32,7 +32,7 @@ func namesAt(port string) string {
 
 func insideStatus(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case "/names-refresh": // the button on a provider's card: fetch its channel names now (this contacts the provider)
+	case "/names-refresh": // the button on a provider's card: fetch its channel names now. It contacts the provider, and the page has said so, with a warning if something is playing: the user decides
 		port := r.URL.Query().Get("port")
 		mu.Lock()
 		f := fronts[port]
@@ -40,8 +40,6 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case f == nil:
 			answer(w, 404, "", "no such provider\n")
-		case len(playingNow()) > 0: // (never while anything plays or records, button or not)
-			answer(w, 409, "", "playing\n")
 		default:
 			asked := time.Now().Unix()
 			select {
