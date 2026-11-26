@@ -323,15 +323,17 @@ func (f *front) conns() []*conn {
 			}
 		}
 		key, id := k, s.what.item
+		// (a catch-up's own session, see keepDirect: it is not its channel's live session, and no bridge reads it)
+		direct := strings.HasSuffix(k, " direct")
 		c.end = func() {
 			delete(sessions, key)
 			for _, ch := range channels { // (a bridge to MPEG-TS would open it again at once)
-				if ch.provider == f.base && (ch.owner == nil || ch.owner == f) && strings.HasPrefix(ch.key, "/hls ") && id != "" && lastPart(ch.key) == id {
+				if !direct && ch.provider == f.base && (ch.owner == nil || ch.owner == f) && strings.HasPrefix(ch.key, "/hls ") && id != "" && lastPart(ch.key) == id {
 					ch.drop()
 				}
 			}
 		}
-		if s.what.kind == "ch" {
+		if s.what.kind == "ch" && !direct {
 			live[s.what.item] = c
 		}
 		out = append(out, c)
