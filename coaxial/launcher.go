@@ -463,6 +463,29 @@ func (l *launcher) startProxy() {
 	}()
 }
 
+// lookAgain: how long after a failed look at the VPN the second look is taken (a variable for the tests).
+var lookAgain = 2 * time.Second
+
+// looksUp: one look at the VPN of child c (look: gluetun's own health check, a program started for the purpose
+// with 5 s to answer). While the VPN was up, one look that fails is taken again a moment later before it counts.
+// A single failed look used to call the VPN down: the log said "the VPN is down" and, two seconds later, "the
+// VPN is up", with the tunnel never gone and every stream still running, and the proxy part was told the VPN
+// had changed, which makes a provider that locks an account to one address wait as after a real change. A VPN
+// that is really down fails the second look too. One that was not up yet gets no second look: nothing waits.
+func (l *launcher) looksUp(c *child, look func() bool) bool {
+	if look() {
+		return true
+	}
+	l.mu.Lock()
+	was := l.vpnUp && l.vpn == c
+	l.mu.Unlock()
+	if !was {
+		return false
+	}
+	time.Sleep(lookAgain)
+	return look()
+}
+
 // watchVPN asks gluetun's own health check whether the tunnel is up, and starts the proxy part when it is.
 func (l *launcher) watchVPN() {
 	for {
@@ -471,11 +494,13 @@ func (l *launcher) watchVPN() {
 		l.mu.Unlock()
 		up := false
 		if c != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			cmd := exec.CommandContext(ctx, prog, "healthcheck") // (the same program that runs)
-			cmd.Env = env
-			up = cmd.Run() == nil
-			cancel()
+			up = l.looksUp(c, func() bool {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, prog, "healthcheck") // (the same program that runs)
+				cmd.Env = env
+				return cmd.Run() == nil
+			})
 		}
 		link := 0
 		if up {
