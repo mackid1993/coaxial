@@ -138,7 +138,7 @@ func TestLogUnreachableProvider(t *testing.T) {
 	}
 }
 
-// A live provider's lumps 10 s apart are normal and never logged; a 20 s silence is, once, as a WRN line with
+// A live provider's lumps 10 s apart are normal and never logged; a 17 s silence is, once, as a WRN line with
 // its length; the stream's end is logged with how long it ran and how much came.
 func TestLogProviderSilence(t *testing.T) {
 	b := captureLog(t)
@@ -147,8 +147,9 @@ func TestLogProviderSilence(t *testing.T) {
 		pkt[i], pkt[i+1], pkt[i+2], pkt[i+3] = 0x47, 0x1f, 0xff, 0x10
 	}
 	start := time.Now()
-	// lumps at 0, 10, 20 s (10 s apart), then nothing until 40 s (20 s), then lumps every second to 44 s
-	plan := []float64{0, 10, 20, 40, 41, 42, 43, 44}
+	// lumps at 0, 10, 20 s (10 s apart), then nothing until 37 s (17 s: past gapWarn, short of liveQuiet, after
+	// which the channel would be asked for again), then lumps every second to 44 s
+	plan := []float64{0, 10, 20, 37, 38, 39, 40, 41, 42, 43, 44}
 	fp := newFakeProv(t, true, func(fp *fakeProv, w http.ResponseWriter, r *http.Request) bool {
 		w.Header().Set("Content-Type", "video/mp2t")
 		for _, at := range plan {
@@ -176,16 +177,16 @@ func TestLogProviderSilence(t *testing.T) {
 	log := b.String()
 	gaps := linesWith(log, " WRN ", "the provider sent nothing for", "channel=4500")
 	if len(gaps) != 1 {
-		t.Fatalf("want exactly one silence warning (the 20 s one, none for the 10 s lumps), got %d:\n%s", len(gaps), log)
+		t.Fatalf("want exactly one silence warning (the 17 s one, none for the 10 s lumps), got %d:\n%s", len(gaps), log)
 	}
 	m := regexp.MustCompile(`seconds=([0-9.]+)`).FindStringSubmatch(gaps[0])
-	if s, _ := strconv.ParseFloat(m[1], 64); s < 19 || s > 22 {
-		t.Errorf("the silence was logged as %.1f s, want about 20:\n%s", s, gaps[0])
+	if s, _ := strconv.ParseFloat(m[1], 64); s < 16 || s > 19 {
+		t.Errorf("the silence was logged as %.1f s, want about 17:\n%s", s, gaps[0])
 	}
-	if !strings.Contains(gaps[0], "the provider sent nothing for 20 s on channel 4500") {
+	if !strings.Contains(gaps[0], "the provider sent nothing for 17 s on channel 4500") {
 		t.Errorf("the line should say it plainly: %s", gaps[0])
 	}
-	if got := linesWith(log, "a channel's stream from the provider ended", "channel=4500", "longest_gap=2", "mb=", "seconds=4"); len(got) != 1 {
+	if got := linesWith(log, "a channel's stream from the provider ended", "channel=4500", "longest_gap=17", "mb=", "seconds=4"); len(got) != 1 {
 		t.Errorf("want one end line with its length, MB and the longest gap:\n%s", log)
 	}
 }

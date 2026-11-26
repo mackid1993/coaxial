@@ -233,7 +233,7 @@ func (a *askLog) failed(err error, calledOff bool, took time.Duration) {
 	switch {
 	case errors.As(err, &r):
 		e.Int("status", r.status).Msg(a.who() + ": the request was refused here (an address that leads home, or not a web address)")
-	case isTimeout(err):
+	case wentQuiet(err):
 		e.Str("reason", "timed out").Msg(a.who() + " did not answer in time")
 	default:
 		e.Str("reason", pyName(err)).Msg(a.who() + " could not be reached")
@@ -346,7 +346,7 @@ func endReason(err error) string {
 	switch {
 	case err == nil:
 		return "the provider closed it"
-	case isTimeout(err):
+	case wentQuiet(err):
 		return "the provider sent nothing for too long"
 	case errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE):
 		return "the provider broke the connection off"

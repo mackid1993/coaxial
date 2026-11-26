@@ -937,7 +937,7 @@ func (ch *channel) run(src source) {
 		if ch.status == 0 {
 			ch.status, ch.refusal = r.status, r
 		}
-	case isTimeout(err):
+	case wentQuiet(err):
 		if ch.status == 0 {
 			ch.status = 504
 		}
@@ -1211,7 +1211,7 @@ func passHeaders(in http.Header) http.Header {
 
 func tsSource(target string, h http.Header, a *askLog) source {
 	run := func(ctx context.Context, ch *channel, yield func([]byte) bool, st *streamStats) error {
-		again, sent, quiet, tries, dropped := false, int64(0), 0, 0, 0.0
+		again, sent, tries, dropped := false, int64(0), 0, 0.0
 		clockPID, clock := -1, -1.0 // the newest stream clock passed on (see spliceAt)
 		var clk clockFix            // keeps the stream's clock running on when the provider's feed starts a new file
 		clk.tag = st.fields
@@ -1330,28 +1330,37 @@ func tsSource(target string, h http.Header, a *askLog) source {
 					}
 				}
 			}()
-			if errors.Is(err, errStop) || ctx.Err() != nil || (err != nil && !got) {
+			if errors.Is(err, errStop) || ctx.Err() != nil {
 				return err
+			}
+			if err != nil && !got {
+				// A channel asked for again whose new connection answered but sent nothing (it went quiet or broke
+				// off too): asked again, as a player straight at the provider reconnects, with the same extra asks
+				// and gates as a 404 above (about a minute from the drop, while anyone watches).
+				if !again || mono()-dropped >= reaskTotal() || !watched(ch) {
+					return err
+				}
+				if err := sleep(ctx, reaskBackoff[min(tries, len(reaskBackoff)-1)]); err != nil {
+					return err
+				}
+				if !reaskAllowed(ch, dropped) {
+					st.fields(lg.Info()).Msg("a channel is not asked for again: another channel of this provider was opened meanwhile, or it waits after a VPN change")
+					return nil
+				}
+				tries++
+				continue
 			}
 			// The provider ended it. Ask again if anyone still watches, unless it ran under reopenAfter, or (on an
 			// account that allows one connection, or whose limit is not set) another channel of this provider opened
 			// in the last 15 s: asking would end that one.
 			mu.Lock()
 			ran, op := mono()-began, lastOpen[ch.provider]
-			if isTimeout(err) && ran < liveQuiet+reopenAfter { // silent twice in a row: the channel is dead
-				quiet++
-			} else {
-				quiet = 0
-			}
 			// (an account that allows more than one connection: opening another channel did not end this one)
 			single := ch.owner == nil || ch.owner.limit() <= 1
 			// (a connection that went quiet is asked again however long it ran: with the old 60 s wait it always
 			// ran past reopenAfter, and the shorter liveQuiet must not turn that into letting its readers go)
-			stop := quiet >= 2 || len(ch.readers) == 0 || (ran < reopenAfter && !wentQuiet(err)) || (single && op.at > math.Max(began, mono()-15) && op.key != ch.key)
+			stop := len(ch.readers) == 0 || (ran < reopenAfter && !wentQuiet(err)) || (single && op.at > math.Max(began, mono()-15) && op.key != ch.key)
 			mu.Unlock()
-			if quiet >= 2 {
-				st.fields(lg.Warn()).Msg("a channel went silent twice in a row; letting its readers go")
-			}
 			if stop {
 				return nil
 			}

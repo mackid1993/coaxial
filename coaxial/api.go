@@ -58,13 +58,15 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 // statusData: the same facts the status page shows. Nothing here waits long: what is not known yet is
 // asked for in the background and is there the next time.
 func statusData() map[string]any {
-	go whereAmI()
-	go kept("ping", 30, func(context.Context) (any, error) {
-		if ms, ok := vpnPing(); ok {
-			return ms, nil
-		}
-		return nil, errors.New("no answer")
-	})
+	if len(playingNow()) == 0 { // (both go through the VPN: never while anything plays or records; the last values show)
+		go whereAmI()
+		go kept("ping", 30, func(context.Context) (any, error) {
+			if ms, ok := vpnPing(); ok {
+				return ms, nil
+			}
+			return nil, errors.New("no answer")
+		})
+	}
 	var ports []string
 	mu.Lock()
 	for port := range fronts {

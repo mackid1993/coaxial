@@ -407,6 +407,10 @@ func (f *front) serve(c *counted, r *http.Request) {
 	case playlistRe.MatchString(p): // HLS playlists and live channels' folders
 		c.kind = "hls"
 		failed(c, playlistRequest(c, r, rt))
+	case r.Method == "HEAD" && (low == "/player_api.php" || low == "/panel_api.php" || low == "/xmltv.php"):
+		// (a HEAD is passed on as a HEAD, login swapped: nothing is downloaded to answer it)
+		c.kind, c.server = "api", f.hostport
+		f.forward(c, r, f.base+up, f.scheme, f.hostport, 60, false)
 	case low == "/player_api.php" || low == "/panel_api.php": // the provider's lists: logos and posters pointed back
 		// at this proxy (panel_api.php: older apps' login, which names the account and the server just the same)
 		c.kind = "api"

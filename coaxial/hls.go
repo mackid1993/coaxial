@@ -88,19 +88,9 @@ func readPlaylist(text string) (p playlist, err error) {
 	return p, nil
 }
 
-// beforeMinute: seconds until just before the next whole minute; 0 from 1 s before it to 0.3 s after.
-// Recorders stop at whole minutes and cut at once, so around then nothing is held back.
-func beforeMinute() float64 {
-	s := math.Mod(float64(time.Now().UnixNano())/1e9, 60)
-	if s >= 59 || s < 0.3 {
-		return 0
-	}
-	return 59 - s
-}
-
 // hlsSource: the channel's HLS pieces end to end, fetched from this proxy's own front door (via: inside
 // the program, no socket) at the players' own addresses so the reader shares their one provider session;
-// handed on at playing speed.
+// each piece handed on whole the moment it is fetched, as streamlink's HLS writer and Threadfin's buffer do.
 func hlsSource(start, agent string, via http.RoundTripper) source {
 	h, home := agentOf(agent), ""
 	if u, err := url.Parse(start); err == nil {
@@ -145,57 +135,27 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 		return "", playlist{}, errNotHLS
 	}
 	return func(ctx context.Context, ch *channel, yield func([]byte) bool) error {
-		// Video waiting, (due, bytes), oldest first: each piece goes out over its playing time, everything
-		// at once before each whole minute and when the feed ends, so a recording that stops loses nothing.
-		var queue []item
-		pop := func() []byte { d := queue[0].data; queue = queue[1:]; return d }
-		due := func() bool {
-			now, flush := mono(), beforeMinute() == 0
-			for len(queue) > 0 && (flush || queue[0].t <= now) {
-				if !yield(pop()) {
-					return false
-				}
-			}
-			return true
-		}
-		flushAll := func() bool {
-			for len(queue) > 0 {
-				if !yield(pop()) {
-					return false
-				}
-			}
-			return true
-		}
-		// wait until `until`, or until job is done, handing on what falls due meanwhile (a fetch can take
-		// seconds; a whole minute passing meanwhile must not hold video back).
+		// wait until `until`, or until job is done (nothing is held meanwhile: there is nothing to hand on)
 		wait := func(until float64, job chan struct{}) error {
-			for {
-				if !due() {
-					return errStop
-				}
-				nap := 3600.0
-				if job == nil {
-					if nap = until - mono(); nap <= 0 {
-						return nil
-					}
-				}
+			if job != nil {
 				select {
 				case <-job:
 					return nil
-				default:
-				}
-				if len(queue) > 0 {
-					nap = math.Min(nap, math.Min(queue[0].t-mono(), beforeMinute()))
-				}
-				t := time.NewTimer(secs(math.Max(0, nap)))
-				select {
-				case <-job:
-				case <-t.C:
 				case <-ctx.Done():
-					t.Stop()
 					return ctx.Err()
 				}
-				t.Stop()
+			}
+			nap := until - mono()
+			if nap <= 0 {
+				return nil
+			}
+			t := time.NewTimer(secs(nap))
+			defer t.Stop()
+			select {
+			case <-t.C:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 		do := func(f func(context.Context)) error { // a request under way; called off if the feed ends
@@ -205,17 +165,9 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 			go func() { f(jctx); close(done) }()
 			return wait(0, done)
 		}
-		fail := func(err error) error { // the feed ends with a fault: what waits is handed on first
-			if !flushAll() {
-				return errStop
-			}
-			return err
-		}
-		mu.Lock()
-		ch.paced = true // its own pauses are not the provider's
-		mu.Unlock()
 		var last int64
 		hasLast, misses, lost, got, fresh := false, 0, 0, 0.0, mono()
+		got1 := 0.0 // when the last try for a piece began
 		// the numbers readers were handed first; a piece numbered afresh (after a discontinuity: another
 		// packager, an advert) is handed on under them (see renumber.go)
 		var pub numbering
@@ -246,7 +198,7 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 					status = r.status
 				}
 				if (hasLast && misses > 8) || (!hasLast && misses > 3) {
-					return fail(&refused{status: status})
+					return &refused{status: status}
 				}
 				nap := 1.0
 				if hasLast {
@@ -268,7 +220,6 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 				last, hasLast = max(pl.seq-1, top-3), true
 			}
 			first := last + 1 - pl.seq
-			newest := int64(len(pl.pieces)) - 1 + pl.seq
 			length := pl.target // a piece's playing time, as the playlist gives it
 			if 0 < pl.newest && pl.newest <= 2*pl.target {
 				length = pl.newest
@@ -282,14 +233,20 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 					lost++
 					continue
 				} else if err != nil {
-					return fail(err)
+					return err
 				}
 				if afresh && contains(sent, u.Path) { // already passed on under its old number
 					continue
 				}
 				var data []byte
 				for try := 0; try < 3 && data == nil; try++ {
+					if try > 0 && mono()-got1 < 1 { // (refused at once: asked again a second later, not in the same instant)
+						if e := wait(got1+1, nil); e != nil {
+							return e
+						}
+					}
 					t0 := mono()
+					got1 = t0
 					if e := do(func(c context.Context) {
 						if status, d, err := getWithin(c, u.String(), h, 64<<20, via, pieceWait); err == nil && status == 200 && len(d) > 0 {
 							data = d
@@ -309,8 +266,13 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 				if data == nil {
 					lost++
 					lg.Warn().Str("channel", ch.id).Msg("a piece of video could not be fetched and is missing from a stream")
-					if lost >= 3 {
-						return fail(&refused{status: 502})
+					// A piece that cannot be had is left out and the playlist followed on, as players and tools
+					// that read HLS do (FFmpeg's hls demuxer skips it; Media3 retries, then goes on). The feed
+					// is given up only once no piece at all has come for as long as a playlist that stopped
+					// moving is waited for (below): a video server answering 404 for a few seconds while the
+					// provider restarts a channel used to end a recording within a second.
+					if lost >= 3 && mono()-fresh > math.Max(30, 6*pl.target) {
+						return &refused{status: 502}
 					}
 					continue
 				}
@@ -341,42 +303,15 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 				for j := 0; j < len(data); j += 65424 {
 					parts = append(parts, data[j:min(j+65424, len(data))])
 				}
-				// A channel's start goes at once, except its newest piece, which goes over its playing time
-				// so the stream has video in hand from its first second.
-				if opening {
-					if !flushAll() {
+				// Handed on whole, at once, as a player reading the provider's HLS has it once fetched
+				// (streamlink HLSStreamWriter._write_into_buffer; Threadfin bufferingStream).
+				for _, p := range parts {
+					if !yield(p) {
 						return errStop
 					}
-					if number != newest {
-						for _, p := range parts {
-							if !yield(p) {
-								return errStop
-							}
-						}
-						continue
-					}
-				}
-				startAt := now
-				if len(queue) > 0 {
-					startAt = math.Max(now, queue[len(queue)-1].t)
-				}
-				if shift := startAt - now - 2*pl.target; shift > 0 { // never more than two target durations waiting
-					for k := range queue {
-						queue[k].t -= shift
-					}
-					startAt -= shift
-				}
-				for k, p := range parts {
-					queue = append(queue, item{startAt + length*float64(k)/float64(len(parts)), p})
-				}
-				if !due() {
-					return errStop
 				}
 			}
 			if !isNew && (pl.ended || mono()-fresh > math.Max(30, 6*pl.target)) {
-				if !flushAll() {
-					return errStop
-				}
 				return nil // the playlist finished, or stopped moving
 			}
 			// Ask again at the HLS spec's pace (RFC 8216bis 6.3.4): after a change, the newest piece's length
@@ -439,7 +374,14 @@ type session struct {
 	target     float64            // its playlist's target duration (0: not known yet)
 	seq        int64              // its playlist's MEDIA-SEQUENCE when last read (hasSeq: read at all)
 	hasSeq     bool
+	refusedAt  float64 // when opening the channel again in its place was last refused (see renewGap)
 }
+
+// renewGap: after the provider refused to open a failed session's channel again, the session's own answer is
+// passed on for this long before the channel is asked for again. A player straight at the provider retries its
+// own playlist address, at most this far apart (hls.js playlistLoadPolicy errorRetry maxRetryDelayMs 8000),
+// and does not open the channel at every retry.
+const renewGap = 8.0
 
 var (
 	targetRe = regexp.MustCompile(`(?m)^\s*#EXT-X-TARGETDURATION:\s*([0-9]+(?:\.[0-9]*)?)`)
@@ -729,10 +671,31 @@ func openChannel(key, target string, h http.Header, renewFrom string, a *askLog)
 		return s, nil, nil
 	}
 	mu.Unlock()
-	r, err := fetch(context.Background(), target, h, opts{noFollow: true, wait: playlistWait, ask: a})
+	// A first ask that sends nothing for pieceWait is let go and asked again at once on a new connection, as a
+	// player straight at the provider does after its own read timeout (ExoPlayer DefaultHttpDataSource, 8 s).
+	try := func(limit time.Duration) (*http.Response, context.CancelFunc, error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		var timed atomic.Bool
+		t := time.AfterFunc(limit, func() { timed.Store(true); cancel() })
+		r, err := fetch(ctx, target, h, opts{noFollow: true, wait: playlistWait, ask: a})
+		t.Stop()
+		if err != nil {
+			cancel()
+			if timed.Load() {
+				err = timeoutError{}
+			}
+		}
+		return r, cancel, err
+	}
+	r, done, err := try(secs(pieceWait))
+	if err != nil && wentQuiet(err) {
+		a.fields(lg.Info()).Msgf("a channel's address sent nothing for %d s; asked again on a new connection", pieceWait)
+		r, done, err = try(time.Duration(math.MaxInt64))
+	}
 	if err != nil {
 		return nil, nil, err
 	}
+	defer done()
 	if loc := r.Header.Get("Location"); isRedirect(r.StatusCode) && loc != "" {
 		r.Body.Close()
 		u, err := r.Request.URL.Parse(loc)
@@ -817,6 +780,16 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if vs != nil && status == 200 { // (the variant's pieces set how often it is asked for)
 			mu.Lock()
 			vs.note(data)
+			mu.Unlock()
+		}
+		// A catch-up's playlist, at the address the provider sent the player on to (catchUpPlaylist): it is
+		// complete and asked for once, so a session of its own counts it at the provider while its pieces are
+		// read (see inUse), as for one the provider answers itself (keepDirect). Without it nothing counted the
+		// catch-up once the place kept for this follow-up was over: another device could open the channel.
+		if cu, follow := rt.f.followed(r); follow && cu.kind == "ch" && vs == nil && status == 200 {
+			rt.f.keepDirect(provider+" "+orig, final, rt.client, cu, data)
+			mu.Lock()
+			rt.f.keepFor(rt.client, cu, 0) // (the place kept for it is taken)
 			mu.Unlock()
 		}
 		return servePlaylist(w, status, hd, data, final, rt.f, film)
@@ -965,7 +938,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			status, hd, data, final = st, hdr, text, fin
 		}
 		if err != nil {
-			if attempt == 2 {
+			if attempt == 2 || ctx.Err() != nil { // (the player hung up: nothing failed at the provider)
 				return err
 			}
 			var rf *refused
@@ -977,10 +950,24 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if !renewOn[status] || attempt == 2 {
 			break
 		}
+		mu.Lock()
+		refusedNow := mono()-s.refusedAt < renewGap
+		mu.Unlock()
+		if refusedNow { // (opened again a moment ago and refused: its own answer, as a player straight at it sees)
+			if err != nil {
+				return err
+			}
+			break
+		}
 		ns, d, err := openChannel(key, target, h, loc, asked) // the remembered session is gone
 		if err != nil {
 			return err
 		} else if d != nil {
+			if d.status >= 400 {
+				mu.Lock()
+				s.refusedAt = mono()
+				mu.Unlock()
+			}
 			return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film)
 		}
 		mu.Lock()
@@ -1066,6 +1053,21 @@ var (
 
 func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 	provider, uri := rt.f.base, rt.uri
+	// A login or a list asked for with POST (the pairs in a form body, which Xtream panels read exactly as the
+	// query): the pairs go on in the query, with the login swapped there as for any other ask.
+	if r.Method == "POST" && strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/x-www-form-urlencoded") {
+		form, err := io.ReadAll(io.LimitReader(r.Body, 65536))
+		if err != nil {
+			return &refused{status: 400}
+		}
+		if f := strings.TrimSpace(string(form)); f != "" {
+			if r.URL.RawQuery != "" {
+				f = r.URL.RawQuery + "&" + f
+			}
+			r.URL.RawQuery = f
+			uri, _ = rt.f.swap(r.URL)
+		}
+	}
 	home := hostKeep.ReplaceAllString(r.Host, "")
 	if home == "" {
 		answer(w, 400, "", "")
@@ -1120,7 +1122,9 @@ func api(w http.ResponseWriter, r *http.Request, rt *route) error {
 			w.Header()[k] = vs
 		}
 	}
-	gz := strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip")
+	// (packed only when there is a body to pack: a 304 or 204 has none, and a gzip header written into one
+	// broke the answer off)
+	gz := strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") && resp.StatusCode != 304 && resp.StatusCode != 204
 	if gz {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Set("Vary", "Accept-Encoding")

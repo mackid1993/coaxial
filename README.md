@@ -317,8 +317,8 @@ not need a new Coaxial image, Coaxial fetches that file itself.
 - **It is kept** in `gluetun/bin` in the mounted folder: the build in use and the one before it. If the registry cannot
   be reached, a check fails or the new program does not run, Coaxial uses the last good copy, or else the program built
   into the image. The look-up and download get two minutes at most.
-- **While it runs**, Coaxial asks the registry once an hour whether a newer build is out, and Status says so. It skips
-  this while the VPN is down or servers are being tried. `Check for updates` asks at once. Neither reconnects the VPN.
+- **While it runs**, Coaxial asks the registry once an hour whether a newer build is out, and Status says so. It asks
+  only while nothing plays or records, and skips it while the VPN is down or servers are being tried. `Check for updates` asks at once. Neither reconnects the VPN.
 - **A newer build installs by itself, but only when nothing is playing.** Once no one has watched or recorded anything
   for 10 minutes, Coaxial restarts the VPN with the new build.
 - **If the VPN does not connect** within 2 minutes on the new build, Coaxial goes back to the build before it and skips

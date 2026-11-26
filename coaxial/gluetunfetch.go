@@ -750,7 +750,7 @@ func (l *launcher) askRegistries(tag string, usable func(program) bool) (got pro
 }
 
 // ---------------------------------------------------------------------------
-// Is there a newer VPN program? Asked once an hour and when the page asks. Taking it means starting the VPN
+// Is there a newer VPN program? Asked once an hour while nothing plays, and when the page asks. Taking it means starting the VPN
 // again, which cuts what is playing. So it is installed by itself only after nothing has played for a while,
 // and if the VPN does not connect with it, the one before is put back and that build is left alone.
 // ---------------------------------------------------------------------------
@@ -796,11 +796,13 @@ func nothingPlaying() bool {
 // registry is asked first, through the VPN that still runs: gluetun leaves its firewall and its name server
 // (127.0.0.1) behind when it stops, so nothing can be fetched from the moment the VPN is stopped until it is up
 // again. The start that follows takes what was found from the cache.
-func (l *launcher) restartForProgram(why string) { l.restartIf(why, false) }
+func (l *launcher) restartForProgram(why string) { l.restartIf(why, false, false) }
 
 // restartIf is restartForProgram; with onlyNewer ("Update now"), the VPN is left running, and false returned, when
-// the registry gave no build other than the one in use: starting it again would cut what plays for nothing.
-func (l *launcher) restartIf(why string, onlyNewer bool) bool {
+// the registry gave no build other than the one in use: starting it again would cut what plays for nothing. With
+// idle (an update installed unasked), the same when something started playing while the registry was asked: the
+// build is kept in the cache and installed at the next quiet spell.
+func (l *launcher) restartIf(why string, onlyNewer, idle bool) bool {
 	l.mu.Lock()
 	s := l.set
 	l.mu.Unlock()
@@ -821,6 +823,10 @@ func (l *launcher) restartIf(why string, onlyNewer bool) bool {
 				return false
 			}
 		}
+	}
+	if idle && someonePlaying() { // (looked at again right before the VPN is stopped, as switchServer does)
+		say("VPN program: something started playing while the update was fetched; it is installed once nothing plays")
+		return false
 	}
 	l.mu.Lock()
 	l.vpnKey = why
@@ -854,7 +860,9 @@ func (l *launcher) autoUpdate() {
 	want, had := l.updDigest, l.prog.Digest
 	l.mu.Unlock()
 	say("VPN program: a newer gluetun (%s) is out and nothing has played for %d minutes; updating now", short(want), idleMinutes)
-	l.restartForProgram("(update)")
+	if !l.restartIf("(update)", false, true) {
+		return
+	}
 	up := false
 	for end := time.Now().Add(updateWait); time.Now().Before(end) && !up; {
 		time.Sleep(3 * time.Second)
@@ -975,10 +983,6 @@ func (l *launcher) watchProgram() {
 			downSince, quietSince = time.Time{}, time.Time{}
 			continue
 		}
-		if up && time.Since(asked) >= updateEvery {
-			l.checkProgram("hourly")
-			asked = time.Now()
-		}
 		l.mu.Lock()
 		pending := l.updDigest != "" && l.updDigest != l.prog.Digest && l.updDigest != l.updFailed
 		want, named := l.updDigest, l.pick.Env != "" || l.pickTry != ""
@@ -1023,6 +1027,12 @@ func (l *launcher) watchProgram() {
 		}
 		if quietSince.IsZero() {
 			quietSince = time.Now()
+		}
+		// Is a newer VPN program out? Asked once an hour, and like the pings only once nothing has played for a
+		// look (rule 1): a newer build is installed only after idleMinutes with nothing playing, so this loses nothing.
+		if quiet > 0 && time.Since(asked) >= updateEvery {
+			l.checkProgram("hourly")
+			asked = time.Now()
 		}
 		if pending && want != skipped(binDir(l.dir)) && time.Since(quietSince) >= idleMinutes*time.Minute {
 			quietSince = time.Time{}
@@ -1073,7 +1083,7 @@ func (l *launcher) apiProgramUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	say("VPN program: an update was asked for from the web interface; starting the VPN again")
 	os.Remove(filepath.Join(binDir(l.dir), "skip.json")) // (asked for by hand: a build left alone before is tried again)
-	done := l.restartIf("(update)", true)
+	done := l.restartIf("(update)", true, false)
 	l.mu.Lock()
 	p := l.prog
 	l.mu.Unlock()

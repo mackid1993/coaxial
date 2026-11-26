@@ -291,6 +291,9 @@ type nameList struct {
 var channelNames = map[string]*nameList{}
 
 func names(port string) chan struct{} {
+	// Each fetch is a login to the provider and its whole live list: as for the account (see account), never
+	// while anything plays or records. The table shows channel numbers until the names are fetched.
+	busy := len(playingNow()) > 0
 	mu.Lock()
 	defer mu.Unlock()
 	n := channelNames[port]
@@ -299,7 +302,7 @@ func names(port string) chan struct{} {
 		channelNames[port] = n
 	}
 	done := make(chan struct{})
-	if n.busy || (len(n.names) > 0 && mono()-n.at < 6*3600) || (len(n.names) == 0 && mono()-n.at < 60) {
+	if busy || n.busy || (len(n.names) > 0 && mono()-n.at < 6*3600) || (len(n.names) == 0 && mono()-n.at < 60) {
 		close(done)
 		return done
 	}
@@ -400,9 +403,18 @@ func statusPage(w http.ResponseWriter, r *http.Request) {
 	var ping float64
 	var pinged bool
 	var wg sync.WaitGroup
-	wg.Add(2 + 2*len(good))
-	go func() { defer wg.Done(); where = whereAmI() }()
-	go func() { defer wg.Done(); ping, pinged = vpnPing() }()
+	wg.Add(2 * len(good))
+	if len(playingNow()) == 0 { // (both go through the VPN: never while anything plays or records)
+		wg.Add(2)
+		go func() { defer wg.Done(); where = whereAmI() }()
+		go func() { defer wg.Done(); ping, pinged = vpnPing() }()
+	} else { // the last exit address looked up, no ping
+		mu.Lock()
+		if k := keptValues["where"]; k != nil {
+			where = k.value
+		}
+		mu.Unlock()
+	}
 	for i, p := range good {
 		go func() { defer wg.Done(); accts[i] = account(pyStr(field(p, "port")), 6*time.Second) }()
 		go func() { // names wait at most 2 s: missing ones show as ids and fill in on a later refresh

@@ -58,6 +58,11 @@ func TestOnePerChannelCatchUpHLSPieces(t *testing.T) {
 			}
 		}
 	}
+	for h := range holds { // ...and the place kept for the redirect's follow-up (10 s) is long over
+		if h.until > 0 {
+			h.until -= 31
+		}
+	}
 	mu.Unlock()
 	if p := ask(t, base, "192.0.2.1", pieces[1]); p.StatusCode != 200 { // ...and the player is on the next piece
 		t.Fatalf("the next piece: %d", p.StatusCode)

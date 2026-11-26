@@ -76,6 +76,15 @@ func TestHLSRedirectKeepsLogins(t *testing.T) {
 		} else {
 			p.Body.Close()
 		}
+		if strings.HasPrefix(path, "/timeshift/") { // a catch-up's playlist is passed through: it has no folder here
+			for _, g := range given {
+				if strings.Contains(g, "realU") || strings.Contains(g, "realP") {
+					t.Errorf("%s: the player was given the provider's login: %q", path, g)
+				}
+			}
+			checkAsked()
+			continue
+		}
 		// (a player that reads the piece next to the channel's folder instead)
 		folder := "/__ch" + strings.Replace(path, "realU/realP", "tv/easy", 1) + "/piece1.ts"
 		n := ask(t, base, "192.0.2.1", folder)
