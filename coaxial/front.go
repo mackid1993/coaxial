@@ -670,10 +670,6 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 		h.Del("Content-Length")
 		src = io.MultiReader(bytes.NewReader(f.hideLogin(page)), src)
 	}
-	if hd != nil && hd.w.kind == "ch" && resp.StatusCode == 200 && r.Method == "GET" && out.Header.Get("Range") == "" &&
-		resp.Header.Get("Content-Encoding") == "" {
-		h.Del("Content-Length") // catch-up MPEG-TS has its clock kept running on (catchUpClock): its length may change
-	}
 	c.WriteHeader(resp.StatusCode)
 	c.Flush()
 	if r.Method == "HEAD" {
@@ -944,7 +940,7 @@ func catchUpClock(hd *hold, out *http.Request, resp *http.Response, src io.Reade
 		resp.Header.Get("Content-Encoding") != "" {
 		return nil
 	}
-	cb := &clockBody{r: src}
+	cb := &clockBody{r: src, size: resp.ContentLength}
 	id := hd.w.item
 	cb.clk.tag = func(e *zerolog.Event) *zerolog.Event {
 		return e.Str("channel", id).Str("device", who).Str("kind", "catch-up")
@@ -953,14 +949,30 @@ func catchUpClock(hd *hold, out *http.Request, resp *http.Response, src io.Reade
 }
 
 // clockBody: a reader passing an MPEG-TS answer through a clockFix. Anything that is not MPEG-TS (its first
-// byte is not a packet start) is passed on untouched.
+// byte is not a packet start) is passed on untouched. The answer keeps the provider's own length (players seek
+// in catch-up by it): if clockFix left any video out, the end is made up with MPEG-TS null packets.
 type clockBody struct {
 	r       io.Reader
 	clk     clockFix
+	size    int64 // the provider's Content-Length (-1: none given)
 	sent    int64
 	out     []byte
 	checked bool
 	plain   bool
+	padded  bool
+}
+
+// nullPad: n bytes of MPEG-TS null packets (PID 0x1FFF, which every player skips); a part packet at the end, if
+// any, is 0xFF stuffing.
+func nullPad(n int64) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = 0xff
+	}
+	for i := int64(0); i+188 <= n; i += 188 {
+		b[i], b[i+1], b[i+2], b[i+3] = 0x47, 0x1f, 0xff, 0x10
+	}
+	return b
 }
 
 func (b *clockBody) Read(p []byte) (int, error) {
@@ -976,6 +988,11 @@ func (b *clockBody) Read(p []byte) (int, error) {
 			b.sent += int64(len(data))
 		}
 		b.out = data
+		if err == io.EOF && !b.padded && !b.plain && b.size > 0 && b.sent < b.size {
+			b.padded = true // (the whole answer came: what clockFix left out is made up)
+			b.out = append(b.out, nullPad(b.size-b.sent)...)
+			b.sent = b.size
+		}
 		if err != nil {
 			if len(b.out) > 0 {
 				break

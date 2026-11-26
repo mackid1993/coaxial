@@ -102,3 +102,17 @@ func TestCatchUpClockOnlyCatchUp(t *testing.T) {
 		t.Error("an unadmitted answer was given the clock fix")
 	}
 }
+
+// Catch-up keeps the provider's length (players seek in it by that); anything left out is made up with null packets.
+func TestCatchUpClockKeepsLength(t *testing.T) {
+	data := ecSynthetic()
+	out, err := io.ReadAll(&clockBody{r: &chunks{data, rand.New(rand.NewSource(7))}, size: int64(len(data))})
+	if err != nil || len(out) != len(data) {
+		t.Fatalf("%d bytes out for a %d-byte answer (%v)", len(out), len(data), err)
+	}
+	short := int64(len(data) + 2*188)
+	out, _ = io.ReadAll(&clockBody{r: &chunks{data, rand.New(rand.NewSource(7))}, size: short})
+	if int64(len(out)) != short || out[len(data)] != 0x47 || out[len(data)+1] != 0x1f || out[len(data)+2] != 0xff {
+		t.Fatalf("made-up end: %d bytes, want %d of null packets", len(out), short)
+	}
+}
