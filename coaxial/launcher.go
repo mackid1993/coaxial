@@ -437,6 +437,7 @@ func (l *launcher) startProxy() {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	if os.Getuid() == 0 { // it needs no privileges
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 65534, Gid: 65534}
+		namesHome(l.dir, 65534, 65534)
 	}
 	c := &child{cmd: cmd, done: make(chan struct{})}
 	endTries() // (a provider's port tried by the page a moment ago)
@@ -462,6 +463,18 @@ func (l *launcher) startProxy() {
 			time.AfterFunc(2*time.Second, func() { l.work.Lock(); defer l.work.Unlock(); l.startProxy() })
 		}
 	}()
+}
+
+// namesHome: the file the proxy part keeps its channel names in, made ready for it. The proxy part runs
+// without privileges and the settings folder is root's, so it cannot make a file there: the launcher makes
+// the file (empty, if there is none) and hands it over. It holds channel names only, no login.
+func namesHome(dir string, uid, gid int) string {
+	file := filepath.Join(dir, "names.json")
+	if f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		f.Close()
+		os.Chown(file, uid, gid)
+	}
+	return file
 }
 
 // lookAgain: how long after a failed look at the VPN the second look is taken (a variable for the tests).

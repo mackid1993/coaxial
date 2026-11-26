@@ -369,7 +369,15 @@ func saveNames() {
 		}
 	}
 	mu.Unlock()
-	writeWhole(namesFile, out)
+	if writeWhole(namesFile, out) == nil {
+		return
+	}
+	// The proxy part has no privileges and cannot make a new file in the settings folder (writeWhole makes one
+	// beside the old). The launcher made this file for it (namesHome): it is written where it is.
+	data, _ := json.MarshalIndent(out, "", "  ")
+	if err := os.WriteFile(namesFile, append(data, '\n'), 0o644); err != nil {
+		lg.Warn().Msgf("the channel names could not be kept in their file (%v): the next start will not have them", err)
+	}
 }
 
 // loadNames: the names kept by the run before, for the providers that are still the same.
