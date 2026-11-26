@@ -1,0 +1,54 @@
+name: Tests
+
+# Every push to main and every pull request runs the whole test suite, and the image build runs it first
+# (docker-build.yml calls this workflow): an image is never published from a tree whose tests fail.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'coaxial/**'
+      - '.github/workflows/**'
+      - '.github/smoke/**'
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The tests run in the same Go image the Dockerfile builds with, on a Docker network whose addresses are
+      # not private ones: some tests need a fake provider at a public-looking address and skip themselves on a
+      # private network. Tests that replay recorded feeds need files that are never in the repository; they
+      # skip, and that is expected.
+      - name: gofmt, go vet and the full suite
+        run: |
+          docker network create --subnet 198.18.200.0/24 coaxial-tests
+          docker run --rm --network coaxial-tests -v "$PWD/coaxial:/src" -w /src golang:alpine sh -c '
+            set -e
+            unformatted=$(gofmt -l .)
+            if [ -n "$unformatted" ]; then echo "gofmt wants these files changed:"; echo "$unformatted"; exit 1; fi
+            go vet ./...
+            set +e
+            go test -count=1 -timeout 30m -v ./... > /tmp/out.txt 2>&1
+            code=$?
+            grep -E "^(--- FAIL|--- SKIP|FAIL|ok|panic:)" /tmp/out.txt
+            if [ $code -ne 0 ]; then
+              echo "::group::Output of the failed tests"
+              awk "/^=== RUN/{buf=\"\"} {buf=buf \$0 \"\n\"} /^--- FAIL/{printf \"%s\", buf}" /tmp/out.txt | tail -400
+              echo "::endgroup::"
+            fi
+            echo "passed: $(grep -c "^--- PASS" /tmp/out.txt), failed: $(grep -c "^--- FAIL" /tmp/out.txt), skipped: $(grep -c "^--- SKIP" /tmp/out.txt)"
+            exit $code
+          '

@@ -6,7 +6,7 @@ on:
     # to pick up Go, Alpine and VPN client updates.
     - cron: '0 5 1 * *'
   # Manual builds, from the Actions tab or with: gh workflow run docker-build.yml --ref <branch>
-  # Pushes never build.
+  # Pushes never build (they run the tests: tests.yml). Every build runs the tests first.
   workflow_dispatch:
     inputs:
       tag:
@@ -15,6 +15,10 @@ on:
         default: latest
       fresh:
         description: Build without the cache (the monthly build always does)
+        type: boolean
+        default: false
+      skip_tests:
+        description: Build without running the tests first (only when the tests themselves are what is broken)
         type: boolean
         default: false
 
@@ -26,7 +30,14 @@ permissions:
   packages: write
 
 jobs:
+  # The whole test suite runs first (tests.yml). No image is built or published from a tree whose tests fail.
+  test:
+    if: ${{ inputs.skip_tests != true }}
+    uses: ./.github/workflows/tests.yml
+
   prepare:
+    needs: test
+    if: ${{ always() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -54,6 +65,7 @@ jobs:
   # Each architecture builds natively (no QEMU), then a manifest joins them.
   build:
     needs: prepare
+    if: ${{ always() && needs.prepare.result == 'success' }}
     strategy:
       fail-fast: true
       matrix:
@@ -102,6 +114,12 @@ jobs:
           provenance: false
           sbom: false
 
+      # The program in the image just built is started in front of a stand-in provider, and a stand-in player
+      # logs in and watches a live channel through it (.github/smoke). If that fails, the build stops here:
+      # the image is never given its tag.
+      - name: Smoke test the built image
+        run: sh .github/smoke/smoke.sh "${{ needs.prepare.outputs.image }}@${{ steps.build.outputs.digest }}"
+
       - name: Export digest
         run: |
           mkdir -p /tmp/digests
@@ -118,6 +136,7 @@ jobs:
 
   merge:
     needs: [prepare, build]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download digests
