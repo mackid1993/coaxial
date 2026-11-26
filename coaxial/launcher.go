@@ -545,7 +545,12 @@ func (l *launcher) sawVPN(c *child, up bool, link int) (again bool) {
 	}
 	if up && !l.vpnUp {
 		say("the VPN is up")
-		l.vpnUpAt, again = time.Now(), l.proxy != nil
+		// Looks can fail with the VPN fine (the health check is a program started for each look, and on a busy
+		// machine that can take too long, look after look). The same program on the same interface as before is
+		// the tunnel that was there all along, its address the same: the proxy part has nothing to be told.
+		if same := c != nil && c.ever && link != 0 && link == l.vpnLink; !same {
+			l.vpnUpAt, again = time.Now(), l.proxy != nil
+		}
 	} else if up && link != 0 && l.vpnLink != 0 && link != l.vpnLink {
 		l.vpnUpAt, again = time.Now(), l.proxy != nil
 	} else if !up && l.vpnUp {
