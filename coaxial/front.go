@@ -509,18 +509,17 @@ func (f *front) stream(c *counted, r *http.Request, w what, follow bool, target,
 		}
 		return
 	}
+	if finish != nil { // (handed on the moment the provider answers, not when the answer is over)
+		h.asked, finish = finish, func(string) {}
+	}
 	defer func() {
+		if h.asked != nil { // (no answer came: nothing to hand on)
+			h.asked("")
+		}
 		h.release()
 		rc.SetWriteDeadline(time.Time{}) // (cut once all was sent: the connection may be used again)
 	}()
 	f.forwardHeld(c, r.WithContext(ctx), target, scheme, hostport, 60, guard, h)
-	if finish != nil {
-		mu.Lock()
-		loc := h.loc
-		mu.Unlock()
-		finish(loc)
-		finish = func(string) {}
-	}
 }
 
 // What belongs to one connection and is not passed on in either direction.
@@ -656,6 +655,13 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 			f.remember(moved, hd)
 			mu.Unlock()
 		}
+	}
+	if hd != nil && hd.asked != nil { // (the same device's other asks of this catch-up get this answer: see cuAsked)
+		mu.Lock()
+		loc := hd.loc
+		mu.Unlock()
+		hd.asked(loc)
+		hd.asked = nil
 	}
 	if _, ok := h["Content-Type"]; !ok {
 		h["Content-Type"] = nil // none sent, none added

@@ -245,11 +245,12 @@ type hold struct {
 	at     float64
 	cutAt  float64 // when it was cut to make room (0: it was not)
 	cut    func()
-	shared bool    // it joins a channel or session that is open or being opened: counted there
-	moved  bool    // it was answered with a redirect: its place is kept for the follow-up when it ends
-	until  float64 // the place kept for a follow-up until then (0: it is no such place)
-	addr   string  // the address asked (catch-up and its archive reads: see admit)
-	loc    string  // the redirect it was answered with, as given to the player ("" for none)
+	shared bool         // it joins a channel or session that is open or being opened: counted there
+	moved  bool         // it was answered with a redirect: its place is kept for the follow-up when it ends
+	until  float64      // the place kept for a follow-up until then (0: it is no such place)
+	addr   string       // the address asked (catch-up and its archive reads: see admit)
+	asked  func(string) // called once with the redirect given ("" for none) when the answer arrives (see cuAsked)
+	loc    string       // the redirect it was answered with, as given to the player ("" for none)
 }
 
 var holds = map[*hold]bool{}
@@ -261,6 +262,14 @@ func (h *hold) release() {
 	}
 	mu.Lock()
 	delete(holds, h)
+	if !h.shared && h.cutAt == 0 && h.addr != "" && h.key == "" { // a read that joined this one goes on: it counts now
+		for o := range holds {
+			if o.shared && o.f == h.f && o.key == "" && o.addr == h.addr && o.who == h.who && o.until == 0 {
+				o.shared = false
+				break
+			}
+		}
+	}
 	if now := mono(); h.moved && h.cutAt == 0 && h.until == 0 {
 		h.f.keepFor(h.who, h.w, now+followUpHold)
 	}
@@ -736,8 +745,9 @@ var cuAsks = map[string]*cuAsk{} // port, device and address -> the provider's a
 
 const cuAskKeep = 30.0
 
-// cuAsked: the redirect a catch-up ask by this device was just given, if any (waiting up to 5 s for one on its
-// way). Otherwise it is marked on its way, and finish must be called with what the provider answered.
+// cuAsked: the redirect a catch-up ask by this device was just given, if any (waiting for one on its way as long
+// as the player does: it comes when the provider's answer to the first ask arrives). Otherwise it is marked on
+// its way, and finish must be called once with what the provider answered.
 func (f *front) cuAsked(ctx context.Context, key string) (loc string, finish func(string)) {
 	for {
 		mu.Lock()
@@ -773,8 +783,6 @@ func (f *front) cuAsked(ctx context.Context, key string) (loc string, finish fun
 		case <-done:
 		case <-ctx.Done():
 			return "", nil
-		case <-time.After(5 * time.Second):
-			return "", func(string) {}
 		}
 	}
 }
