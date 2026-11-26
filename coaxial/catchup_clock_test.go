@@ -23,8 +23,16 @@ func cuServe(data []byte) *httptest.Server {
 // cuRead reads the file from byte start the way a player through the proxy gets it.
 func cuRead(t *testing.T, url string, start int64) []byte {
 	t.Helper()
+	return cuReadRange(t, url, fmt.Sprintf("bytes=%d-", start))
+}
+
+// cuReadRange reads with any Range header ("" for none) through the proxy's catch-up handling.
+func cuReadRange(t *testing.T, url, rng string) []byte {
+	t.Helper()
 	out, _ := http.NewRequestWithContext(context.Background(), "GET", url, nil)
-	out.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+	if rng != "" {
+		out.Header.Set("Range", rng)
+	}
 	resp, err := sharedTransport.RoundTrip(out)
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +53,21 @@ func cuCheck(t *testing.T, what string, data []byte) {
 	t.Helper()
 	srv := cuServe(data)
 	defer srv.Close()
-	whole := cuRead(t, srv.URL+"/a.ts", 0)
+	// a player's own order: the file's last 64 KB first (where players read its length from the clock), then the start
+	n := int64(len(data))
+	tail := cuReadRange(t, srv.URL+"/a.ts", "bytes=-65536")
+	whole := cuReadRange(t, srv.URL+"/a.ts", "")
+	if !bytes.Equal(tail, whole[n-65536:]) {
+		t.Errorf("%s: the last 64 KB read on its own got other bytes than the whole file has there", what)
+	}
+	if got := cuReadRange(t, srv.URL+"/a.ts", "bytes=0-"); !bytes.Equal(got, whole) {
+		t.Errorf("%s: a read from byte 0 differs from a read with no Range", what)
+	}
+	for _, sp := range [][2]int64{{n / 7, n/7 + 333333}, {n / 2, n - 1}, {12345, 99999}} { // spans, any alignment
+		if got := cuReadRange(t, srv.URL+"/a.ts", fmt.Sprintf("bytes=%d-%d", sp[0], sp[1])); !bytes.Equal(got, whole[sp[0]:sp[1]+1]) {
+			t.Errorf("%s: the span %d-%d got other bytes than the whole file has there", what, sp[0], sp[1])
+		}
+	}
 	ecCheck(t, what, data, whole) // the clock runs straight through; length and every other byte the provider's
 	// a seek anywhere gets exactly the bytes a read from the start has there
 	for _, f := range []float64{0.1, 0.33, 0.5, 0.71, 0.97} {

@@ -28,7 +28,7 @@ type cuJump struct {
 }
 
 type cuMap struct {
-	at    float64
+	at    float64 // when it was decided (kept cuKeep seconds; never changed meanwhile)
 	size  int64
 	align int64 // a packet starts at every byte position that is align modulo 188
 	jumps []cuJump
@@ -40,7 +40,11 @@ var (
 	cuBuild = map[string]chan struct{}{}
 )
 
-const cuProbeSize = 64 << 10
+const (
+	cuProbeSize = 64 << 10
+	cuKeep      = 6 * 3600 // seconds a file's map is kept: a viewing session never sees it change
+	cuBuildWait = 10       // seconds the reads may take; past that the file is passed on as it is (and stays so)
+)
 
 // cuProbe reads n bytes of the file at pos with a Range request like the player's own. It returns the bytes and
 // the file's whole length.
@@ -107,12 +111,14 @@ type cuPoint struct {
 	pcr int64
 }
 
-// cuMapFor finds where the file's clock starts over. nil: it never does, or it could not be read (passed on as is).
-func cuMapFor(ctx context.Context, out *http.Request) *cuMap {
-	key := out.URL.String()
+// cuMapFor finds where the file's clock starts over. nil: it never does, or it could not be read; either way the
+// answer is decided once per file and every read of it gets the same (passed on as is, or moved by one map).
+// The reads go one at a time over one kept connection, after the player's own answer has started.
+func cuMapFor(ctx context.Context, out *http.Request, total int64) *cuMap {
+	key := out.URL.Scheme + "://" + out.URL.Host + out.URL.EscapedPath() + "#" + strconv.FormatInt(total, 10)
 	cuMu.Lock()
 	for k, m := range cuMaps {
-		if mono()-m.at > 3600 {
+		if mono()-m.at > cuKeep {
 			delete(cuMaps, k)
 		}
 	}
@@ -141,11 +147,18 @@ func cuMapFor(ctx context.Context, out *http.Request) *cuMap {
 	ch := make(chan struct{})
 	cuBuild[key] = ch
 	cuMu.Unlock()
-	m := cuFind(ctx, out)
-	cuMu.Lock()
-	if m != nil { // (a file whose clock never starts over is remembered too, with no jumps: not read again)
-		cuMaps[key] = m
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cuBuildWait*time.Second) // (not the player's: others wait on it too)
+	t0 := mono()
+	m := cuFind(bctx, out, total)
+	cancel()
+	if m == nil { // could not be read: passed on as it is, and stays so (never one read fixed and the next not)
+		m = &cuMap{at: mono()}
+		lg.Warn().Float64("seconds", round1(mono()-t0)).Msg("a catch-up file could not be checked for clock restarts; passed on as it is")
+	} else {
+		lg.Info().Float64("seconds", round1(mono()-t0)).Int("restarts", len(m.jumps)).Msg("a catch-up file was checked for clock restarts")
 	}
+	cuMu.Lock()
+	cuMaps[key] = m
 	delete(cuBuild, key)
 	close(ch)
 	cuMu.Unlock()
@@ -155,9 +168,9 @@ func cuMapFor(ctx context.Context, out *http.Request) *cuMap {
 	return m
 }
 
-func cuFind(ctx context.Context, out *http.Request) *cuMap {
+func cuFind(ctx context.Context, out *http.Request, total int64) *cuMap {
 	head, size, err := cuProbe(ctx, out, 0, cuProbeSize)
-	if err != nil || size <= 0 {
+	if err != nil || size <= 0 || size != total {
 		return nil
 	}
 	none := &cuMap{at: mono()}
@@ -169,20 +182,29 @@ func cuFind(ctx context.Context, out *http.Request) *cuMap {
 	if !ok {
 		return none
 	}
-	at := func(pos int64) (cuPoint, bool) {
-		b, _, err := cuProbe(ctx, out, pos, cuProbeSize)
-		if err != nil {
-			return cuPoint{}, false
+	at := func(pos int64) (cuPoint, bool) { // the first PCR from pos on (read on until one comes, up to 2 MB)
+		for k := int64(0); k < 8; k++ {
+			from := pos + k*cuProbeSize*4
+			if from >= size {
+				break
+			}
+			b, _, err := cuProbe(ctx, out, from, min(cuProbeSize*4, size-from))
+			if err != nil {
+				return cuPoint{}, false
+			}
+			if p, v, _, ok := firstPCR(b, from, pid); ok {
+				return cuPoint{p, v}, true
+			}
 		}
-		p, v, _, ok := firstPCR(b, pos, pid)
-		return cuPoint{p, v}, ok
+		return cuPoint{}, false
 	}
+
 	// the clock at evenly spread places, a few reads at a time
-	const n = 32
+	const n = 16
 	pts := make([]cuPoint, n+1)
 	oks := make([]bool, n+1)
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4)
+	sem := make(chan struct{}, 1) // (one at a time: one connection beside the player's)
 	for i := 0; i <= n; i++ {
 		pos := size * int64(i) / n
 		if i == n {
@@ -222,19 +244,19 @@ func cuFind(ctx context.Context, out *http.Request) *cuMap {
 		d := tsDiff(b.pcr, a.pcr)
 		return d >= 0 && float64(d) <= 3*rate*float64(b.pos-a.pos)+10*90000
 	}
-	var restarts []int64 // a window of the file a restart is in (start positions, 1 MB or less from the next point)
+	var restarts [][2]int64 // stretches of the file (from one PCR packet to the next point) a restart is in
 	var bisect func(a, b cuPoint, depth int)
 	bisect = func(a, b cuPoint, depth int) {
 		if ctx.Err() != nil || clean(a, b) {
 			return
 		}
 		if b.pos-a.pos <= 1<<20 || depth > 40 {
-			restarts = append(restarts, a.pos)
+			restarts = append(restarts, [2]int64{a.pos, b.pos})
 			return
 		}
 		m, ok := at(a.pos + (b.pos-a.pos)/2)
 		if !ok || m.pos <= a.pos || m.pos >= b.pos {
-			restarts = append(restarts, a.pos)
+			restarts = append(restarts, [2]int64{a.pos, b.pos}) // (no clock to split it by: read the stretch whole)
 			return
 		}
 		bisect(a, m, depth+1)
@@ -246,42 +268,50 @@ func cuFind(ctx context.Context, out *http.Request) *cuMap {
 	if len(restarts) == 0 {
 		return none
 	}
-	// each window read whole: the exact packet where the clock starts over, and how far to move what follows
+	// each stretch read whole, from its PCR packet to past the next point: the exact packet where the clock starts
+	// over, and how far to move what follows
 	m := &cuMap{at: mono(), size: size, align: int64(s)}
 	off := int64(0)
-	for _, a := range restarts {
-		b, _, err := cuProbe(ctx, out, a, (1<<20)+2*cuProbeSize)
-		if err != nil {
-			return nil
-		}
-		k := tsSync(b)
-		last := int64(-1) // the newest PCR in this window (moved by off)
+	const chunk = 188 * 11155 // (about 2 MB, whole packets)
+	for _, st := range restarts {
+		a, end := st[0], min(size, st[1]+188*64)
+		last := int64(-1) // the newest PCR in this stretch (moved by off)
 		lastPTS := map[int]int64{}
 		first := int64(-1) // the first packet of the new file (its sound or pictures may restart before its PCR)
-		for i := k; k >= 0 && i+188 <= len(b) && b[i] == 0x47; i += 188 {
-			p := b[i : i+188]
-			if v, _ := pcrOf(p, pid); v >= 0 {
-				vv := (v + off) % tsWrap
-				if last >= 0 && cuStep(vv, last) && (len(m.jumps) == 0 || a+int64(i) > m.jumps[len(m.jumps)-1].pos) {
-					if first < 0 {
-						first = a + int64(i)
-					}
-					off = ((off+tsDiff(last, vv)+3600)%tsWrap + tsWrap) % tsWrap // 40 ms after the last one
-					m.jumps = append(m.jumps, cuJump{first, off})
-					vv = (v + off) % tsWrap
-					lastPTS = map[int]int64{}
-				}
-				first = -1 // (a sound or picture restart the PCR did not follow is left as it is)
-				last = vv
-				continue
+		for from := a; from < end; from += chunk {
+			if ctx.Err() != nil {
+				return nil
 			}
-			if pts, id, ok := cuPESPTS(p); ok {
-				vv := (pts + off) % tsWrap
-				if q, seen := lastPTS[id]; seen && first < 0 && last >= 0 && cuStep(vv, q) {
-					first = a + int64(i)
+			b, _, err := cuProbe(ctx, out, from, min(chunk, end-from))
+			if err != nil {
+				return nil
+			}
+			for i := 0; i+188 <= len(b) && b[i] == 0x47; i += 188 {
+				p := b[i : i+188]
+				at := from + int64(i)
+				if v, _ := pcrOf(p, pid); v >= 0 {
+					vv := (v + off) % tsWrap
+					if last >= 0 && cuStep(vv, last) && (len(m.jumps) == 0 || at > m.jumps[len(m.jumps)-1].pos) {
+						if first < 0 {
+							first = at
+						}
+						off = ((off+tsDiff(last, vv)+3600)%tsWrap + tsWrap) % tsWrap // 40 ms after the last one
+						m.jumps = append(m.jumps, cuJump{first, off})
+						vv = (v + off) % tsWrap
+						lastPTS = map[int]int64{}
+					}
+					first = -1 // (a sound or picture restart the PCR did not follow is left as it is)
+					last = vv
+					continue
 				}
-				if first < 0 {
-					lastPTS[id] = vv
+				if pts, id, ok := cuPESPTS(p); ok {
+					vv := (pts + off) % tsWrap
+					if q, seen := lastPTS[id]; seen && first < 0 && last >= 0 && cuStep(vv, q) {
+						first = at
+					}
+					if first < 0 {
+						lastPTS[id] = vv
+					}
 				}
 			}
 		}
@@ -398,19 +428,22 @@ func (b *cuBody) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// cuStart: where an answer to out starts in the file (its Range), or -1 for a Range this cannot follow.
-func cuStart(out *http.Request) int64 {
-	rg := strings.TrimSpace(out.Header.Get("Range"))
-	if rg == "" {
-		return 0
+// cuSpan: where an answer starts in the file and the file's whole length, from the provider's own answer (so every
+// Range form a player sends is covered: from a byte, a span, the last N bytes). ok false: not one whole file.
+func cuSpan(resp *http.Response) (start, total int64, ok bool) {
+	if resp.StatusCode == 200 {
+		return 0, resp.ContentLength, resp.ContentLength > 0
 	}
-	if !strings.HasPrefix(rg, "bytes=") || strings.Contains(rg, ",") {
-		return -1
+	cr := strings.TrimSpace(resp.Header.Get("Content-Range"))
+	if resp.StatusCode != 206 || !strings.HasPrefix(cr, "bytes ") {
+		return 0, 0, false
 	}
-	a, _, _ := strings.Cut(rg[6:], "-")
-	v, err := strconv.ParseInt(strings.TrimSpace(a), 10, 64)
-	if err != nil {
-		return -1 // (a suffix range, "bytes=-N")
+	span, size, found := strings.Cut(cr[6:], "/")
+	a, _, found2 := strings.Cut(span, "-")
+	start, e1 := strconv.ParseInt(strings.TrimSpace(a), 10, 64)
+	total, e2 := strconv.ParseInt(strings.TrimSpace(size), 10, 64)
+	if !found || !found2 || e1 != nil || e2 != nil || total <= 0 || start < 0 {
+		return 0, 0, false
 	}
-	return v
+	return start, total, true
 }

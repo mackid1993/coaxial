@@ -928,20 +928,17 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 
 func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
 
-// catchUpClock: a catch-up answer (MPEG-TS, any Range the player asks for) with its clock made to run straight
-// through where the channel's archive starts its next stored file (see catchup.go). nil: passed on as it is.
+// catchUpClock: a catch-up answer (MPEG-TS, whatever Range the player asked for) with its clock made to run
+// straight through where the channel's archive starts its next stored file (see catchup.go). nil: passed on as it is.
 func catchUpClock(hd *hold, out *http.Request, resp *http.Response, src io.Reader) io.Reader {
-	if hd == nil || hd.w.kind != "ch" || out.Method != "GET" || resp.Header.Get("Content-Encoding") != "" ||
-		(resp.StatusCode != 200 && resp.StatusCode != 206) {
+	if hd == nil || hd.w.kind != "ch" || out.Method != "GET" || resp.Header.Get("Content-Encoding") != "" {
 		return nil
 	}
-	start := cuStart(out)
-	if resp.StatusCode == 200 {
-		start = 0
-	} else if cr := resp.Header.Get("Content-Range"); start < 0 || !strings.HasPrefix(cr, fmt.Sprintf("bytes %d-", start)) {
+	start, total, ok := cuSpan(resp)
+	if !ok {
 		return nil
 	}
-	m := cuMapFor(out.Context(), out)
+	m := cuMapFor(out.Context(), out, total)
 	if m == nil {
 		return nil
 	}
