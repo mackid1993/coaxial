@@ -664,10 +664,21 @@ func livePlaylist(ctx context.Context, target string, h http.Header, wait float6
 	return status, hd, data, fin, err
 }
 
+// catchUpKept: seconds a catch-up watched as HLS is remembered after its last piece. Its playlist is complete and
+// asked for once, so a player that was paused carries on with the next piece, and only the pieces the playlist
+// named tell that piece from any other address. Forgotten after a minute, a catch-up carried on with was counted
+// by nothing for the rest of the programme. It counts as a connection only while its pieces are asked for, as
+// before (see held).
+const catchUpKept = 2 * 3600.0
+
 func forgetIdle() { // (mu held)
 	now := mono()
 	for k, s := range sessions {
-		if now-s.used > math.Max(60, s.held()) {
+		keep := math.Max(60, s.held())
+		if strings.HasSuffix(k, " direct") && s.used > s.opened { // (a catch-up some piece of which was asked for)
+			keep = catchUpKept
+		}
+		if now-s.used > keep {
 			delete(sessions, k)
 		}
 	}
@@ -783,6 +794,17 @@ func (f *front) keepDirect(key, target, who string, want what, data []byte) {
 		s.who[who] = mono()
 	}
 	mu.Lock()
+	// The same device asking for a catch-up of the same channel again (it went further back, or asked afresh) has
+	// left the playlist it had. That one is forgotten now, so the playlists a device no longer reads do not pile
+	// up for as long as catchUpKept. Another device's catch-up of the channel is its own and stays.
+	if want.kind == "ch" && !isLoop(who) {
+		for k, o := range sessions {
+			_, his := o.who[who]
+			if his && len(o.who) == 1 && k != key+" direct" && strings.HasSuffix(k, " direct") && o.owner == f && o.what == want {
+				delete(sessions, k)
+			}
+		}
+	}
 	sessions[key+" direct"] = s
 	mu.Unlock()
 }
