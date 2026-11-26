@@ -74,8 +74,7 @@ func hlsFromTS(w http.ResponseWriter, r *http.Request, who, provider, uri, opath
 			lg.Info().Str("device", who).Str("channel", id).Str("provider", f.name).
 				Msgf("%s opened channel %s as HLS (%s); it is built from the shared MPEG-TS stream", who, id, hostOf(provider))
 		}
-		w.Header().Set("Location", "/__ch"+opath+"/__index.m3u8"+q)
-		answer(w, 302, "", "")
+		sendOn(w, r, "/__ch"+opath+"/__index.m3u8"+q)
 		return true, nil
 	}
 	tsURI := strings.TrimSuffix(chURI, ".m3u8") + ".ts"

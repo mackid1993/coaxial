@@ -708,6 +708,27 @@ func fetchShared(ctx context.Context, target string, h http.Header, wait float64
 	return nil, "", &refused{status: 502}
 }
 
+// unpack: a playlist (or an error page in its place) as it reads, where its server sent it packed with gzip. The
+// player's Accept-Encoding is not passed on for a playlist (plSkipRe), so the server was asked for plain text;
+// some send a playlist packed all the same (one kept packed on disk, a server set to pack everything). It was
+// then handed to the player still packed, with its addresses not pointed back here and without the
+// Content-Encoding header (send leaves that out), which no player can read. Players asking the server
+// themselves unpack it. Anything not packed, or that does not unpack whole, is left as it came.
+func unpack(h http.Header, data []byte) []byte {
+	if ce := strings.ToLower(strings.TrimSpace(h.Get("Content-Encoding"))); ce != "gzip" && ce != "x-gzip" {
+		return data
+	}
+	z, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return data
+	}
+	plain, err := io.ReadAll(io.LimitReader(z, 4<<20+1))
+	if err != nil || len(plain) > 4<<20 {
+		return data
+	}
+	return plain
+}
+
 // livePlaylist fetches a playlist for a player and reads it whole. A kept connection that sends nothing for
 // pieceWait (ExoPlayer's default read timeout, as for the bridge in hlsSource) is let go, and the playlist is
 // asked for again at once on a new connection with the full wait, before anything counts as failed. Otherwise
@@ -728,7 +749,7 @@ func livePlaylist(ctx context.Context, target string, h http.Header, wait float6
 		var data []byte
 		if err == nil {
 			if data, err = readAll(resp, 4<<20, w); err == nil {
-				return resp.StatusCode, resp.Header, data, fin, nil
+				return resp.StatusCode, resp.Header, unpack(resp.Header, data), fin, nil
 			}
 		}
 		if timed.Load() {
@@ -853,7 +874,7 @@ func openChannel(key, target string, h http.Header, renewFrom string, a *askLog)
 		return s, nil, nil
 	}
 	data, err := readAll(r, 4<<20, playlistWait)
-	return nil, &direct{r.StatusCode, r.Header, data}, err
+	return nil, &direct{r.StatusCode, r.Header, unpack(r.Header, data)}, err
 }
 
 // keepDirect: a catch-up playlist the provider answered itself, without sending it elsewhere. It is complete and
@@ -924,6 +945,19 @@ func (f *front) catchUpRead(who, id string) {
 			time.Sleep(secs(math.Min(left, 2) + 0.01))
 		}
 	}()
+}
+
+// sendOn: this proxy's own redirect, to a channel's folder or to where a piece really is. A player inside a web
+// page may only follow a redirect that carries Access-Control-Allow-Origin. The provider's own answers are passed
+// on with the headers the provider gave them, but this redirect is made here and carried none, so such a player
+// was stopped at its first ask, before it got to any of them. A request from a web page names the page (Origin):
+// only that one is told it may follow. Every other player gets the redirect exactly as before.
+func sendOn(w http.ResponseWriter, r *http.Request, to string) {
+	if r.Header.Get("Origin") != "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
+	w.Header().Set("Location", to)
+	answer(w, 302, "", "")
 }
 
 func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
@@ -1110,8 +1144,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			lg.Info().Str("device", who).Str("channel", channelID(uri)).Str("provider", rt.f.name).
 				Msgf("%s opened HLS channel %s (%s)", who, channelID(uri), hostOf(provider))
 		}
-		w.Header().Set("Location", "/__ch"+opath+"/__index.m3u8"+q)
-		answer(w, 302, "", "")
+		sendOn(w, r, "/__ch"+opath+"/__index.m3u8"+q)
 		return nil
 	}
 	if m[2] != "__index.m3u8" { // a piece named next to the playlist: where it really is
@@ -1130,8 +1163,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 				to = p
 			}
 		}
-		w.Header().Set("Location", to)
-		answer(w, 302, "", "")
+		sendOn(w, r, to)
 		return nil
 	}
 	var status int
@@ -1603,6 +1635,7 @@ func catchUpPlaylist(w http.ResponseWriter, r *http.Request, rt *route, h http.H
 	if err != nil {
 		return err
 	}
+	data = unpack(resp.Header, data)
 	if resp.StatusCode == 200 { // answered here, not sent elsewhere: counted while its pieces are read
 		f.keepDirect(f.base+" "+strings.SplitN(rt.uri, "?", 2)[0], target, who, want, data)
 	}
