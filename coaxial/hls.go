@@ -910,6 +910,50 @@ func (f *front) keepDirect(key, target, who string, want what, data []byte) {
 	mu.Unlock()
 }
 
+// keepLive: a live channel's playlist the provider answered itself, at the channel's own address, without sending
+// the channel elsewhere. There is no address to remember, so every ask for it goes to the provider as before, as
+// it would from the player. This only counts it, as a channel that was sent on is counted: a session of its own,
+// kept apart from the channel's key (as keepDirect's is), holds the provider connection for as long as the
+// playlist or its pieces are asked for (see conns, inUse and open), and the device has its row in the status list.
+// Without it nothing counted such a channel: the status list showed nothing playing, and at the connection limit
+// another device was let in, for the provider to end one of the two streams. seen: its key in hlsSeen.
+func (f *front) keepLive(key, target, who, id, seen string, want what, data []byte) {
+	if !bytes.Contains(data[:min(len(data), 1024)], []byte("#EXTM")) {
+		return // (not a playlist: nothing is playing)
+	}
+	text, err := rewritePlaylist(string(data), target, f)
+	if err != nil {
+		return
+	}
+	now := mono()
+	mu.Lock()
+	defer mu.Unlock()
+	s := sessions[key+" live"]
+	if s == nil {
+		s = &session{loc: target, final: target, opened: now, what: want, who: map[string]float64{}, owner: f}
+		sessions[key+" live"] = s
+	}
+	s.used, s.pieces = now, playlistPieces(text)
+	s.note(data)
+	hlsSeen[seen] = now
+	if len(hlsSeen) > 300 {
+		for k, t := range hlsSeen {
+			if now-t > 30 {
+				delete(hlsSeen, k)
+			}
+		}
+	}
+	if isLoop(who) { // (the relay's own bridge)
+		return
+	}
+	s.who[who] = now
+	if row := hlsRows[who+" "+f.base+" "+id]; row != nil && now-row.last <= 30 {
+		row.last = now
+	} else {
+		hlsRows[who+" "+f.base+" "+id] = &hlsRow{first: now, last: now, who: who, id: id, provider: f.base, port: f.port}
+	}
+}
+
 // catchUpRead: device who asked for a piece of a catch-up watched as HLS (a session kept by keepDirect). Its
 // playlist is complete and asked for once, so the pieces are all that shows it is being watched: they give it a
 // row in the status list, and it counts as playing (playingNow), until no piece of it was asked for in 30 s, as
@@ -1107,6 +1151,8 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 					mu.Unlock()
 				} else if d.status == 200 && rt.f.catchUpOf(&url.URL{Path: chanOrig, RawQuery: oquery}) != "" {
 					rt.f.keepDirect(key, target, who, want, d.data)
+				} else if d.status == 200 && want.kind == "ch" {
+					rt.f.keepLive(key, target, who, channelID(uri), port+chanOrig, want, d.data)
 				}
 				return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film, r)
 			}

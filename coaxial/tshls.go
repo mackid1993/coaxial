@@ -218,8 +218,8 @@ func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh 
 		releaseFor(provider, who, key)
 	}
 	if first {
-		was := lastOpen[provider]
-		lastOpen[provider] = opened{mono(), key}
+		was := lastOpen[lineOf(provider, f)]
+		lastOpen[lineOf(provider, f)] = opened{mono(), key}
 		releaseFor(provider, who, key)
 		for _, c := range channels { // channels of this provider that nobody reads go first (changing channel)
 			if c.provider == provider {
@@ -230,7 +230,7 @@ func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh 
 		want := what{"ch", id}
 		h, why := f.admit(ctx, who, want, false, key, nil)
 		if h == nil {
-			unOpen(provider, key, was)
+			unOpen(lineOf(provider, f), key, was)
 			if why == "" {
 				return nil, &refused{status: 504} // (the player hung up while it waited)
 			}
@@ -558,10 +558,12 @@ func pesPTS(b []byte) (float64, bool) {
 
 // releaseFor: a device that opens another channel of a provider has left its old one. A builder only that
 // device was using, or one every device has stopped asking for, lets go now, so its provider connection is
-// free at once (one-connection accounts). (mu held)
+// free at once (one-connection accounts). Two providers in the settings can be two accounts on one server address:
+// a channel opened on one account frees nothing on the other, and a device that plays on both (a media server
+// with two lines) has not left its channel there, so only builders of the same account are let go. (mu held)
 func releaseFor(provider, who, key string) {
 	for k, sg := range segmenters {
-		if sg.provider != provider || k == key {
+		if sg.provider != provider || k == key || accountOf(k) != accountOf(key) {
 			continue
 		}
 		alone := true
@@ -575,6 +577,12 @@ func releaseFor(provider, who, key string) {
 			sg.rd.signal()
 		}
 	}
+}
+
+// accountOf: the provider account a channel's key is for: its server address and login (see channelKey).
+func accountOf(key string) string {
+	_, rest, _ := strings.Cut(key, " ")
+	return rest[:strings.LastIndexByte(rest, '/')+1]
 }
 
 // providerHeaders: the provider's own answer headers for the channel's stream (see passHeaders), on an HLS answer

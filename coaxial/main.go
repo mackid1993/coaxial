@@ -894,12 +894,23 @@ type mark struct {
 var (
 	channels = map[string]*channel{}
 	lastDrop = map[string]float64{} // per provider: when one of its streams was last let go
-	lastOpen = map[string]opened{}  // per provider: when a channel was last opened, and which
+	lastOpen = map[string]opened{}  // per provider account (see lineOf): when a channel was last opened, and which
 )
 
 type opened struct {
 	at  float64
 	key string
+}
+
+// lineOf: what lastOpen is kept under: the provider account (its server address and login). Two providers in the
+// settings can be two accounts on one server address, and a channel opened on one account ends nothing on the
+// other: kept under the address alone, a channel opened on one stopped a dropped channel of the other from being
+// asked for again. (The same login written in twice is one account, as before.)
+func lineOf(provider string, f *front) string {
+	if f == nil {
+		return provider
+	}
+	return provider + " " + f.user
 }
 
 func allReaders() (n int) {
@@ -1120,7 +1131,7 @@ func (ch *channel) leave(rd *reader) { // (mu held)
 	if len(ch.readers) > 0 || ch.done {
 		return
 	}
-	now, op := mono(), lastOpen[ch.provider]
+	now, op := mono(), lastOpen[lineOf(ch.provider, ch.owner)]
 	tuning := !ch.hasBorn || now-ch.born < 5     // a player tunes in a channel's first seconds
 	moved := now-op.at < 1.0 && op.key != ch.key // it has just gone to another channel
 	if !tuning || moved {
@@ -1188,7 +1199,7 @@ func watched(ch *channel) bool {
 func reaskAllowed(ch *channel, since float64) bool {
 	mu.Lock()
 	defer mu.Unlock()
-	f, op := ch.owner, lastOpen[ch.provider]
+	f, op := ch.owner, lastOpen[lineOf(ch.provider, ch.owner)]
 	if f != nil && lockLeft(f.locked, f.lockWait, vpnChanged, mono()) > 0 {
 		return false
 	}
@@ -1360,7 +1371,7 @@ func tsSource(target string, h http.Header, a *askLog) source {
 			// account that allows one connection, or whose limit is not set) another channel of this provider opened
 			// in the last 15 s: asking would end that one.
 			mu.Lock()
-			ran, op := mono()-began, lastOpen[ch.provider]
+			ran, op := mono()-began, lastOpen[lineOf(ch.provider, ch.owner)]
 			// (an account that allows more than one connection: opening another channel did not end this one)
 			single := ch.owner == nil || ch.owner.limit() <= 1
 			// (a connection that went quiet is asked again however long it ran: with the old 60 s wait it always
@@ -1675,8 +1686,8 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	if first {
 		// Changing channel: the hang-up on the old one and this request arrive in either order. Channels of
 		// this provider nobody reads go now; a hang-up just behind gets 30 ms; the provider gets dropGap to see it.
-		was := lastOpen[provider]
-		lastOpen[provider] = opened{mono(), key}
+		was := lastOpen[lineOf(provider, rt.f)]
+		lastOpen[lineOf(provider, rt.f)] = opened{mono(), key}
 		releaseFor(provider, rt.client, key)
 		var mine []*channel
 		live := false
@@ -1705,7 +1716,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 		}
 		h, why := rt.f.admit(r.Context(), rt.client, want, false, opens, nil)
 		if h == nil {
-			unOpen(provider, key, was)
+			unOpen(lineOf(provider, rt.f), key, was)
 			if why != "" {
 				failed(w, rt.f.refusal(rt.client, want, why))
 			}

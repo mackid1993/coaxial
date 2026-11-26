@@ -296,9 +296,12 @@ type conn struct {
 
 // open: whether a channel or a session is open now under key, or being opened. A session nobody asked for in
 // its held time (hlsHeld, or longer for long pieces) no longer counts: whoever comes back to it is a new
-// connection. (mu held)
+// connection. A channel the provider answers itself has its session next to the key (see keepLive). (mu held)
 func open(key string) bool {
 	if ch := channels[key]; ch != nil && !ch.done {
+		return true
+	}
+	if s := sessions[key+" live"]; s != nil && mono()-s.used <= s.held() {
 		return true
 	}
 	s := sessions[key]
@@ -647,10 +650,11 @@ func (f *front) admit(ctx context.Context, who string, w what, follow bool, key 
 
 // unOpen: a channel refused by the rules was not opened after all: the channel opened before it stays the last
 // one opened (a stream the provider ends is asked for again only when no other channel was opened since).
-func unOpen(provider, key string, was opened) {
+// line: the provider account (see lineOf).
+func unOpen(line, key string, was opened) {
 	mu.Lock()
-	if lastOpen[provider].key == key {
-		lastOpen[provider] = was
+	if lastOpen[line].key == key {
+		lastOpen[line] = was
 	}
 	mu.Unlock()
 }
