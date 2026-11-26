@@ -21,9 +21,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The suite is split into slices that run side by side, each on its own runner and in its own process (the
+  # tests share the program's state, so they never run side by side inside one process). Slice 0 also runs
+  # gofmt and go vet. Every test runs in exactly one slice (.github/test-shard.sh deals them out by name).
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    name: test (slice ${{ matrix.shard }})
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,27 +42,12 @@ jobs:
       # not private ones: some tests need a fake provider at a public-looking address and skip themselves on a
       # private network. Tests that replay recorded feeds need files that are never in the repository; they
       # skip, and that is expected.
-      - name: gofmt, go vet and the full suite
+      - name: Slice ${{ matrix.shard }} of the suite
         run: |
           mkdir -p "$RUNNER_TEMP/out"
           docker network create --subnet 198.18.200.0/24 coaxial-tests
-          docker run --rm --network coaxial-tests -v "$PWD/coaxial:/src" -v "$RUNNER_TEMP/out:/out" -w /src golang:alpine sh -c '
-            set -e
-            unformatted=$(gofmt -l .)
-            if [ -n "$unformatted" ]; then echo "gofmt wants these files changed:"; echo "$unformatted"; exit 1; fi
-            go vet ./...
-            set +e
-            go test -count=1 -timeout 30m -v ./... > /out/out.txt 2>&1
-            code=$?
-            grep -E "^(--- FAIL|--- SKIP|FAIL|ok|panic:)" /out/out.txt
-            if [ $code -ne 0 ]; then
-              echo "::group::Output of the failed tests"
-              awk "/^=== RUN/{buf=\"\"} {buf=buf \$0 \"\n\"} /^--- FAIL/{printf \"%s\", buf}" /out/out.txt | tail -400
-              echo "::endgroup::"
-            fi
-            echo "passed: $(grep -c "^--- PASS" /out/out.txt), failed: $(grep -c "^--- FAIL" /out/out.txt), skipped: $(grep -c "^--- SKIP" /out/out.txt)"
-            exit $code
-          '
+          docker run --rm --network coaxial-tests -e SHARD=${{ matrix.shard }} -e SHARDS=8 \
+            -v "$PWD:/repo" -v "$RUNNER_TEMP/out:/out" -w /repo/coaxial golang:alpine sh /repo/.github/test-shard.sh
 
       # When the run fails: the program's own files this push changed (the tests left out) and the lines of each
       # change. A streaming test that fails says where the program held the video, as file:line; a line named in
