@@ -701,8 +701,14 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 	if p := f.speedOf(r, hd); p != nil && resp.StatusCode < 300 {
 		src = &throttle{r: src, ctx: r.Context(), p: p}
 	}
-	if cb := catchUpClock(hd, out, resp, src); cb != nil {
-		src = cb
+	if hd != nil && hd.w.kind == "ch" && r.Method == "GET" { // a catch-up read: one line when it ends, however it ends
+		t0, rg, st := time.Now(), out.Header.Get("Range"), resp.StatusCode
+		defer func() {
+			lg.Info().Str("device", who).Str("channel", hd.w.item).Str("range", rg).Int("status", st).Int64("bytes", c.bytes).
+				Float64("seconds", round1(time.Since(t0).Seconds())).Bool("cut", hd.wasCut()).
+				Msgf("catch-up read by %s on channel %s: %q, status %d, %.1f MB in %.1f s", who, hd.w.item, rg, st,
+					float64(c.bytes)/1048576, time.Since(t0).Seconds())
+		}()
 	}
 	if _, err := copyFlush(c, src); err != nil && (r.Context().Err() == nil || hd.wasCut()) {
 		panic(http.ErrAbortHandler) // cut off: the player must see a broken answer, not a short complete one
@@ -947,20 +953,3 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 }
 
 func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
-
-// catchUpClock: a catch-up answer (MPEG-TS, whatever Range the player asked for) with its clock made to run
-// straight through where the channel's archive starts its next stored file (see catchup.go). nil: passed on as it is.
-func catchUpClock(hd *hold, out *http.Request, resp *http.Response, src io.Reader) io.Reader {
-	if hd == nil || hd.w.kind != "ch" || out.Method != "GET" || resp.Header.Get("Content-Encoding") != "" {
-		return nil
-	}
-	start, total, ok := cuSpan(resp)
-	if !ok {
-		return nil
-	}
-	m := cuMapFor(out.Context(), out, total)
-	if m == nil {
-		return nil
-	}
-	return &cuBody{r: src, m: m, pos: start}
-}
