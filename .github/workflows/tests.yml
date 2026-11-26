@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # (the whole history: when tests fail, what this push changed is listed below)
 
       # The tests run in the same Go image the Dockerfile builds with, on a Docker network whose addresses are
       # not private ones: some tests need a fake provider at a public-looking address and skip themselves on a
@@ -34,21 +36,55 @@ jobs:
       # skip, and that is expected.
       - name: gofmt, go vet and the full suite
         run: |
+          mkdir -p "$RUNNER_TEMP/out"
           docker network create --subnet 198.18.200.0/24 coaxial-tests
-          docker run --rm --network coaxial-tests -v "$PWD/coaxial:/src" -w /src golang:alpine sh -c '
+          docker run --rm --network coaxial-tests -v "$PWD/coaxial:/src" -v "$RUNNER_TEMP/out:/out" -w /src golang:alpine sh -c '
             set -e
             unformatted=$(gofmt -l .)
             if [ -n "$unformatted" ]; then echo "gofmt wants these files changed:"; echo "$unformatted"; exit 1; fi
             go vet ./...
             set +e
-            go test -count=1 -timeout 30m -v ./... > /tmp/out.txt 2>&1
+            go test -count=1 -timeout 30m -v ./... > /out/out.txt 2>&1
             code=$?
-            grep -E "^(--- FAIL|--- SKIP|FAIL|ok|panic:)" /tmp/out.txt
+            grep -E "^(--- FAIL|--- SKIP|FAIL|ok|panic:)" /out/out.txt
             if [ $code -ne 0 ]; then
               echo "::group::Output of the failed tests"
-              awk "/^=== RUN/{buf=\"\"} {buf=buf \$0 \"\n\"} /^--- FAIL/{printf \"%s\", buf}" /tmp/out.txt | tail -400
+              awk "/^=== RUN/{buf=\"\"} {buf=buf \$0 \"\n\"} /^--- FAIL/{printf \"%s\", buf}" /out/out.txt | tail -400
               echo "::endgroup::"
             fi
-            echo "passed: $(grep -c "^--- PASS" /tmp/out.txt), failed: $(grep -c "^--- FAIL" /tmp/out.txt), skipped: $(grep -c "^--- SKIP" /tmp/out.txt)"
+            echo "passed: $(grep -c "^--- PASS" /out/out.txt), failed: $(grep -c "^--- FAIL" /out/out.txt), skipped: $(grep -c "^--- SKIP" /out/out.txt)"
             exit $code
           '
+
+      # When the run fails: the program's own files this push changed (the tests left out) and the lines of each
+      # change. A streaming test that fails says where the program held the video, as file:line; a line named in
+      # the test output that this push changed is pointed out. On a pull request the changes are counted from
+      # the branch it is meant for.
+      - name: What this push changed in the program
+        if: failure()
+        env:
+          BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$BEFORE"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base=$(git rev-parse -q --verify "HEAD^" || true) # (a new branch, or a run started by hand: the last commit)
+          fi
+          if [ -z "$base" ]; then echo "There is no earlier commit to compare with."; exit 0; fi
+          list="$RUNNER_TEMP/changed.txt"
+          rm -f "$list"
+          echo "The program's files changed from $(git rev-parse --short "$base") to $(git rev-parse --short HEAD), and the lines changed in each:"
+          git diff --unified=0 --no-color "$base" HEAD -- 'coaxial/*.go' ':(exclude)coaxial/*_test.go' | awk -v list="$list" '
+            /^--- /  { old = substr($2, 3) }
+            /^\+\+\+ / { file = substr($2, 3); if ($2 == "/dev/null") file = old " (taken out)" }
+            /^@@ /   { split($3, a, ","); from = substr(a[1], 2) + 0; n = (a[2] == "" ? 1 : a[2] + 0)
+                       if (n == 0) r = "(some taken out after " from ")"; else if (n == 1) r = from; else r = from "-" (from + n - 1)
+                       if (n > 0) print file, from, from + n - 1 > list
+                       if (!(file in lines)) order[++k] = file
+                       lines[file] = lines[file] (lines[file] == "" ? "" : ", ") r }
+            END      { for (i = 1; i <= k; i++) print "  " order[i] ": lines " lines[order[i]]; if (k == 0) print "  none" }'
+          if [ -s "$list" ] && [ -s "$RUNNER_TEMP/out/out.txt" ]; then
+            { grep -o -E "[A-Za-z0-9_]+\.go:[0-9]+" "$RUNNER_TEMP/out/out.txt" | grep -v "_test\.go:" || true; } | sort -u | awk -F: -v list="$list" '
+              BEGIN { while ((getline l < list) > 0) { split(l, p, " "); n++; f[n] = p[1]; a[n] = p[2] + 0; b[n] = p[3] + 0 } }
+                    { for (i = 1; i <= n; i++) if (f[i] == "coaxial/" $1 && $2 + 0 >= a[i] && $2 + 0 <= b[i]) { hit++; print "  " $1 ":" $2 " is named in the test output above, and this push changed that line." } }
+              END   { if (!hit) print "  No line named in the test output is one this push changed." }'
+          fi
