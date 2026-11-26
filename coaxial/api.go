@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"sort"
@@ -13,8 +14,51 @@ import (
 	"time"
 )
 
+// namesCount, namesAt: how many channel names are known for a provider, and when they were fetched (for the
+// page; both called with the lock held).
+func namesCount(port string) int {
+	if n := channelNames[port]; n != nil {
+		return len(n.names)
+	}
+	return 0
+}
+
+func namesAt(port string) string {
+	if n := channelNames[port]; n != nil && n.saved > 0 {
+		return time.Unix(n.saved, 0).UTC().Format(time.RFC3339)
+	}
+	return ""
+}
+
 func insideStatus(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
+	case "/names-refresh": // the button on a provider's card: fetch its channel names now (this contacts the provider)
+		port := r.URL.Query().Get("port")
+		mu.Lock()
+		f := fronts[port]
+		mu.Unlock()
+		switch {
+		case f == nil:
+			answer(w, 404, "", "no such provider\n")
+		case len(playingNow()) > 0: // (never while anything plays or records, button or not)
+			answer(w, 409, "", "playing\n")
+		default:
+			asked := time.Now().Unix()
+			select {
+			case <-fetchNames(port):
+			case <-time.After(100 * time.Second):
+			}
+			mu.Lock()
+			n := channelNames[port]
+			got, count := n != nil && n.saved >= asked, namesCount(port)
+			mu.Unlock()
+			if !got {
+				answer(w, 502, "", "not fetched\n")
+				return
+			}
+			lg.Info().Str("provider", f.name).Int("channels", count).Msgf("channel names for %s were fetched again, asked for on the page: %d channels", f.name, count)
+			answer(w, 200, "application/json", fmt.Sprintf(`{"channels":%d}`, count))
+		}
 	case "/healthz":
 		mu.Lock()
 		n := len(fronts)
@@ -58,15 +102,16 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 // statusData: the same facts the status page shows. Nothing here waits long: what is not known yet is
 // asked for in the background and is there the next time.
 func statusData() map[string]any {
-	if len(playingNow()) == 0 { // (both go through the VPN: never while anything plays or records; the last values show)
-		go whereAmI()
-		go kept("ping", 30, func(context.Context) (any, error) {
-			if ms, ok := vpnPing(); ok {
-				return ms, nil
-			}
-			return nil, errors.New("no answer")
-		})
-	}
+	// The exit address and the ping are shown at all times, playing or not: they are how a user sees that the
+	// VPN is the way out and how it is doing. Neither goes to a provider: one look-up of the address every 5
+	// minutes, three small packets every 30 s, and only while the page is open.
+	go whereAmI()
+	go kept("ping", 30, func(context.Context) (any, error) {
+		if ms, ok := vpnPing(); ok {
+			return ms, nil
+		}
+		return nil, errors.New("no answer")
+	})
 	var ports []string
 	mu.Lock()
 	for port := range fronts {
@@ -85,7 +130,6 @@ func statusData() map[string]any {
 			wait = 1500 * time.Millisecond
 		}
 		accts[port] = account(port, wait)
-		names(port)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -113,7 +157,8 @@ func statusData() map[string]any {
 		a := accts[port]
 		up := a != nil && a["answer"] == 200 && pyStr(a["auth"]) != "0"
 		provs = append(provs, map[string]any{"name": f.name, "port": atoi(port), "up": up, "live_tv": f.mode, "channels_open": open,
-			"connections_missing": f.bought == 0}) // (no number typed in: the limit is not kept, the page says so)
+			"connections_missing": f.bought == 0, // (no number typed in: the limit is not kept, the page says so)
+			"names":               namesCount(port), "names_at": namesAt(port)})
 	}
 	row := func(who, id, port, kind string, seconds float64, written int64) {
 		name := ""

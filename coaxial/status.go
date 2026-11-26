@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -281,32 +282,50 @@ func account(port string, wait time.Duration) map[string]any {
 	return st.last
 }
 
-// ---- channel names for the table: each provider's live list, kept 6 hours, fetched in the background
+// ---- channel names for the table. A provider's live list (one login and the whole list) is fetched at most
+// once a day, and only after nothing has played or recorded for an hour; or when the button on the provider's
+// card asks, which says first that it contacts the provider. The names are kept in a file, so a start does not
+// lose them, and the page itself never makes a provider hand over its list.
 type nameList struct {
-	at    float64
+	at    float64 // when a fetch was last tried (0: never)
+	saved int64   // when the names were fetched, in seconds since 1970 (0: never)
 	names map[string]string
 	busy  bool
 }
 
-var channelNames = map[string]*nameList{}
+var (
+	channelNames = map[string]*nameList{}
+	namesFile    string             // where the names are kept between starts ("": nowhere)
+	namesIdle    = 3600.0           // seconds with nothing playing before a fetch nobody asked for (a variable for the tests)
+	namesEvery   = int64(24 * 3600) // seconds between two such fetches for one provider
+	namesLook    = time.Minute      // how often namesLoop looks
+)
 
-func names(port string) chan struct{} {
-	// Each fetch is a login to the provider and its whole live list: as for the account (see account), never
-	// while anything plays or records. The table shows channel numbers until the names are fetched.
-	busy := len(playingNow()) > 0
+// savedNames: one provider's names in the file, under its port. The provider's name is kept beside them: a
+// port given to another provider does not show the old one's channels.
+type savedNames struct {
+	Provider string            `json:"provider"`
+	Saved    int64             `json:"saved"`
+	Names    map[string]string `json:"names"`
+}
+
+// fetchNames fetches one provider's channel names now, unless a fetch is already running. The caller has
+// decided that it may: nothing here looks at what is playing.
+func fetchNames(port string) chan struct{} {
+	done := make(chan struct{})
 	mu.Lock()
-	defer mu.Unlock()
 	n := channelNames[port]
 	if n == nil {
-		n = &nameList{at: -1e9}
+		n = &nameList{}
 		channelNames[port] = n
 	}
-	done := make(chan struct{})
-	if busy || n.busy || (len(n.names) > 0 && mono()-n.at < 6*3600) || (len(n.names) == 0 && mono()-n.at < 60) {
+	if n.busy {
+		mu.Unlock()
 		close(done)
 		return done
 	}
 	n.busy = true
+	mu.Unlock()
 	go func() {
 		defer close(done)
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -325,11 +344,102 @@ func names(port string) chan struct{} {
 		mu.Lock()
 		n.at, n.busy = mono(), false
 		if len(got) > 0 {
-			n.names = got
+			n.names, n.saved = got, time.Now().Unix() // (a new map each time: one handed out is never changed)
 		}
 		mu.Unlock()
+		if len(got) > 0 {
+			saveNames()
+			lg.Debug().Int("channels", len(got)).Msg("background: a provider's channel names were fetched for the status page")
+		} else {
+			lg.Warn().Msg("a provider's channel names could not be fetched; the status page shows the names it had")
+		}
 	}()
 	return done
+}
+
+func saveNames() {
+	if namesFile == "" {
+		return
+	}
+	out := map[string]savedNames{}
+	mu.Lock()
+	for port, n := range channelNames {
+		if f := fronts[port]; f != nil && len(n.names) > 0 {
+			out[port] = savedNames{f.name, n.saved, n.names}
+		}
+	}
+	mu.Unlock()
+	writeWhole(namesFile, out)
+}
+
+// loadNames: the names kept by the run before, for the providers that are still the same.
+func loadNames() {
+	if namesFile == "" {
+		return
+	}
+	data, err := os.ReadFile(namesFile)
+	if err != nil {
+		return
+	}
+	var in map[string]savedNames
+	if json.Unmarshal(data, &in) != nil {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for port, s := range in {
+		if f := fronts[port]; f != nil && f.name == s.Provider && len(s.Names) > 0 {
+			channelNames[port] = &nameList{saved: s.Saved, names: s.Names}
+		}
+	}
+}
+
+// namesDue: a provider whose names are a day old or were never fetched, if any (now: seconds since 1970). One
+// that could not be fetched is left alone for namesIdle seconds.
+func namesDue(now int64) string {
+	mu.Lock()
+	defer mu.Unlock()
+	var ports []string
+	for port := range fronts {
+		ports = append(ports, port)
+	}
+	sort.Strings(ports)
+	for _, port := range ports {
+		n := channelNames[port]
+		if n == nil {
+			return port
+		}
+		if !n.busy && now-n.saved >= namesEvery && (n.at == 0 || mono()-n.at >= namesIdle) {
+			return port
+		}
+	}
+	return ""
+}
+
+// namesLoop fetches the names that are due, one provider at a look, and only once nothing has played or
+// recorded for namesIdle seconds (an hour). A start counts as "something just played": a channel that was
+// playing when the program was started again is on its way back.
+func namesLoop(stop <-chan struct{}) {
+	quiet := mono()
+	t := time.NewTicker(namesLook)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+		}
+		if len(playingNow()) > 0 {
+			quiet = mono()
+			continue
+		}
+		if mono()-quiet < namesIdle {
+			continue
+		}
+		if port := namesDue(time.Now().Unix()); port != "" {
+			<-fetchNames(port)
+		}
+	}
 }
 
 const style = `
@@ -403,27 +513,12 @@ func statusPage(w http.ResponseWriter, r *http.Request) {
 	var ping float64
 	var pinged bool
 	var wg sync.WaitGroup
-	wg.Add(2 * len(good))
-	if len(playingNow()) == 0 { // (both go through the VPN: never while anything plays or records)
-		wg.Add(2)
-		go func() { defer wg.Done(); where = whereAmI() }()
-		go func() { defer wg.Done(); ping, pinged = vpnPing() }()
-	} else { // the last exit address looked up, no ping
-		mu.Lock()
-		if k := keptValues["where"]; k != nil {
-			where = k.value
-		}
-		mu.Unlock()
-	}
+	wg.Add(len(good))
+	wg.Add(2) // (the exit address and the ping are shown at all times: see statusData)
+	go func() { defer wg.Done(); where = whereAmI() }()
+	go func() { defer wg.Done(); ping, pinged = vpnPing() }()
 	for i, p := range good {
 		go func() { defer wg.Done(); accts[i] = account(pyStr(field(p, "port")), 6*time.Second) }()
-		go func() { // names wait at most 2 s: missing ones show as ids and fill in on a later refresh
-			defer wg.Done()
-			select {
-			case <-names(pyStr(field(p, "port"))):
-			case <-time.After(2 * time.Second):
-			}
-		}()
 	}
 	wg.Wait()
 

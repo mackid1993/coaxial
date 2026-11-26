@@ -443,7 +443,10 @@ func (l *launcher) probeTick(quiet time.Duration) {
 	}
 	// Nothing is pinged while anything plays or records, nor until nothing has played for quietSpell: the network
 	// is left to the streams, and to a viewer on its way back. The page's button still runs a round at any time.
-	if quiet < quietSpell && !asked {
+	// The one exception is the first round after a start: the page's table of servers would otherwise stay empty
+	// for as long as something plays. It is tried once (last is set whether or not it got answers).
+	first := at.IsZero() && last.IsZero()
+	if quiet < quietSpell && !asked && !first {
 		return
 	}
 	if pickKey(s.vpnEnv()) == "" {

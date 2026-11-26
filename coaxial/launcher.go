@@ -425,6 +425,7 @@ func (l *launcher) startProxy() {
 	cmd := exec.Command(self, "proxy")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader(input), os.Stdout, os.Stderr
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GOMEMLIMIT=384MiB"} // (no VPN key, no settings: it is handed what it needs)
+	cmd.Env = append(cmd.Env, "COAXIAL_NAMES_FILE="+filepath.Join(l.dir, "names.json"))
 	l.mu.Lock()
 	if !l.vpnUpAt.IsZero() {
 		cmd.Env = append(cmd.Env, "COAXIAL_VPN_UP_AT="+strconv.FormatInt(l.vpnUpAt.Unix(), 10))
@@ -580,6 +581,7 @@ func (l *launcher) listenUI(n int) error {
 	mux.HandleFunc("/api/vpn/program/check", l.apiProgramCheck)
 	mux.HandleFunc("/api/vpn/program/update", l.apiProgramUpdate)
 	mux.HandleFunc("/api/port/try", apiPortTry)
+	mux.HandleFunc("/api/provider/names", l.apiNames)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 404, map[string]any{"ok": false}) })
 	page, _ := fs.Sub(uiFiles, "ui")
 	files := http.FileServer(http.FS(page))
@@ -633,6 +635,33 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // askProxy asks the proxy part (inside the container, over its own socket).
+// apiNames: "refresh channel names" on a provider's card. The proxy part fetches that provider's live list now
+// (one login and the list) and keeps the names. Not while anything plays or records: the page says so.
+func (l *launcher) apiNames(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeJSON(w, 405, map[string]any{"ok": false})
+		return
+	}
+	port := r.URL.Query().Get("port")
+	if _, err := strconv.Atoi(port); err != nil {
+		writeJSON(w, 400, map[string]any{"ok": false})
+		return
+	}
+	data, ok := askProxy("/names-refresh?port="+port, 110*time.Second)
+	switch {
+	case ok:
+		var v struct {
+			Channels int `json:"channels"`
+		}
+		json.Unmarshal(data, &v)
+		writeJSON(w, 200, map[string]any{"ok": true, "channels": v.Channels})
+	case strings.TrimSpace(string(data)) == "playing":
+		writeJSON(w, 409, map[string]any{"ok": false, "message": "Something is playing or recording. Try again when nothing is."})
+	default:
+		writeJSON(w, 502, map[string]any{"ok": false, "message": "The provider did not hand over its channel list."})
+	}
+}
+
 func askProxy(path string, wait time.Duration) ([]byte, bool) {
 	client := &http.Client{Timeout: wait, Transport: &http.Transport{DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

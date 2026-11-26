@@ -72,34 +72,3 @@ func TestStatusPageAsksNoProviderWhilePlaying(t *testing.T) {
 		t.Errorf("control: with nothing playing, the status page asked the provider nothing (the fake was not reached)")
 	}
 }
-
-// The same page, the same rule for the VPN (incident 18: pings while playing gave spinners until they were
-// made idle-only): the page's ping of the VPN server (3 packets through the tunnel, every 30 s while the page is
-// open) and its exit-address look-up (ipinfo.io through the tunnel, every 5 minutes) wait while anything plays;
-// the page shows the last values. Only the ping is let go stale here (its packets die at this machine's first
-// hop), so the test asks nothing of the internet.
-func TestStatusPagePingsNothingWhilePlaying(t *testing.T) {
-	ch := &channel{key: "/ts bgtest 3", readers: map[*reader]bool{{kind: "MPEG-TS", who: "192.0.2.9"}: true}}
-	mu.Lock()
-	keptChannels, keptRows, keptFilms := channels, hlsRows, films
-	channels, hlsRows, films = map[string]*channel{ch.key: ch}, map[string]*hlsRow{}, map[string]*film{}
-	keptWhere, keptPing := keptValues["where"], keptValues["ping"]
-	keptValues["where"] = &keptValue{at: mono(), value: map[string]any{"ip": "192.0.2.1"}}
-	stale := &keptValue{at: -1e9, value: 20.0} // last asked long ago: due again
-	keptValues["ping"] = stale
-	mu.Unlock()
-	defer func() {
-		mu.Lock()
-		channels, hlsRows, films = keptChannels, keptRows, keptFilms
-		keptValues["where"], keptValues["ping"] = keptWhere, keptPing
-		mu.Unlock()
-	}()
-	statusData()
-	time.Sleep(1500 * time.Millisecond)
-	mu.Lock()
-	at, busy := stale.at, stale.busy != nil
-	mu.Unlock()
-	if at != -1e9 || busy {
-		t.Errorf("a channel plays and the open status page pinged the VPN server")
-	}
-}

@@ -937,6 +937,9 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 		say("ready, for %d provider%s", len(fronts), plural(len(fronts), "", "s"))
 		say("STATUS PAGE: open http://<this machine's address>:%s/status in a web browser", first)
 	}
+	namesFile = os.Getenv("COAXIAL_NAMES_FILE") // (channel names for the status page, kept between starts)
+	loadNames()
+	go namesLoop(stop)
 	if ln, err := net.Listen("unix", insideSocket); err == nil { // the launcher asks here what is playing
 		isrv := &http.Server{Handler: http.HandlerFunc(insideStatus), ReadHeaderTimeout: 10 * time.Second, ErrorLog: log.New(io.Discard, "", 0)}
 		servers = append(servers, isrv)

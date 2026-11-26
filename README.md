@@ -394,7 +394,9 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
 - **Health check.** Docker shows the container as healthy when it is set up, the VPN is up and the provider part
   answers.
 - **Status page.** `http://<this machine>:<any provider's port>/status` is a plain page with the VPN's exit address,
-  each provider's account status and what is playing. The exit address is asked of `ipinfo.io` through the VPN.
+  each provider's account status and what is playing. The exit address is asked of `ipinfo.io` through the VPN. Channel names come from each
+  provider's channel list: fetched once a day after an hour with nothing playing, or with the button on the provider's
+  card, and kept in `names.json` in the config folder.
 - **The log.** See [The log](#the-log).
 
 ## The log

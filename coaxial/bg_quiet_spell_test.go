@@ -22,6 +22,15 @@ func TestPingRoundWaitsForAQuietSpell(t *testing.T) {
 	fakeServers(t, l)
 	l.pick = picked{Key: pickKey(l.set.vpnEnv()), Env: "SERVER_NAMES=NY#1", Name: "NY#1"} // (on the best one: nothing to move to)
 
+	// The first round after a start runs at once, so the page's table is never empty for long; only that one.
+	l.probeTick(0)
+	if pings.Load() == 0 {
+		t.Errorf("the first round after a start did not run")
+	}
+	pings.Store(0)
+	l.mu.Lock()
+	l.probeAt = time.Now().Add(-2 * time.Hour) // (a round is due again)
+	l.mu.Unlock()
 	l.probeTick(30 * time.Second)
 	if n := pings.Load(); n != 0 {
 		t.Errorf("nothing has played for 30 s and %d servers were pinged: the quiet spell (%v) was not waited for", n, quietSpell)

@@ -198,6 +198,20 @@
     chk.classList.toggle('busy', progBusy === 'check'); upd.classList.toggle('busy', progBusy === 'update');
     chk.disabled = upd.disabled = !!progBusy;
   }
+  // "Refresh channel names" on a provider's card: says what it does first, then asks Coaxial to fetch them.
+  async function namesAct(el) {
+    var btn = $('.pn-btn', el);
+    if (btn.disabled) return;
+    if (!window.confirm('Refresh the channel names for ' + (el.dataset.name || 'this provider') + ' now?\n\nThis contacts your provider once: one login and its channel list. Coaxial also does this by itself once a day, after an hour with nothing playing.')) return;
+    btn.disabled = true; btn.classList.add('busy');
+    try {
+      var r = await api('POST', '/api/provider/names?port=' + encodeURIComponent(el.dataset.port));
+      var done = r.ok && !!r.data && r.data.ok !== false;
+      toast(done ? 'Fetched ' + r.data.channels + ' channel names.' : (r.data && r.data.message) || 'The channel names could not be fetched.', !done);
+    } catch (e) { toast('Could not reach Coaxial.', true); }
+    btn.disabled = false; btn.classList.remove('busy');
+    if (typeof poll === "function") poll();
+  }
   async function programAct(kind) {
     if (progBusy) return;
     if (kind === 'update' && !window.confirm('Update the VPN client now? The VPN reconnects, so anything playing stops for a few seconds.')) return;
@@ -294,7 +308,11 @@
           h('div', null, h('dt', { text: 'Port' }), h('dd', { class: 'mono' })),
           h('div', null, h('dt', { text: 'Format' }), h('dd')),
           h('div', null, h('dt', { text: 'Open channels' }), h('dd'))),
-        h('p', { class: 'prov-warn', hidden: true, text: 'Enter how many connections you bought' }));
+        h('p', { class: 'prov-warn', hidden: true, text: 'Enter how many connections you bought' }),
+        h('div', { class: 'prov-names' }, h('span', { class: 'pn-text' }),
+          h('button', { type: 'button', class: 'btn sm pn-btn', text: 'Refresh channel names',
+            title: 'Contacts this provider once for its channel list. Also done by itself once a day, after an hour with nothing playing.' })));
+      $('.pn-btn', el).addEventListener('click', function () { namesAct(el); });
       return el;
     }, function (el, p) {
       var dd = el.querySelectorAll('dd'), pill = $('.pill', el), up = p.up ? '1' : '0';
@@ -306,6 +324,8 @@
       setText(dd[1], FORMAT[p.live_tv] || String(p.live_tv || 'n/a').toUpperCase());
       setText(dd[2], String(p.channels_open || 0));
       $('.prov-warn', el).hidden = !p.connections_missing;
+      el.dataset.port = String(p.port); el.dataset.name = p.name || '';
+      setText($('.pn-text', el), p.names ? p.names + ' channel names' + (p.names_at ? ', fetched ' + when(p.names_at) : '') : 'Channel names not fetched yet');
     });
 
     // Playing
@@ -326,10 +346,11 @@
       var td = el.children;
       setText(td[0], p.device || '');
       td[0].title = p.device || '';
-      setText($('.ch-name', el), p.channel_name || 'Channel ' + p.channel_id);
-      td[1].title = (p.channel_name || 'Channel ' + p.channel_id) + (p.channel_name && p.channel_id ? ' #' + p.channel_id : '');
+      setText($('.ch-name', el), p.channel_name || 'Name not fetched');
+      $('.ch-name', el).classList.toggle('unknown', !p.channel_name);
+      td[1].title = p.channel_name ? p.channel_name + (p.channel_id ? ' #' + p.channel_id : '') : 'Channel #' + p.channel_id + ': press "Refresh channel names" on the provider to see its name';
       td[2].title = p.provider || '';
-      setText($('.ch-id', el), p.channel_name && p.channel_id ? '#' + p.channel_id : '');
+      setText($('.ch-id', el), p.channel_id ? '#' + p.channel_id : '');
       setText($('.pv-name', el), p.provider || '');
       var pi = provs.findIndex(function (q) { return q.name === p.provider; });
       $('.tap', el).style.setProperty('--c', pi < 0 ? '' : RING[pi % RING.length]);
