@@ -1012,6 +1012,9 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 		say("STATUS PAGE: open http://<this machine's address>:%s/status in a web browser", first)
 	}
 	namesFile = os.Getenv("COAXIAL_NAMES_FILE") // (channel names for the status page, kept between starts)
+	if fd, err := strconv.Atoi(os.Getenv("COAXIAL_NAMES_FD")); err == nil && fd > 2 {
+		namesFD = os.NewFile(uintptr(fd), "names.json") // (handed over open: see namesOpen)
+	}
 	loadNames()
 	go namesLoop(stop)
 	if ln, err := net.Listen("unix", insideSocket); err == nil { // the launcher asks here what is playing

@@ -438,6 +438,11 @@ func (l *launcher) startProxy() {
 	if os.Getuid() == 0 { // it needs no privileges
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 65534, Gid: 65534}
 		namesHome(l.dir, 65534, 65534)
+		if f := namesOpen(l.dir); f != nil {
+			cmd.ExtraFiles = []*os.File{f} // (file 3 in the proxy part)
+			cmd.Env = append(cmd.Env, "COAXIAL_NAMES_FD=3")
+			defer f.Close() // (the proxy part holds its own once started)
+		}
 	}
 	c := &child{cmd: cmd, done: make(chan struct{})}
 	endTries() // (a provider's port tried by the page a moment ago)
@@ -475,6 +480,18 @@ func namesHome(dir string, uid, gid int) string {
 		os.Chown(file, uid, gid)
 	}
 	return file
+}
+
+// namesOpen: the names file opened by the launcher and handed to the proxy part already open. A settings
+// folder only its owner may enter (Unraid makes appdata folders root's, mode 0700) keeps the proxy part from
+// reaching any file in it, its own included; an open file needs no way in. nil: it could not be opened.
+func namesOpen(dir string) *os.File {
+	f, err := os.OpenFile(filepath.Join(dir, "names.json"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		warn("the channel names file could not be opened (%v): names will not be kept between starts", err)
+		return nil
+	}
+	return f
 }
 
 // lookAgain: how long after a failed look at the VPN the second look is taken (a variable for the tests).

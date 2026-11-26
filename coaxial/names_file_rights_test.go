@@ -67,3 +67,50 @@ func TestProxyPartKeepsChannelNamesInTheSettingsFolder(t *testing.T) {
 		t.Errorf("files were left behind in the settings folder: %v", list)
 	}
 }
+
+// Unraid makes an appdata folder root's with mode 0700: only root may enter it. The proxy part could not reach
+// names.json there at all, though the file was its own, and every start (every image pulled) lost the names.
+// The launcher now opens the file and hands it over open.
+func TestProxyPartKeepsChannelNamesInAClosedSettingsFolder(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("needs root, as the launcher is in the container")
+	}
+	dir, err := os.MkdirTemp("", "coaxial-config-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	os.Chmod(dir, 0o700) // the folder as Unraid makes it
+	namesHome(dir, 65534, 65534)
+	asProxyPart(func() { _, err = os.ReadFile(filepath.Join(dir, "names.json")) })
+	if err == nil {
+		t.Skip("rights over files cannot be given up here: the test would prove nothing")
+	}
+
+	const port = "18775"
+	_, undo := namesProvider(t, port)
+	defer undo()
+	<-fetchNames(port)
+	keptFile, keptFD := namesFile, namesFD
+	defer func() { namesFile, namesFD = keptFile, keptFD }()
+	namesFile, namesFD = filepath.Join(dir, "names.json"), namesOpen(dir) // what the launcher hands over
+	if namesFD == nil {
+		t.Fatal("the launcher could not open the names file")
+	}
+	defer namesFD.Close()
+	asProxyPart(saveNames)
+	mu.Lock()
+	got := len(channelNames[port].names)
+	delete(channelNames, port)
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("fetched %d names, want 2", got)
+	}
+	asProxyPart(loadNames)
+	mu.Lock()
+	n := channelNames[port]
+	mu.Unlock()
+	if n == nil || n.names["1"] != "One" || n.names["2"] != "Two" {
+		t.Fatalf("in a settings folder only root may enter, the channel names were gone after a start (%+v)", n)
+	}
+}

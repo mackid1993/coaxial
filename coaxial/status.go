@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -301,10 +302,14 @@ type nameList struct {
 var (
 	channelNames = map[string]*nameList{}
 	namesFile    string             // where the names are kept between starts ("": nowhere)
+	namesFD      *os.File           // the same file, handed over open by the launcher (nil: none; see namesOpen)
 	namesIdle    = 3600.0           // seconds with nothing playing before a fetch nobody asked for (a variable for the tests)
 	namesEvery   = int64(24 * 3600) // seconds between two such fetches for one provider
 	namesLook    = time.Minute      // how often namesLoop looks
 )
+
+// namesW: one write of the names file at a time (it is emptied, then written).
+var namesW sync.Mutex
 
 // savedNames: one provider's names in the file, under its port. The provider's name is kept beside them: a
 // port given to another provider does not show the old one's channels.
@@ -363,7 +368,7 @@ func fetchNames(port string) chan struct{} {
 }
 
 func saveNames() {
-	if namesFile == "" {
+	if namesFile == "" && namesFD == nil {
 		return
 	}
 	out := map[string]savedNames{}
@@ -374,6 +379,19 @@ func saveNames() {
 		}
 	}
 	mu.Unlock()
+	if namesFD != nil { // (written in place through the open file: the folder may be closed to this part)
+		data, _ := json.MarshalIndent(out, "", "  ")
+		namesW.Lock()
+		err := namesFD.Truncate(0)
+		if err == nil {
+			_, err = namesFD.WriteAt(append(data, '\n'), 0)
+		}
+		namesW.Unlock()
+		if err != nil {
+			lg.Warn().Msgf("the channel names could not be kept in their file (%v): the next start will not have them", err)
+		}
+		return
+	}
 	if writeWhole(namesFile, out) == nil {
 		return
 	}
@@ -387,10 +405,16 @@ func saveNames() {
 
 // loadNames: the names kept by the run before, for the providers that are still the same.
 func loadNames() {
-	if namesFile == "" {
+	var data []byte
+	var err error
+	switch {
+	case namesFD != nil:
+		data, err = io.ReadAll(io.NewSectionReader(namesFD, 0, 64<<20))
+	case namesFile != "":
+		data, err = os.ReadFile(namesFile)
+	default:
 		return
 	}
-	data, err := os.ReadFile(namesFile)
 	if err != nil {
 		return
 	}
