@@ -526,7 +526,7 @@ func statusPage(w http.ResponseWriter, r *http.Request) {
 	}
 	add(`</div><div class="card"><h2>The Live TV setting</h2>Each provider has a Live TV setting on the settings page that says how your players watch its live channels.<ul><li><code>&quot;live_tv&quot;: &quot;hls&quot;</code> Your players use <b>HLS</b>. Everyone on a channel shares one connection to the provider, so you can watch and record the same channel at once. A recorder that asks for MPEG-TS is given the same video as your players.</li><li><code>&quot;live_tv&quot;: &quot;ts&quot;</code> Your players use <b>MPEG-TS</b>. You get the provider&#39;s own stream, and everyone on a channel shares one connection to the provider. A player that asks for HLS instead is given HLS built from that same stream, so the provider still sees one connection.</li></ul><p class="note">Pick the one that matches the live format chosen in your players and in your playlist manager if you use one. They have to agree. If a provider only offers one of the two, use that one.</p></div>`)
 
-	add(`<div class="card"><h2>Playing right now</h2>%s<p class="note">Live channels only. Movies, series and catch-up are not counted.</p></div>`, playing(provName))
+	add(`<div class="card"><h2>Playing right now</h2>%s<p class="note">Live channels, and catch-up watched as HLS. Movies, series and other catch-up are not counted.</p></div>`, playing(provName))
 	add(`<div class="card"><h2>Still stuck?</h2>The container keeps one log. Run the command on the machine it runs on, with the name you gave the container.<ul><li><code>docker logs coaxial</code></li><li>Lines with <code>coaxial:</code> in them are this program&#39;s: every provider that was found at the start, and any that was left out and why; who is watching what, when a live channel is opened and closed, how long the provider took to send the first video, and anything that went wrong with a channel; and one <code>access</code> line for every request (never the address asked for).</li><li>Problems are <code>WRN</code> lines: every time a provider answered with an error (such as 403 or 404) or did not answer, and every live channel that got nothing from its provider for 15 s or more. Search for them with <code>docker logs coaxial 2&gt;&amp;1 | grep WRN</code>. How much is written is the Log detail setting.</li><li>The other lines are the VPN&#39;s own. They say whether the tunnel is up and where it comes out.</li></ul></div><footer>Coaxial</footer></main></body></html>`)
 	w.Header().Set("Cache-Control", "no-store")
 	answer(w, map[bool]int{true: 200, false: 503}[working], "text/html; charset=utf-8", o.String())
@@ -559,7 +559,7 @@ func playing(provName map[string]string) string {
 	}
 	for _, h := range hlsRows {
 		if now-h.last <= 30 {
-			rows = append(rows, row{h.who, h.id, h.port, h.provider, "HLS", hms(h.last - h.first), "-"})
+			rows = append(rows, row{h.who, h.id, h.port, h.provider, h.format(), hms(h.last - h.first), "-"})
 		}
 	}
 	for i, x := range rows { // channel names, provider NAMEs

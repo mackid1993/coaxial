@@ -10,9 +10,9 @@ import (
 
 // A player is sent to this proxy by another server (a guide server that redirects every stream here), asks
 // for a catch-up as HLS, and before playing it checks that the first piece the playlist names can be had. It
-// works that piece's address out from the address it first asked, the other server's. A provider's own
-// catch-up playlist names its pieces in full, so the check finds them wherever the player started from. The
-// playlist this proxy hands out must do the same: every piece is named in full, at the proxy's own address.
+// works that piece's address out from the address it first asked, the other server's. Straight at a provider
+// a piece named by path alone still leads to the provider. Behind another server it leads to that server. So
+// the playlist this proxy hands out names every piece in full, at the proxy's own address.
 // Named by path alone ("/__cdn/..."), the piece was looked for on the other server, was not there, and the
 // catch-up was taken for missing.
 func TestCatchUpPlaylistNamesPiecesInFull(t *testing.T) {

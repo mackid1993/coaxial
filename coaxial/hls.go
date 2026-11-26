@@ -424,6 +424,15 @@ type hlsRow struct {
 	first, last             float64
 	who, id, provider, port string
 	bytes                   int64 // video pieces sent to this player on this channel
+	catchUp                 bool  // a catch-up watched as HLS (see catchUpRead), not a live channel
+}
+
+// format: what the status list calls the row.
+func (h *hlsRow) format() string {
+	if h.catchUp {
+		return "HLS catch-up"
+	}
+	return "HLS"
 }
 
 // cdnAddress: this proxy's address for a full http(s) address ("" for anything else).
@@ -550,11 +559,12 @@ func askedAt(r *http.Request) string {
 }
 
 // fullAddresses: a complete playlist (a catch-up's, a film's: it ends with #EXT-X-ENDLIST) with every address
-// in it written in full, at the address the player reached this proxy at. A provider's own playlists name
-// their pieces in full, and players count on that: an app that was sent here by another server (a guide
-// server that redirects streams to this proxy) and checks a catch-up's first piece works the piece's address
-// out from the address it first asked, the other server's, where "/__cdn/..." leads nowhere. The catch-up
-// was then taken for missing. A live playlist is left as it is.
+// in it written in full, at the address the player reached this proxy at. A provider may name its pieces by
+// path alone, and straight at the provider that works: the path leads back to the provider's own server.
+// Behind another server it does not. An app that was sent here by another server (a guide server that
+// redirects streams to this proxy) and checks a catch-up's first piece works the piece's address out from
+// the address it first asked, the other server's, where "/__cdn/..." leads nowhere. The catch-up was then
+// taken for missing. A live playlist is left as it is.
 func fullAddresses(text, at string) string {
 	if at == "" || !strings.Contains(text, "#EXT-X-ENDLIST") {
 		return text
@@ -775,6 +785,43 @@ func (f *front) keepDirect(key, target, who string, want what, data []byte) {
 	mu.Lock()
 	sessions[key+" direct"] = s
 	mu.Unlock()
+}
+
+// catchUpRead: device who asked for a piece of a catch-up watched as HLS (a session kept by keepDirect). Its
+// playlist is complete and asked for once, so the pieces are all that shows it is being watched: they give it a
+// row in the status list, and it counts as playing (playingNow), until no piece of it was asked for in 30 s, as
+// a live HLS channel does by its playlist requests. Without the row nothing showed it, and what waits while
+// anything plays knew of it only where the pieces came typed as video. One log line when the reading starts and
+// one when it ends, none per piece. Nobody is asked anything. (mu held)
+func (f *front) catchUpRead(who, id string) {
+	now, rk := mono(), who+" "+f.base+" "+id+" catch-up"
+	if row := hlsRows[rk]; row != nil && now-row.last <= 30 {
+		row.last = now
+		return
+	}
+	row := &hlsRow{first: now, last: now, who: who, id: id, provider: f.base, port: f.port, catchUp: true}
+	hlsRows[rk] = row
+	lg.Info().Str("device", who).Str("channel", id).Str("provider", f.name).
+		Msgf("%s started reading catch-up of channel %s as HLS (%s)", who, id, hostOf(f.base))
+	go func() { // (looks again when the row would be over, and every few seconds until then)
+		for {
+			mu.Lock()
+			left := row.last + 30 - mono()
+			if left < 0 {
+				if hlsRows[rk] == row {
+					delete(hlsRows, rk)
+				}
+				sent, took := row.bytes, row.last-row.first
+				mu.Unlock()
+				lg.Info().Str("device", who).Str("channel", id).Str("provider", f.name).Float64("mb", mb(sent)).
+					Float64("seconds", round1(took)).
+					Msgf("%s stopped reading catch-up of channel %s as HLS: %.1f MB in %s", who, id, mb(sent), hms(took))
+				return
+			}
+			mu.Unlock()
+			time.Sleep(secs(math.Min(left, 2) + 0.01))
+		}
+	}()
 }
 
 func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {

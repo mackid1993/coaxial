@@ -418,6 +418,9 @@ func (f *front) inUse(uri, who string) bool {
 			if s.who != nil && !isLoop(who) {
 				s.who[who] = mono()
 			}
+			if strings.HasSuffix(k, " direct") && s.what.kind == "ch" && !isLoop(who) { // (a catch-up's: it is being watched)
+				f.catchUpRead(who, s.what.item)
+			}
 		}
 	}
 	return part
@@ -427,6 +430,9 @@ func (f *front) inUse(uri, who string) bool {
 func (f *front) pieceRow(uri, who string) *hlsRow {
 	for k, s := range sessions {
 		if strings.HasPrefix(k, f.base+" ") && s.pieces[uri] {
+			if strings.HasSuffix(k, " direct") { // (a catch-up's: see catchUpRead)
+				return hlsRows[who+" "+f.base+" "+s.what.item+" catch-up"]
+			}
 			return hlsRows[who+" "+f.base+" "+channelID(strings.TrimPrefix(k, f.base+" "))]
 		}
 	}
