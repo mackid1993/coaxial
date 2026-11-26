@@ -28,9 +28,10 @@ import (
 // leadFeed: a live stream and when the provider makes each piece of it available.
 type leadFeed struct {
 	data []byte
-	at   []float64 // seconds after the start when piece k is sent on the first connection
-	end  []int     // where piece k ends in data
-	back int       // a connection opened later starts this many bytes behind the newest piece
+	at   []float64  // seconds after the start when piece k is sent on the first connection
+	end  []int      // where piece k ends in data
+	back int        // a connection opened later starts this many bytes behind the newest piece
+	late *lateWatch // if set: told what the first connection has sent (the first player is sent it as it is)
 }
 
 // lumpStart: the first piece at or after t that follows a pause of a second or more.
@@ -159,9 +160,13 @@ func leadProvider(fd *leadFeed, start time.Time, dropAt float64, asked *atomic.I
 	return func(w http.ResponseWriter, r *http.Request) {
 		n := asked.Add(1)
 		w.Header().Set("Content-Type", "video/mp2t")
+		sent := 0
 		send := func(b []byte) bool {
 			_, err := w.Write(b)
 			w.(http.Flusher).Flush()
+			if sent += len(b); n == 1 && err == nil {
+				fd.late.sent(sent)
+			}
 			return err == nil
 		}
 		from, k := 0, 0
@@ -217,6 +222,7 @@ func watch(ctx context.Context, t *testing.T, url string, start time.Time, v *le
 		return
 	}
 	defer resp.Body.Close()
+	resp.Body = lateFor(t).reads(resp.Body, 0) // (counted, if this is the test's first player)
 	var part []byte
 	pcrPID, last, have, started := -1, 0.0, 0.0, false
 	buf := make([]byte, 64<<10)
@@ -314,6 +320,7 @@ func TestLiveViewersKeepVideo(t *testing.T) {
 		fd, what = replayFeed(t, path), "recorded stream"
 	}
 	const dropAt, joinAt, end = reopenAfter + 3.0, 2.0, reopenAfter + 30.0
+	fd.late = lateFor(t)
 	start := time.Now()
 	var asked atomic.Int32
 	prov := httptest.NewServer(leadProvider(fd, start, dropAt, &asked))
@@ -322,6 +329,7 @@ func TestLiveViewersKeepVideo(t *testing.T) {
 		player{User: "tv", Password: "easy"})
 	srv := httptest.NewServer(f)
 	defer func() {
+		whereIfFailed(t)
 		srv.CloseClientConnections()
 		srv.Close()
 		mu.Lock()

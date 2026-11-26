@@ -111,7 +111,7 @@ func TestHLSBridgeUntouched(t *testing.T) {
 	jump, _, _ := ecFirstJump(ecStamps(data))
 	data = data[:jump] // (the first episode only)
 	if out := throughHLSBridge(t, hlsCut(data, 188*800, -1)); !bytes.Equal(out, data) {
-		t.Fatalf("synthetic: a stream with no clock jump was changed (%d bytes in, %d out)", len(data), len(out))
+		t.Fatalf("synthetic: a stream with no clock jump was changed (%d bytes in, %d out): %s", len(data), len(out), diffAt(data, out))
 	}
 	path := os.Getenv("COAXIAL_REPLAY_TS")
 	if path == "" {
@@ -122,6 +122,6 @@ func TestHLSBridgeUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out := throughHLSBridge(t, hlsCut(data, 4<<20, -1)); !bytes.Equal(out, data) {
-		t.Fatalf("recorded: a stream with no clock jump was changed (%d bytes in, %d out)", len(data), len(out))
+		t.Fatalf("recorded: a stream with no clock jump was changed (%d bytes in, %d out): %s", len(data), len(out), diffAt(data, out))
 	}
 }

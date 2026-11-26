@@ -145,6 +145,7 @@ func limFront(t *testing.T, fp *fakeProv, mode string, connections number, a adv
 		}
 		mu.Unlock()
 	})
+	whereOnFail(t) // (registered last, so it looks first: before the cleanup above closes and drops everything)
 	return f, srv.URL
 }
 

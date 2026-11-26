@@ -101,7 +101,9 @@ func TestHLSPieceQuietServerAskedAgain(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("playlist: %d", status)
 	}
+	done := within(t, secs(pieceWait+4), "the piece")
 	status, data, took := playerGet(t, base, pieceOf(t, list))
+	done()
 	if status != 200 || len(data) != 1<<20/188*188 {
 		t.Fatalf("piece: status %d, %d bytes", status, len(data))
 	}
@@ -129,7 +131,9 @@ func TestHLSPieceStoppedPartWayResumed(t *testing.T) {
 		return false
 	})
 	_, list, _ := playerGet(t, base, "/live/tv/easy/44.m3u8")
+	done := within(t, secs(pieceWait+4), "the piece")
 	status, data, took := playerGet(t, base, pieceOf(t, list))
+	done()
 	if status != 200 || len(data) != 1<<20/188*188 {
 		t.Fatalf("piece: status %d, %d bytes, want the whole piece on one answer", status, len(data))
 	}
@@ -154,7 +158,9 @@ func TestHLSPlaylistQuietReloadSameSession(t *testing.T) {
 	if status, _, _ := playerGet(t, base, "/live/tv/easy/44.m3u8"); status != 200 {
 		t.Fatalf("first playlist: %d", status)
 	}
+	done := within(t, secs(pieceWait+4), "the playlist reload")
 	status, list, took := playerGet(t, base, "/__ch/live/tv/easy/44.m3u8/__index.m3u8")
+	done()
 	if status != 200 || !bytes.Contains(list, []byte("#EXTINF")) {
 		t.Fatalf("reload: %d %q", status, list)
 	}
@@ -176,6 +182,7 @@ func quietTS(t *testing.T, pt string, quietAt, pauseAt, pause float64) (srv *htt
 	again := &atomic.Int32{}
 	again.Store(1) // (leadProvider's own count: past 1, it answers as a channel asked for again)
 	later := leadProvider(fd, start, 1e9, again)
+	lw := lateFor(t)
 	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if asked.Add(1) > 1 {
 			later(w, r)
@@ -204,6 +211,7 @@ func quietTS(t *testing.T, pt string, quietAt, pauseAt, pause float64) (srv *htt
 			}
 			w.(http.Flusher).Flush()
 			from = fd.end[k]
+			lw.sent(from)
 		}
 		<-r.Context().Done()
 	}))
@@ -223,6 +231,7 @@ func quietTS(t *testing.T, pt string, quietAt, pauseAt, pause float64) (srv *htt
 		prov.CloseClientConnections()
 		prov.Close()
 	})
+	whereOnFail(t)
 	return
 }
 
@@ -232,6 +241,7 @@ func quietTS(t *testing.T, pt string, quietAt, pauseAt, pause float64) (srv *htt
 func TestLiveTSQuietConnectionAskedAgain(t *testing.T) {
 	const quietAt, end = 8.0, 8.0 + liveQuiet + 14
 	srv, asked, start := quietTS(t, "18631", quietAt, 0, 0)
+	lateFor(t).newBytesBy(start.Add(secs(quietAt+2)), start.Add(secs(quietAt+liveQuiet+6)), "video after the connection went quiet")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(end*float64(time.Second)))
 	defer cancel()
 	v := &leadView{}

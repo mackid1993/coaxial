@@ -13,6 +13,7 @@ import (
 // channel at dropAt, and then answers the next `fails` asks with `status` before it plays again.
 func reaskFront(t *testing.T, pt string, fails int32, status int) (srv *httptest.Server, asked *atomic.Int32, start time.Time, done func()) {
 	fd := syntheticFeed()
+	fd.late = lateFor(t)
 	start = time.Now()
 	asked = &atomic.Int32{}
 	var served atomic.Int32
@@ -29,6 +30,7 @@ func reaskFront(t *testing.T, pt string, fails int32, status int) (srv *httptest
 		player{User: "tv", Password: "easy"})
 	srv = httptest.NewServer(f)
 	done = func() {
+		whereIfFailed(t)
 		srv.CloseClientConnections()
 		srv.Close()
 		mu.Lock()
@@ -53,6 +55,7 @@ func TestReaskThrough404(t *testing.T) {
 	srv, asked, start, done := reaskFront(t, "18621", 2, 404)
 	defer done()
 	const end = reopenAfter + 30.0
+	lateFor(t).newBytesBy(start.Add(secs(end-15)), start.Add(secs(end-1)), "video after the 404s")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(end*float64(time.Second)))
 	defer cancel()
 	v := &leadView{}
@@ -76,6 +79,7 @@ func TestReaskThrough503(t *testing.T) {
 	srv, asked, start, done := reaskFront(t, "18622", 1, 503)
 	defer done()
 	const end = reopenAfter + 25.0
+	lateFor(t).newBytesBy(start.Add(secs(end-12)), start.Add(secs(end-1)), "video after the 503")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(end*float64(time.Second)))
 	defer cancel()
 	v := &leadView{}

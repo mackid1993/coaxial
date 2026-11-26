@@ -22,6 +22,7 @@ func TestBridgeCarriesOnAfterMissedPieces(t *testing.T) {
 	start := time.Now()
 	var bad atomic.Bool
 	var served, refused atomic.Int32
+	lw := lateFor(t)
 	cdn := newFakeProv(t, true, func(fp *fakeProv, w http.ResponseWriter, r *http.Request) bool {
 		if !strings.HasPrefix(r.URL.Path, "/hlsr/tok1/") {
 			return false
@@ -41,7 +42,9 @@ func TestBridgeCarriesOnAfterMissedPieces(t *testing.T) {
 		}
 		served.Add(1)
 		w.Header().Set("Content-Type", "video/mp2t")
-		w.Write(piece)
+		if _, err := w.Write(piece); err == nil {
+			lw.sentMore(len(piece)) // (the bridge hands a piece on whole as soon as it has it)
+		}
 		return true
 	})
 	prov := newFakeProv(t, true, func(fp *fakeProv, w http.ResponseWriter, r *http.Request) bool {
@@ -57,6 +60,7 @@ func TestBridgeCarriesOnAfterMissedPieces(t *testing.T) {
 	if rec.StatusCode != 200 {
 		t.Fatalf("recorder: %d", rec.StatusCode)
 	}
+	rec.Body = lw.reads(rec.Body, 4096) // (ask read the first 4096 bytes)
 	d := drain(rec)
 	d.flowing(t, "the recording before the pieces go missing", 3*time.Second)
 	bad.Store(true)

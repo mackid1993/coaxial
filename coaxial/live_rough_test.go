@@ -23,6 +23,19 @@ import (
 //
 // A change anywhere that holds video, drops it or reorders it on this path fails here, on every push.
 
+// roughLate: how long after the provider sent a byte a device watching the channel may be sent it.
+const roughLate = 750 * time.Millisecond
+
+// roughHeld: where the program was when video was first seen to be held in the run going on (see roughRun).
+var roughHeld heldNote
+
+func roughWhere() string {
+	if s := roughHeld.Load(); s != "" {
+		return "\n\n" + s
+	}
+	return ""
+}
+
 // roughStep: the provider waits, then sends n bytes in one write.
 type roughStep struct {
 	wait time.Duration
@@ -61,7 +74,12 @@ func roughTotal(plan []roughStep) (n int) {
 // sent and when, and what the device was sent and when. other, if set, is run once the stream has started.
 func roughRun(t *testing.T, id string, data []byte, plan []roughStep, other func(base string)) (sent, got []roughMark, read []byte) {
 	t.Helper()
-	var smu sync.Mutex
+	var smu, gmu sync.Mutex
+	// While the stream runs: the first time bytes the provider has sent are still not with the device after
+	// the time allowed, where every part of the program is at that moment is written down (roughHeld).
+	roughHeld.Store("")
+	lw := startLateWatch(roughLate, &roughHeld)
+	defer lw.stop()
 	finished := make(chan struct{})
 	fp := newFakeProv(t, true, func(fp *fakeProv, w http.ResponseWriter, r *http.Request) bool {
 		if r.URL.Path != "/live/realU/realP/"+id+".ts" {
@@ -83,6 +101,7 @@ func roughRun(t *testing.T, id string, data []byte, plan []roughStep, other func
 			smu.Lock()
 			sent = append(sent, roughMark{time.Now(), off})
 			smu.Unlock()
+			lw.sent(off)
 		}
 		close(finished)
 		<-r.Context().Done() // (the connection stays open, as a live channel's does)
@@ -93,10 +112,10 @@ func roughRun(t *testing.T, id string, data []byte, plan []roughStep, other func
 	if r.StatusCode != 200 {
 		t.Fatalf("the channel: %d", r.StatusCode)
 	}
+	lw.got(0)
 	if other != nil {
 		go other(base)
 	}
-	var gmu sync.Mutex
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -108,6 +127,7 @@ func roughRun(t *testing.T, id string, data []byte, plan []roughStep, other func
 				read = append(read, buf[:k]...)
 				got = append(got, roughMark{time.Now(), len(read)})
 				gmu.Unlock()
+				lw.gotMore(k)
 			}
 			if err != nil {
 				return
@@ -117,7 +137,7 @@ func roughRun(t *testing.T, id string, data []byte, plan []roughStep, other func
 	select {
 	case <-finished:
 	case <-time.After(90 * time.Second):
-		t.Fatalf("the provider never got to send everything: the channel was no longer being read")
+		t.Fatalf("the provider never got to send everything: the channel was no longer being read%s", roughWhere())
 	}
 	time.Sleep(1500 * time.Millisecond) // (the last bytes are on their way)
 	r.Body.Close()
@@ -138,11 +158,7 @@ func roughCheck(t *testing.T, data []byte, sent, got []roughMark, read []byte, l
 		t.Errorf("the provider sent %d bytes, the device was sent %d", total, len(read))
 	}
 	if n := min(len(read), total); !bytes.Equal(read[:n], data[:n]) {
-		at := 0
-		for at < n && read[at] == data[at] {
-			at++
-		}
-		t.Fatalf("the device was not sent what the provider sent: the first difference is at byte %d of %d (packet %d)", at, n, at/188)
+		t.Fatalf("the device was not sent what the provider sent: %s", diffAt(data[:total], read[:n]))
 	}
 	worst, where, k := time.Duration(0), 0, 0
 	for _, s := range sent {
@@ -158,13 +174,13 @@ func roughCheck(t *testing.T, data []byte, sent, got []roughMark, read []byte, l
 	}
 	t.Logf("%d bytes in %d lumps; the device was at most %d ms behind the provider (at byte %d)", total, len(sent), worst.Milliseconds(), where)
 	if worst > late {
-		t.Errorf("video was held: bytes the provider had sent reached the device %d ms later (at byte %d); at most %d ms is allowed",
-			worst.Milliseconds(), where, late.Milliseconds())
+		t.Errorf("video was held: bytes the provider had sent reached the device %d ms later (at byte %d); at most %d ms is allowed%s",
+			worst.Milliseconds(), where, late.Milliseconds(), roughWhere())
 	}
 }
 
 func TestLiveRoughFeedsPassStraightThrough(t *testing.T) {
-	const late = 750 * time.Millisecond
+	const late = roughLate
 	ms := time.Millisecond
 
 	lumps := []roughStep{{0, 3 << 20}} // an opening burst, then lumps with pauses, one of them long

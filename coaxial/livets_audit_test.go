@@ -21,6 +21,7 @@ func TestLiveTSReaskQuietBeforeFirstByteAskedAgain(t *testing.T) {
 	var asked, lp atomic.Int32
 	lp.Store(1) // (leadProvider's count: past 1 it answers as a channel asked for again)
 	later := leadProvider(fd, start, 1e9, &lp)
+	lw := lateFor(t)
 	prov := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch asked.Add(1) {
 		case 1: // plays, then goes quiet without closing from the lump at quietAt on
@@ -37,6 +38,7 @@ func TestLiveTSReaskQuietBeforeFirstByteAskedAgain(t *testing.T) {
 				}
 				w.(http.Flusher).Flush()
 				from = fd.end[k]
+				lw.sent(from)
 			}
 			<-r.Context().Done()
 		case 2: // answers, then quiet before any video
@@ -64,8 +66,10 @@ func TestLiveTSReaskQuietBeforeFirstByteAskedAgain(t *testing.T) {
 		prov.CloseClientConnections()
 		prov.Close()
 	})
+	whereOnFail(t)
 	// quiet at 8 s, asked again at 8+liveQuiet, that one quiet for 2*reopenWait, then asked once more
 	end := quietAt + liveQuiet + 2*reopenWait + 15
+	lw.newBytesBy(start.Add(secs(quietAt+liveQuiet+2*reopenWait)), start.Add(secs(end-1)), "video after the second quiet connection")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(end*float64(time.Second)))
 	defer cancel()
 	v := &leadView{}
