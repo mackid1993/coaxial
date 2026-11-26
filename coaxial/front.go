@@ -486,10 +486,23 @@ func (f *front) stream(c *counted, r *http.Request, w what, follow bool, target,
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	addr := r.URL.RequestURI()
+	var finish func(string)
+	if w.kind == "ch" && !follow && f.catchUpOf(r.URL) != "" { // (catch-up asked again by this device: see cuAsked)
+		var loc string
+		if loc, finish = f.cuAsked(ctx, f.port+" "+who+" "+addr); loc != "" {
+			c.Header().Set("Location", loc)
+			answer(c, 302, "", "")
+			return
+		} else if finish == nil {
+			return // (the player hung up while it waited)
+		}
+		defer func() { finish("") }() // (no redirect came back: nothing to hand on)
+	}
 	// Cut to make room: the provider's read ends, and so does a write to a player that reads no more (its
 	// buffer is full, or it opened its new read before closing this one), so the new one need not wait.
 	rc := http.NewResponseController(c)
-	h, why := f.admit(ctx, who, w, follow, "", func() { cancel(); rc.SetWriteDeadline(time.Now()) })
+	h, why := f.admit(ctx, who, w, follow, "", func() { cancel(); rc.SetWriteDeadline(time.Now()) }, addr)
 	if h == nil {
 		if why != "" {
 			failed(c, f.refusal(who, w, why))
@@ -501,6 +514,13 @@ func (f *front) stream(c *counted, r *http.Request, w what, follow bool, target,
 		rc.SetWriteDeadline(time.Time{}) // (cut once all was sent: the connection may be used again)
 	}()
 	f.forwardHeld(c, r.WithContext(ctx), target, scheme, hostport, 60, guard, h)
+	if finish != nil {
+		mu.Lock()
+		loc := h.loc
+		mu.Unlock()
+		finish(loc)
+		finish = func(string) {}
+	}
 }
 
 // What belongs to one connection and is not passed on in either direction.

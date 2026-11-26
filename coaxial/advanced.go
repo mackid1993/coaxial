@@ -248,6 +248,8 @@ type hold struct {
 	shared bool    // it joins a channel or session that is open or being opened: counted there
 	moved  bool    // it was answered with a redirect: its place is kept for the follow-up when it ends
 	until  float64 // the place kept for a follow-up until then (0: it is no such place)
+	addr   string  // the address asked (catch-up and its archive reads: see admit)
+	loc    string  // the redirect it was answered with, as given to the player ("" for none)
 }
 
 var holds = map[*hold]bool{}
@@ -558,8 +560,11 @@ var claims = map[string]claim{} // provider, kind and item -> the device whose n
 // admit: a new provider connection for device who, by the rules this provider has on. Returns the hold that
 // counts it until it is released, or nil and why not ("" when the player hung up while it waited). key: the
 // channel or session it opens (a second request for it joins: nothing is checked). cut: what ends it.
-func (f *front) admit(ctx context.Context, who string, w what, follow bool, key string, cut func()) (*hold, string) {
+func (f *front) admit(ctx context.Context, who string, w what, follow bool, key string, cut func(), addr ...string) (*hold, string) {
 	h := &hold{f: f, who: who, w: w, key: key, cut: cut}
+	if len(addr) > 0 {
+		h.addr = addr[0]
+	}
 	defer func() { // (admitted, refused or given up: its claim is over)
 		mu.Lock()
 		if k := f.base + " " + w.kind + " " + w.item; claims[k].who == who {
@@ -575,6 +580,14 @@ func (f *front) admit(ctx context.Context, who string, w what, follow bool, key 
 		}
 		for o := range holds {
 			if key != "" && o.key == key && !o.shared {
+				h.shared = true
+			}
+			// A player reads one catch-up file in several requests at once (its main read, the end of the file
+			// for its length, a seek). The same device's reads of the same address join the one admitted rather
+			// than cut it: the provider lets one device read its archive file several ways at once, and cutting
+			// broke the player's own reads. Another device, another time (a rewind) or a live channel: as before.
+			if key == "" && w.kind == "ch" && h.addr != "" && o.f == f && o.key == "" && o.addr == h.addr &&
+				o.who == who && same(o.w, w) && o.cutAt == 0 && o.until == 0 {
 				h.shared = true
 			}
 		}
@@ -702,6 +715,68 @@ func (f *front) remember(moved string, h *hold) {
 	}
 	followUps[f.port+" "+moved] = &followUp{h.who, h.w, now}
 	h.moved = true // (its place is kept for the follow-up once this request is over: see release)
+	h.loc = moved
+}
+
+// ---------------------------------------------------------------------------
+// Catch-up asked for again by the same device: one ask at the provider
+// ---------------------------------------------------------------------------
+
+// A provider ends a device's catch-up read when the device asks for catch-up afresh (measured), and a player asks
+// the same catch-up address several times at once when it opens it. So the same device's asks for the same
+// address within cuAskKeep seconds get the provider's one answer (the redirect to its archive file), as a player
+// that keeps the address it was sent to would use it; asks that come while the first is on its way wait for it.
+type cuAsk struct {
+	loc  string
+	at   float64
+	done chan struct{}
+}
+
+var cuAsks = map[string]*cuAsk{} // port, device and address -> the provider's answer to it
+
+const cuAskKeep = 30.0
+
+// cuAsked: the redirect a catch-up ask by this device was just given, if any (waiting up to 5 s for one on its
+// way). Otherwise it is marked on its way, and finish must be called with what the provider answered.
+func (f *front) cuAsked(ctx context.Context, key string) (loc string, finish func(string)) {
+	for {
+		mu.Lock()
+		now := mono()
+		for k, a := range cuAsks {
+			if a.at > 0 && now-a.at > cuAskKeep {
+				delete(cuAsks, k)
+			}
+		}
+		a := cuAsks[key]
+		if a == nil {
+			a = &cuAsk{done: make(chan struct{})}
+			cuAsks[key] = a
+			mu.Unlock()
+			return "", func(loc string) {
+				mu.Lock()
+				a.loc, a.at = loc, mono()
+				if loc == "" {
+					delete(cuAsks, key)
+				}
+				mu.Unlock()
+				close(a.done)
+			}
+		}
+		if a.at > 0 && a.loc != "" {
+			loc := a.loc
+			mu.Unlock()
+			return loc, nil
+		}
+		done := a.done
+		mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return "", nil
+		case <-time.After(5 * time.Second):
+			return "", func(string) {}
+		}
+	}
 }
 
 // keepFor: the place kept for device who's follow-up of w, until then (0: none any more). (mu held)
