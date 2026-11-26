@@ -236,7 +236,12 @@ func account(port string, wait time.Duration) map[string]any {
 	if st.fails > 0 {
 		every = math.Min(60*math.Pow(2, float64(st.fails)), accountEvery)
 	}
-	if !busy && st.task == nil && mono()-st.tried >= every {
+	// "Nothing plays right now" is not enough for a read that is due again: a viewer between two channels, or
+	// one whose player dropped out and is on its way back, found the login made just as it tuned. Such a read
+	// waits until nothing has played for quietSpell, as the launcher's timed work does. The first read after
+	// a start does not wait: the page has nothing to show for the provider until it is made.
+	quiet := st.tried < 0 || lastPlayed == 0 || mono()-lastPlayed >= quietSpell.Seconds()
+	if !busy && quiet && st.task == nil && mono()-st.tried >= every {
 		st.tried, st.task = mono(), make(chan struct{})
 		go func(done chan struct{}) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

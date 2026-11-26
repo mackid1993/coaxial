@@ -250,8 +250,15 @@ func playingNow() []any {
 			out = append(out, map[string]any{"device": h.who})
 		}
 	}
+	if len(out) > 0 {
+		lastPlayed = now
+	}
 	return out
 }
+
+// lastPlayed: when something was last seen playing or recording (mu; 0: not since this start). The launcher
+// looks every 20 s, the open page every 2 s.
+var lastPlayed float64
 
 func orEmpty(v any) any {
 	if v == nil {
