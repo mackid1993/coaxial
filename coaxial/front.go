@@ -658,7 +658,9 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 		}
 		out = out.Clone(ctx)
 		timed.Store(false)
-		t = time.AfterFunc(secs(wait), func() { timed.Store(true); cancel2() })
+		// The new connection gets pieceWait too, then the player is answered 504: a player asking the server
+		// itself has given up by then, and one that waits on is held no longer than its own read timeout twice.
+		t = time.AfterFunc(secs(first), func() { timed.Store(true); cancel2() })
 		resp, err = plainTransport.RoundTrip(out)
 		t.Stop()
 	}
@@ -731,7 +733,7 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 			if size < 0 {
 				size = math.MaxInt64 // (no length sent: it ends when the server ends it)
 			}
-			src = &resumeBody{body: resp.Body, out: out, from: from, to: to, size: size, wait: wait}
+			src = &resumeBody{body: resp.Body, out: out, from: from, to: to, size: size, wait: pieceWait}
 		}
 	}
 	if resp.StatusCode >= 400 && !guard && r.Method != "HEAD" { // the provider's own error page (see hideLogin)

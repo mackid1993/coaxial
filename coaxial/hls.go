@@ -1324,14 +1324,19 @@ func nameOK(ctx context.Context, host string) bool {
 	c, have := checks[host]
 	mu.Unlock()
 	if !have || now-c.at >= 60 {
-		lctx := ctx
-		if have { // (an answer is in hand: the piece does not wait long for a new one)
-			var cancel context.CancelFunc
-			lctx, cancel = context.WithTimeout(ctx, 2*time.Second)
-			defer cancel()
-		}
+		// The piece never waits on the resolver longer than 2 s, first look-up included (it waited up to
+		// connectWait for a server not seen before). With no answer the address the connection dials is
+		// still checked when it is dialed (dialer, guardKey), and no answer there means no connection at all.
+		lctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
 		home, err := leadsHome(lctx, host) // no answer: the connection's own lookup fails the same way
-		if have && err != nil && !home {
+		if err != nil && !home {
+			if !have {
+				c.ok = true // (nothing learned: left to the connect-time check)
+			}
+			if lctx.Err() != nil && ctx.Err() == nil {
+				lg.Info().Str("server", host).Msg("a video server's name got no answer in 2 s; checked when connecting instead")
+			}
 			c.at = now - 50 // (asked again 10 s on)
 		} else {
 			c = checked{now, !home}
