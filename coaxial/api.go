@@ -154,6 +154,11 @@ func statusData() map[string]any {
 		}
 		a := accts[port]
 		up := a != nil && a["answer"] == 200 && pyStr(a["auth"]) != "0"
+		// No account answer yet (the account is not read while anything plays, and may not have been read since
+		// the start), but a channel of this provider is playing: it is sending video, so it is up.
+		if !up && open > 0 && (a == nil || a["answer"] != 200) {
+			up = true
+		}
 		provs = append(provs, map[string]any{"name": f.name, "port": atoi(port), "up": up, "live_tv": f.mode, "channels_open": open,
 			"connections_missing": f.bought == 0, // (no number typed in: the limit is not kept, the page says so)
 			"names":               namesCount(port), "names_at": namesAt(port)})
