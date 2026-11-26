@@ -190,13 +190,17 @@ func (c *clockFix) logJump(how string, secs float64, bytes int) {
 	if how == "" {
 		how = "nothing sent again"
 	}
+	took := 0.0 // (how long what was left out took to come: a stream started over sends it in a burst)
+	if bytes > 0 {
+		took = c.clock() - r.t0
+	}
 	e := lg.Info()
 	if c.tag != nil {
 		e = c.tag(e)
 	}
 	e.Str("on", j.on).Float64("from_s", round3(j.from)).Float64("to_s", round3(j.to)).Str("direction", dir).
 		Float64("jump_s", round3(size)).Float64("offset_s", round3(j.off)).Float64("left_out_s", round1(secs)).
-		Float64("left_out_mb", round1(float64(bytes)/1048576)).Str("carried_on_at", how).
+		Float64("left_out_mb", round1(float64(bytes)/1048576)).Float64("left_out_took_s", round1(took)).Str("carried_on_at", how).
 		Msg(fmt.Sprintf("a channel's clock jumped %s %.1f s (%s %.3f -> %.3f s); its timestamps now carry on from where they were (offset %+.3f s); video sent again and left out: %.1f s, %.1f MB (%s)",
 			dir, size, j.on, j.from, j.to, j.off, secs, float64(bytes)/1048576, how))
 }
