@@ -374,8 +374,15 @@ func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			extra += " wait_ms=" + strconv.FormatInt(c.waitMS, 10)
 		}
 		e := lg.Info()
-		if c.kind == "cdn" { // (one per video piece: written at no level the page offers)
+		if c.kind == "cdn" { // (one per video piece: written at no level the page offers...)
 			e = lg.Trace()
+			// (...unless the player did not get it as it should: refused or failed, or 2 s and more in the
+			// sending. A tune whose playlists were answered and whose pieces were not left nothing in the log.)
+			if c.status >= 400 || time.Since(began) >= 2*time.Second {
+				e = lg.Warn()
+			} else if c.status == 0 { // (the player hung up before any answer: a channel change does that)
+				e = lg.Debug()
+			}
 		}
 		e.Msgf("access client=%s provider=%s kind=%s method=%s status=%d bytes=%d seconds=%.3f%s", clientOf(r), f.name, c.kind,
 			notPrintable.ReplaceAllString(r.Method, ""), c.status, c.bytes, time.Since(began).Seconds(), extra)
