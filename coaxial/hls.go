@@ -536,8 +536,43 @@ func send(w http.ResponseWriter, status int, h http.Header, data []byte) {
 	w.Write(data)
 }
 
-// servePlaylist rewrites a playlist; anything else is passed on as it came.
-func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte, base string, own *front, film *speed) error {
+// askedAt: the address the player reached this proxy at ("http://192.0.2.7:8095"), "" if it did not say.
+var hostOK = regexp.MustCompile(`^[A-Za-z0-9.\-\[\]:]+$`)
+
+func askedAt(r *http.Request) string {
+	if r == nil || !hostOK.MatchString(r.Host) {
+		return ""
+	}
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return "https://" + r.Host
+	}
+	return "http://" + r.Host
+}
+
+// fullAddresses: a complete playlist (a catch-up's, a film's: it ends with #EXT-X-ENDLIST) with every address
+// in it written in full, at the address the player reached this proxy at. A provider's own playlists name
+// their pieces in full, and players count on that: an app that was sent here by another server (a guide
+// server that redirects streams to this proxy) and checks a catch-up's first piece works the piece's address
+// out from the address it first asked, the other server's, where "/__cdn/..." leads nowhere. The catch-up
+// was then taken for missing. A live playlist is left as it is.
+func fullAddresses(text, at string) string {
+	if at == "" || !strings.Contains(text, "#EXT-X-ENDLIST") {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for n, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "/"):
+			lines[n] = at + line
+		case strings.HasPrefix(line, "#") && strings.Contains(line, `URI="/`):
+			lines[n] = strings.ReplaceAll(line, `URI="/`, `URI="`+at+`/`)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// servePlaylist rewrites a playlist; anything else is passed on as it came. r: the player's request.
+func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte, base string, own *front, film *speed, r *http.Request) error {
 	if bytes.Contains(data[:min(len(data), 1024)], []byte("#EXTM")) {
 		text, err := rewritePlaylist(string(data), base, own)
 		if err != nil {
@@ -546,7 +581,7 @@ func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte
 		if film != nil && status < 300 { // a film's: what it names is read no faster than set (advanced.go)
 			own.noteFilm(text, film)
 		}
-		data = []byte(text)
+		data = []byte(fullAddresses(text, askedAt(r)))
 	} else if status >= 400 && own != nil {
 		data = own.hideLogin(data) // an error page (see hideLogin)
 	}
@@ -792,7 +827,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			rt.f.keepFor(rt.client, cu, 0) // (the place kept for it is taken)
 			mu.Unlock()
 		}
-		return servePlaylist(w, status, hd, data, final, rt.f, film)
+		return servePlaylist(w, status, hd, data, final, rt.f, film, r)
 	}
 	if rt.f.mode == "ts" { // a ts provider: live HLS is built from the shared MPEG-TS stream
 		if done, err := hlsFromTS(w, r, rt.client, provider, uri, opath, q, port, rt.f); done {
@@ -865,7 +900,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 				} else if d.status == 200 && rt.f.catchUpOf(&url.URL{Path: chanOrig, RawQuery: oquery}) != "" {
 					rt.f.keepDirect(key, target, who, want, d.data)
 				}
-				return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film)
+				return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film, r)
 			}
 		}
 	}
@@ -968,7 +1003,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 				s.refusedAt = mono()
 				mu.Unlock()
 			}
-			return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film)
+			return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film, r)
 		}
 		mu.Lock()
 		if ns != s { // (opened afresh: still the same stream, and the same devices on it)
@@ -1011,7 +1046,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		}
 	}
 	mu.Unlock()
-	return servePlaylist(w, status, hd, data, final, rt.f, film)
+	return servePlaylist(w, status, hd, data, final, rt.f, film, r)
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,5 +1375,5 @@ func catchUpPlaylist(w http.ResponseWriter, r *http.Request, rt *route, h http.H
 	if resp.StatusCode == 200 { // answered here, not sent elsewhere: counted while its pieces are read
 		f.keepDirect(f.base+" "+strings.SplitN(rt.uri, "?", 2)[0], target, who, want, data)
 	}
-	return servePlaylist(w, resp.StatusCode, resp.Header, data, target, f, film)
+	return servePlaylist(w, resp.StatusCode, resp.Header, data, target, f, film, r)
 }

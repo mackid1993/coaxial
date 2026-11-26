@@ -40,8 +40,8 @@ func TestOnePerChannelCatchUpHLSPieces(t *testing.T) {
 	}
 	var pieces []string
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "/__cdn/") {
-			pieces = append(pieces, line)
+		if i := strings.Index(line, "/__cdn/"); i >= 0 && !strings.HasPrefix(line, "#") {
+			pieces = append(pieces, line[i:]) // (named in full, at this proxy's address: the path is asked for)
 		}
 	}
 	if p := ask(t, base, "192.0.2.1", pieces[0]); p.StatusCode != 200 {

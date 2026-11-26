@@ -68,6 +68,8 @@ func TestHLSRedirectKeepsLogins(t *testing.T) {
 		for _, line := range strings.Split(text, "\n") {
 			if strings.HasPrefix(line, "/") {
 				piece = line
+			} else if strings.HasPrefix(line, base+"/") { // (a complete playlist names its pieces in full)
+				piece = strings.TrimPrefix(line, base)
 			}
 		}
 		if p := ask(t, base, "192.0.2.1", piece); p.StatusCode != 200 {
