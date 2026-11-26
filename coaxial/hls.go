@@ -375,6 +375,7 @@ type session struct {
 	seq        int64              // its playlist's MEDIA-SEQUENCE when last read (hasSeq: read at all)
 	hasSeq     bool
 	moved      float64 // when that number last moved on (see stood)
+	bridged    float64 // when the relay's own bridge (a recorder's MPEG-TS made from this HLS) last asked for it
 	refusedAt  float64 // when opening the channel again in its place was last refused (see renewGap)
 }
 
@@ -408,14 +409,44 @@ func (s *session) note(data []byte) {
 }
 
 // stoodStill: seconds a live playlist may stand still before a player that tunes the channel again is given a
-// new session (never less than three of its target durations). A provider's playlist stands still between
-// its lumps, 12 s at the most seen; longer than this, a player that has given up and asks for the channel
-// afresh is not handed the same stopped playlist back. (A variable for the tests.)
+// new session whoever else is on it (never less than three of its target durations). A provider's playlist
+// stands still between its lumps, 12 s at the most seen; longer than this, a player that has given up and
+// asks for the channel afresh is not handed the same stopped playlist back. (A variable for the tests.)
 var stoodStill = 15.0
 
-// stood: the session's playlist has been read and has not moved on for too long (mu held).
-func (s *session) stood(now float64) bool {
-	return s.hasSeq && s.moved > 0 && now-s.moved > math.Max(stoodStill, 3*s.target)
+// stood: the session's playlist has been read and has not moved on for too long, for device who asking for
+// the channel afresh (mu held).
+//
+// A device that is alone on the session is held to the rule for a live playlist itself: a new version is due
+// no later than 1.5 target durations after the last (RFC 8216, 6.2.2), and that is when players call a
+// playlist stuck and start the channel over. Straight at the provider that new start is a new session. Seen
+// on a live system: 14 s into a tune the playlist stood still for 12.5 s, the player asked for the channel
+// again, was handed the same session and stopped for good.
+//
+// With another device or a recording on the session it is left alone for longer (stoodStill): a new session
+// numbers its pieces anew, and theirs is not given up for one device's new start.
+func (s *session) stood(now float64, who string) bool {
+	if !s.hasSeq || s.moved <= 0 {
+		return false
+	}
+	limit := math.Max(stoodStill, 3*s.target)
+	if s.target > 0 && s.only(who, now) {
+		limit = 1.5 * s.target
+	}
+	return now-s.moved > limit
+}
+
+// only: device who is the one reader the session has (mu held).
+func (s *session) only(who string, now float64) bool {
+	if isLoop(who) || (s.bridged > 0 && now-s.bridged <= s.held()) {
+		return false
+	}
+	for dev, t := range s.who {
+		if dev != who && now-t <= s.held() {
+			return false
+		}
+	}
+	return true
 }
 
 // held: how long after its last request the session still counts as a connection; idle: how long until it
@@ -996,12 +1027,12 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	// channel that stays stopped is opened again at most once in that time, however often it is asked for.
 	if m == nil && s != nil && !back {
 		mu.Lock()
-		still, from, since := s.stood(mono()), s.loc, mono()-s.moved
+		still, from, since := s.stood(mono(), who), s.loc, mono()-s.moved
 		mu.Unlock()
 		if still {
 			if ns, d, err := openChannel(key, target, h, from, asked); err == nil && d == nil && ns != nil && ns != s {
 				mu.Lock()
-				ns.what = s.what // (still the same stream, and the same devices on it)
+				ns.what, ns.bridged = s.what, s.bridged // (still the same stream, and the same devices on it)
 				for dev, t := range s.who {
 					ns.who[dev] = t
 				}
@@ -1057,6 +1088,9 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	}
 	if s.who == nil {
 		s.who = map[string]float64{}
+	}
+	if isLoop(who) {
+		s.bridged = mono()
 	}
 	if !isLoop(who) {
 		s.who[who] = mono()
