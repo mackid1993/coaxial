@@ -245,12 +245,10 @@ type hold struct {
 	at     float64
 	cutAt  float64 // when it was cut to make room (0: it was not)
 	cut    func()
-	shared bool         // it joins a channel or session that is open or being opened: counted there
-	moved  bool         // it was answered with a redirect: its place is kept for the follow-up when it ends
-	until  float64      // the place kept for a follow-up until then (0: it is no such place)
-	addr   string       // the address asked (catch-up and its archive reads: see admit)
-	asked  func(string) // called once with the redirect given ("" for none) when the answer arrives (see cuAsked)
-	loc    string       // the redirect it was answered with, as given to the player ("" for none)
+	shared bool    // it joins a channel or session that is open or being opened: counted there
+	moved  bool    // it was answered with a redirect: its place is kept for the follow-up when it ends
+	until  float64 // the place kept for a follow-up until then (0: it is no such place)
+	addr   string  // the address asked (catch-up and its archive reads: see admit)
 }
 
 var holds = map[*hold]bool{}
@@ -724,67 +722,6 @@ func (f *front) remember(moved string, h *hold) {
 	}
 	followUps[f.port+" "+moved] = &followUp{h.who, h.w, now}
 	h.moved = true // (its place is kept for the follow-up once this request is over: see release)
-	h.loc = moved
-}
-
-// ---------------------------------------------------------------------------
-// Catch-up asked for again by the same device: one ask at the provider
-// ---------------------------------------------------------------------------
-
-// A provider ends a device's catch-up read when the device asks for catch-up afresh (measured), and a player asks
-// the same catch-up address several times at once when it opens it. So the same device's asks for the same
-// address within cuAskKeep seconds get the provider's one answer (the redirect to its archive file), as a player
-// that keeps the address it was sent to would use it; asks that come while the first is on its way wait for it.
-type cuAsk struct {
-	loc  string
-	at   float64
-	done chan struct{}
-}
-
-var cuAsks = map[string]*cuAsk{} // port, device and address -> the provider's answer to it
-
-const cuAskKeep = 30.0
-
-// cuAsked: the redirect a catch-up ask by this device was just given, if any (waiting for one on its way as long
-// as the player does: it comes when the provider's answer to the first ask arrives). Otherwise it is marked on
-// its way, and finish must be called once with what the provider answered.
-func (f *front) cuAsked(ctx context.Context, key string) (loc string, finish func(string)) {
-	for {
-		mu.Lock()
-		now := mono()
-		for k, a := range cuAsks {
-			if a.at > 0 && now-a.at > cuAskKeep {
-				delete(cuAsks, k)
-			}
-		}
-		a := cuAsks[key]
-		if a == nil {
-			a = &cuAsk{done: make(chan struct{})}
-			cuAsks[key] = a
-			mu.Unlock()
-			return "", func(loc string) {
-				mu.Lock()
-				a.loc, a.at = loc, mono()
-				if loc == "" {
-					delete(cuAsks, key)
-				}
-				mu.Unlock()
-				close(a.done)
-			}
-		}
-		if a.at > 0 && a.loc != "" {
-			loc := a.loc
-			mu.Unlock()
-			return loc, nil
-		}
-		done := a.done
-		mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return "", nil
-		}
-	}
 }
 
 // keepFor: the place kept for device who's follow-up of w, until then (0: none any more). (mu held)

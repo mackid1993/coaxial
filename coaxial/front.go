@@ -487,18 +487,6 @@ func (f *front) stream(c *counted, r *http.Request, w what, follow bool, target,
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	addr := r.URL.RequestURI()
-	var finish func(string)
-	if w.kind == "ch" && !follow && f.catchUpOf(r.URL) != "" { // (catch-up asked again by this device: see cuAsked)
-		var loc string
-		if loc, finish = f.cuAsked(ctx, f.port+" "+who+" "+addr); loc != "" {
-			c.Header().Set("Location", loc)
-			answer(c, 302, "", "")
-			return
-		} else if finish == nil {
-			return // (the player hung up while it waited)
-		}
-		defer func() { finish("") }() // (no redirect came back: nothing to hand on)
-	}
 	// Cut to make room: the provider's read ends, and so does a write to a player that reads no more (its
 	// buffer is full, or it opened its new read before closing this one), so the new one need not wait.
 	rc := http.NewResponseController(c)
@@ -509,13 +497,7 @@ func (f *front) stream(c *counted, r *http.Request, w what, follow bool, target,
 		}
 		return
 	}
-	if finish != nil { // (handed on the moment the provider answers, not when the answer is over)
-		h.asked, finish = finish, func(string) {}
-	}
 	defer func() {
-		if h.asked != nil { // (no answer came: nothing to hand on)
-			h.asked("")
-		}
 		h.release()
 		rc.SetWriteDeadline(time.Time{}) // (cut once all was sent: the connection may be used again)
 	}()
@@ -655,13 +637,6 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 			f.remember(moved, hd)
 			mu.Unlock()
 		}
-	}
-	if hd != nil && hd.asked != nil { // (the same device's other asks of this catch-up get this answer: see cuAsked)
-		mu.Lock()
-		loc := hd.loc
-		mu.Unlock()
-		hd.asked(loc)
-		hd.asked = nil
 	}
 	if _, ok := h["Content-Type"]; !ok {
 		h["Content-Type"] = nil // none sent, none added
