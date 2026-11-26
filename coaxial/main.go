@@ -1543,6 +1543,108 @@ func (tw *tuneWatch) see(data []byte, rd *reader, provider string) {
 	}
 }
 
+// viewWatch: a reader of live MPEG-TS, watched for as long as it stays (tuneWatch covers only its first seconds).
+// It only counts and logs: nothing about what is sent, or when, depends on it. The count is the one tuneWatch
+// keeps: the seconds of video sent to the player, by the stream's own clock, less the seconds gone by since the
+// first of it went out. A player that plays from the first video on has that much left; one that starts nearer
+// the newest video has less, so the number is the most a player can have, not what it has.
+//   - When the count is at or under zero as new video is about to go out, the player had nothing left while it
+//     waited: a warning says for how long, and how long the wait for that video was.
+//   - When one send takes slowSend seconds or more, the player (or the line to it) was not taking video: a warning.
+//   - When the reader leaves, one line: how long before that the provider last sent, how long before that the
+//     player last took video, how much waited for it, and the lowest and longest of the above over its stay.
+type viewWatch struct {
+	pid              int
+	have             bool
+	pcr, span        float64 // the last clock value sent; seconds of video sent since base
+	base, last       float64 // when counting began (the first send, or the last time it ran out); when the last send ended
+	low, lowAt       float64
+	gap, gapAt       float64 // the longest wait between two sends
+	slow, slowAt     float64 // the longest one send took
+	dry              int
+	drySaid, slowSay float64 // when each warning was last logged
+}
+
+const (
+	slowSend    = 2.0  // a send that takes this many seconds is logged
+	viewSayGap  = 30.0 // at most one warning of each kind per reader in this many seconds
+	dryRegather = 2.0  // a player that ran out is taken to gather this many seconds of video before it plays on
+)
+
+func (vw *viewWatch) see(data []byte, began, now float64, rd *reader, provider string) {
+	if vw.base == 0 {
+		vw.base, vw.low = began, 1e9
+	}
+	since := now - rd.came
+	waited := 0.0
+	if vw.last > 0 {
+		waited = began - vw.last
+	}
+	if waited > vw.gap {
+		vw.gap, vw.gapAt = waited, since
+	}
+	took := now - began
+	if took > vw.slow {
+		vw.slow, vw.slowAt = took, since
+	}
+	if took >= slowSend && (vw.slowSay == 0 || now-vw.slowSay >= viewSayGap) {
+		vw.slowSay = now
+		lg.Warn().Str("device", rd.who).Str("channel", rd.id).Str("provider", provider).Float64("send_took_s", round1(took)).Float64("at_s", round1(since)).
+			Msgf("%s did not take video for %.1f s on channel %s (one send to it took that long)", rd.who, took, rd.id)
+	}
+	if vw.have && began-vw.base >= 1 { // what the player had left as this video was about to go out
+		spare := vw.span - (began - vw.base)
+		if spare < vw.low {
+			vw.low, vw.lowAt = spare, since
+		}
+		if spare <= 0 {
+			vw.dry++
+			if vw.drySaid == 0 || now-vw.drySaid >= viewSayGap {
+				vw.drySaid = now
+				lg.Warn().Str("device", rd.who).Str("channel", rd.id).Str("provider", provider).Float64("out_for_s", round1(-spare)).
+					Float64("waited_s", round1(waited)).Float64("at_s", round1(since)).
+					Msgf("%s ran out of video on channel %s: it had none left for %.1f s; the wait for more was %.1f s", rd.who, rd.id, -spare, waited)
+			}
+			vw.base, vw.span = began, dryRegather
+		}
+	}
+	vw.last = now
+	if pid, v, ok := lastPCR(data, vw.pid); ok {
+		vw.pid = pid
+		if vw.have {
+			d := v - vw.pcr
+			if d < -1000 { // (the clock's wrap)
+				d += float64(int64(1)<<33) / 90000
+			}
+			if d > 0 && d < 60 {
+				vw.span += d
+			}
+		}
+		vw.pcr, vw.have = v, true
+	}
+}
+
+// left: the one line when the reader leaves (fed: when its channel last got video from the provider; waiting:
+// the bytes that waited for the reader). Nothing is logged for a reader that was sent no video.
+func (vw *viewWatch) left(rd *reader, provider string, fed float64, waiting int) {
+	if vw.base == 0 {
+		return
+	}
+	now, low, quiet := mono(), vw.low, 0.0
+	if low == 1e9 {
+		low = 0
+	}
+	if fed > 0 {
+		quiet = now - fed
+	}
+	lg.Info().Str("device", rd.who).Str("channel", rd.id).Str("provider", provider).Float64("provider_quiet_s", round1(quiet)).
+		Float64("player_quiet_s", round1(now-vw.last)).Float64("waiting_mb", mb(int64(waiting))).Float64("lowest_spare_s", round1(low)).
+		Float64("lowest_at_s", round1(vw.lowAt)).Float64("longest_wait_s", round1(vw.gap)).Float64("wait_at_s", round1(vw.gapAt)).
+		Float64("slowest_send_s", round1(vw.slow)).Float64("slow_at_s", round1(vw.slowAt)).Int("ran_out", vw.dry).
+		Msgf("when %s left channel %s: the provider had last sent video %.1f s before, the player had last taken video %.1f s before, %.1f MB waited for it; over its stay: lowest spare %.1f s (at %.0f s), longest wait for video %.1f s (at %.0f s), slowest send %.1f s (at %.0f s), ran out of video %d time(s)",
+			rd.who, rd.id, quiet, now-vw.last, float64(waiting)/1048576, low, vw.lowAt, vw.gap, vw.gapAt, vw.slow, vw.slowAt, vw.dry)
+}
+
 func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	provider, uri := rt.f.base, rt.uri
 	if r.Method == "HEAD" { // always 200 here: asking the provider would open a connection
@@ -1664,10 +1766,15 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	rd.who, rd.id, rd.port, rd.came = rt.client, channelID(uri), rt.f.port, mono()
 	rd.kind = map[string]string{"/ts": "MPEG-TS", "/hls": "MPEG-TS fed from HLS"}[path]
 	mu.Unlock()
+	vw := &viewWatch{pid: -1}
 	why, started := "the player hung up", false
 	defer func() {
 		mu.Lock()
 		still := max(0, len(ch.readers)-1)
+		fed, waiting := 0.0, rd.n // (for the log: when the provider last sent, and what waited for this reader)
+		if n := len(ch.ring); n > 0 {
+			fed = ch.ring[n-1].t
+		}
 		ch.leave(rd)
 		mu.Unlock()
 		if started {
@@ -1678,6 +1785,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 			lg.Info().Str("device", rd.who).Str("channel", rd.id).Str("provider", rt.f.name).Str("reason", why).Int("still_on", still).
 				Msgf("a reader left after %d s, before any video: %s (%d still on its channel)", int64(mono()-rd.came), why, still)
 		}
+		vw.left(rd, rt.f.name, fed, waiting)
 	}()
 	t := time.NewTimer(startWait * time.Second)
 	select {
@@ -1781,6 +1889,7 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 				lg.Debug().Str("device", rd.who).Str("channel", rd.id).Msg("a reader that joined its channel has been handed everything kept for it; it is now sent video as it arrives")
 			}
 			mu.Unlock()
+			began := mono()
 			n, err := w.Write(data)
 			if err == nil {
 				err = rc.Flush()
@@ -1788,6 +1897,9 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 			rd.written.Add(int64(n))
 			if err == nil && n > 0 && !tw.done {
 				tw.see(data, rd, rt.f.name)
+			}
+			if err == nil && n > 0 {
+				vw.see(data, began, mono(), rd, rt.f.name)
 			}
 			if err != nil {
 				mu.Lock()
