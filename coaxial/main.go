@@ -51,6 +51,7 @@ const (
 	readersMax    = 100              // readers served at once, all channels together
 	behind        = 16 << 20         // a reader this far behind for behindSeconds is disconnected...
 	behindSeconds = 15               //
+	behindVideo   = 15               // ...(on a channel of a high rate: this many seconds of its video behind, where that is more)...
 	farBehind     = 64 << 20         // ...or this far behind at any moment
 	connectWait   = 10 * time.Second // to accept a connection
 	keepIdle      = 20 * time.Second // an idle connection to a server is kept this long for the next request
@@ -993,9 +994,14 @@ func (ch *channel) feed(data []byte) {
 	}
 	ch.ring = append(ch.ring, item{now, data})
 	ch.kept += len(data)
-	keep := ringMin
+	// A reader may be behind by the same seconds of video on every channel: 16 MB is 25 s of a 5 Mbit/s channel
+	// but 6 s of a 20 Mbit/s one, where a player that stopped reading for 10 s and then read on at playing speed
+	// was cut. So on a channel of a high rate the allowance is behindVideo seconds of it (never past farBehind,
+	// which bounds what is kept for a reader whatever the channel). That much is in the ring for joiners anyway.
+	keep, slow := ringMin, behind
 	if speed, ok := ch.speed(now); ok {
 		keep = min(max(ringMin, int(speed*keepSeconds)), ringMax)
+		slow = min(max(behind, int(speed*behindVideo)), farBehind)
 	}
 	for ch.kept-len(ch.ring[0].data) >= keep {
 		ch.kept -= len(ch.ring[0].data)
@@ -1003,7 +1009,7 @@ func (ch *channel) feed(data []byte) {
 		ch.ring = ch.ring[1:]
 	}
 	for rd := range ch.readers {
-		if rd.n <= behind+rd.given { // (what a joiner was handed at the start is not "falling behind")
+		if rd.n <= slow+rd.given { // (what a joiner was handed at the start is not "falling behind")
 			rd.behindAt = 0
 		} else if rd.behindAt == 0 {
 			rd.behindAt = now
