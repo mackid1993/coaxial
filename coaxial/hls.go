@@ -826,6 +826,9 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			return err
 		}
 	}
+	if !chRe.MatchString(opath) && rt.f.catchUpOf(&url.URL{Path: opath, RawQuery: oquery}) != "" {
+		return catchUpPlaylist(w, r, rt, h, opath, oquery, film)
+	}
 	m := chRe.FindStringSubmatch(opath) // a channel's own folder: /__ch/<channel>/<__index.m3u8 or a piece>
 	chanOrig := opath
 	if m != nil {
@@ -1278,4 +1281,60 @@ func apiStream(w io.Writer, body io.Reader, link []byte, login [][2]string, gz b
 		return z.Close()
 	}
 	return nil
+}
+
+// catchUpPlaylist: a catch-up's HLS playlist, asked for by a player. It is a finished recording, not a live
+// channel, so it is treated as the catch-up's MPEG-TS is (stream in front.go): asked for at the provider every
+// time, by the rules the provider has on, and the provider's redirect passed on pointed back at this proxy,
+// just as a player straight at the provider would be sent there. No session is made or kept for it.
+// The playlist it leads to comes back through /__cdn/ (its pieces pointed back here, as for any playlist).
+func catchUpPlaylist(w http.ResponseWriter, r *http.Request, rt *route, h http.Header, opath, oquery string, film *speed) error {
+	f, who := rt.f, rt.client
+	u := &url.URL{Path: opath, RawQuery: oquery}
+	want := f.classify(u)
+	hd, why := f.admit(r.Context(), who, want, false, "", nil, r.URL.RequestURI())
+	if hd == nil {
+		if why == "" {
+			return nil // (the player hung up while it waited)
+		}
+		return f.refusal(who, want, why)
+	}
+	defer hd.release()
+	target := f.base + rt.uri
+	resp, err := fetch(r.Context(), target, h, opts{noFollow: true, wait: playlistWait, ask: f.askFor(u, who)})
+	if err != nil {
+		return err
+	}
+	if loc := resp.Header.Get("Location"); isRedirect(resp.StatusCode) && loc != "" {
+		resp.Body.Close()
+		to, err := resp.Request.URL.Parse(loc)
+		if err != nil {
+			return &refused{status: 502}
+		}
+		moved := rewriteLocation(to.String(), "", "")
+		if f.ownServer(to) { // back to the provider's own server: with the easy login (never the real one)
+			if p, ok := f.easyForm(to); ok {
+				moved = p
+			}
+		}
+		mu.Lock()
+		f.remember(moved, hd) // the player comes back for it: it carries on what was admitted
+		mu.Unlock()
+		dropHop(resp.Header)
+		for k, vs := range resp.Header {
+			w.Header()[k] = vs
+		}
+		w.Header().Del("Content-Length")
+		w.Header().Set("Location", moved)
+		w.WriteHeader(resp.StatusCode)
+		return nil
+	}
+	data, err := readAll(resp, 4<<20, playlistWait)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == 200 { // answered here, not sent elsewhere: counted while its pieces are read
+		f.keepDirect(f.base+" "+strings.SplitN(rt.uri, "?", 2)[0], target, who, want, data)
+	}
+	return servePlaylist(w, resp.StatusCode, resp.Header, data, target, f, film)
 }
