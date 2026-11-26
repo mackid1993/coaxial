@@ -70,6 +70,7 @@ var (
 	// is looked up. (The name itself is looked up after this, and the address dialed is checked again.)
 	cdnForbidden = regexp.MustCompile(`(?i)^/__cdn/https?/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|0\.|([0-9]+\.)*0[0-9]+(\.[0-9]+)*([:/?]|$)|\[|[^/]*[@%])`)
 	cdnPath      = regexp.MustCompile(`^/__cdn/(https?)/([^/?]+)(?:/(.*))?$`)
+	partRe       = regexp.MustCompile(`^bytes (\d+)-(\d+)/`) // a part's place in the whole (Content-Range)
 )
 
 // encLogin percent-encodes a login for an address: letters, digits and - . _ ~ stay, the rest becomes %XX.
@@ -439,6 +440,7 @@ func (f *front) serve(c *counted, r *http.Request) {
 		}
 		mu.Lock()
 		c.live = f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session: it is still playing)
+		c.live = c.live || f.livePiece(r.URL.RequestURI())
 		row := f.pieceRow(r.URL.RequestURI(), whoIs(r))
 		mu.Unlock()
 		w, follow := f.followed(r) // (a redirect of a film or catch-up let through: what it continues)
@@ -459,6 +461,7 @@ func (f *front) serve(c *counted, r *http.Request) {
 		mu.Lock()
 		part := f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session on the provider's own server)
 		row := f.pieceRow(r.URL.RequestURI(), whoIs(r))
+		named := f.livePiece(r.URL.RequestURI()) // (read with the lock held: playlists being handed out write that list)
 		mu.Unlock()
 		if row != nil {
 			defer func() {
@@ -471,7 +474,7 @@ func (f *front) serve(c *counted, r *http.Request) {
 		if part {
 			c.ask.kind, c.ask.routine = "piece", true
 		}
-		c.live = part
+		c.live = part || named
 		w, follow := f.followed(r)
 		if !follow && !part { // (a piece is counted with its session, not as a stream of its own)
 			w = f.classify(r.URL)
@@ -570,7 +573,9 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 	// A piece of a live HLS session: its server gets pieceWait (ExoPlayer's default read timeout, as for the
 	// bridge in hlsSource), then it is asked again at once on a new connection, and a piece that goes quiet
 	// part way is fetched on from where it stopped (resume). A kept connection that went quiet otherwise held
-	// the player for the full wait while a player asking the server itself reconnects.
+	// the player for the full wait while a player asking the server itself reconnects. That holds however the
+	// piece is asked for and answered: with a Range (players built on FFmpeg ask for every piece with "Range:
+	// bytes=0-" and are answered 206), or without a Content-Length.
 	live := c.live && hd == nil && r.Method == "GET"
 	first := wait
 	if live {
@@ -645,10 +650,21 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 	if _, ok := h["Content-Type"]; !ok {
 		h["Content-Type"] = nil // none sent, none added
 	}
-	var src io.Reader = &quietBody{resp.Body, secs(wait)}
-	if live && resp.StatusCode == 200 && resp.ContentLength > 0 && out.Header.Get("Range") == "" &&
-		resp.Header.Get("Content-Encoding") == "" {
-		src = &resumeBody{body: resp.Body, out: out, size: resp.ContentLength, wait: wait}
+	var src io.Reader = &quietBody{resp.Body, secs(first)}
+	if live && resp.ContentLength != 0 && resp.Header.Get("Content-Encoding") == "" {
+		// The whole piece, or a part of it whose place the server named: it can be carried on where it stops.
+		from, to, whole := int64(0), "", resp.StatusCode == 200 && out.Header.Get("Range") == ""
+		m := partRe.FindStringSubmatch(resp.Header.Get("Content-Range"))
+		if resp.StatusCode == 206 && m != nil {
+			from, _ = strconv.ParseInt(m[1], 10, 64)
+			to = m[2]
+		}
+		if size := resp.ContentLength; whole || to != "" {
+			if size < 0 {
+				size = math.MaxInt64 // (no length sent: it ends when the server ends it)
+			}
+			src = &resumeBody{body: resp.Body, out: out, from: from, to: to, size: size, wait: wait}
+		}
 	}
 	if resp.StatusCode >= 400 && !guard && r.Method != "HEAD" { // the provider's own error page (see hideLogin)
 		// Packed, as the player allowed (Apache packs its error pages): unpacked to be read, and passed on plain.
@@ -702,11 +718,14 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 
 // resumeBody: a live HLS piece passed on as it arrives. If its server sends nothing for pieceWait (or the
 // connection breaks) part way, the rest is asked for once with a Range on a new connection and passed on after
-// what was sent, so the player gets the whole piece on its one answer.
+// what was sent, so the player gets the whole piece on its one answer. A part of a piece (an answer to a Range,
+// from..to of the whole) is carried on the same way, up to where the part ends.
 type resumeBody struct {
 	body    io.ReadCloser
 	out     *http.Request
-	size    int64 // the whole piece (Content-Length)
+	from    int64  // where this answer starts in the whole piece
+	to      string // where it ends ("": at the piece's end)
+	size    int64  // its length (Content-Length)
 	got     int64
 	wait    float64
 	resumed bool
@@ -723,7 +742,7 @@ func (b *resumeBody) Read(p []byte) (int, error) {
 	lg.Info().Str("server", b.out.URL.Hostname()).Int64("kb", b.got>>10).
 		Msgf("a piece of video stopped part way; the rest asked for on a new connection")
 	req := b.out.Clone(b.out.Context())
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", b.got))
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%s", b.from+b.got, b.to))
 	var timed atomic.Bool
 	ctx, cancel := context.WithCancel(b.out.Context())
 	req = req.WithContext(ctx)
@@ -734,7 +753,7 @@ func (b *resumeBody) Read(p []byte) (int, error) {
 		cancel()
 		return n, err
 	}
-	if resp.StatusCode != 206 || !strings.HasPrefix(resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", b.got)) {
+	if resp.StatusCode != 206 || !strings.HasPrefix(resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", b.from+b.got)) {
 		resp.Body.Close()
 		cancel()
 		return n, err // (no way to carry on where it stopped: the player sees a broken answer, as before)

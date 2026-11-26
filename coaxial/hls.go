@@ -420,6 +420,37 @@ func playlistPieces(text string) map[string]bool {
 	return pieces
 }
 
+// livePieces: the addresses that live playlists gave the players, and when. A session's own list (pieces) is
+// its main playlist's; where that one lists quality levels, the player reads a variant's playlist instead, and
+// the pieces that one names were in no list: they got a film's wait (60 s), not a live piece's (see forwardHeld).
+var livePieces = map[string]float64{} // provider and address -> when a live playlist last named it
+
+// noteLive remembers what a live playlist (one with pieces that has not ended) names, as given to the players.
+func (f *front) noteLive(text string) {
+	if !strings.Contains(text, "#EXTINF") || strings.Contains(text, "#EXT-X-ENDLIST") {
+		return
+	}
+	now := mono()
+	mu.Lock()
+	defer mu.Unlock()
+	for a := range playlistPieces(text) {
+		livePieces[f.base+" "+a] = now
+	}
+	if len(livePieces) > 300 {
+		for k, t := range livePieces {
+			if now-t > 60 {
+				delete(livePieces, k)
+			}
+		}
+	}
+}
+
+// livePiece: a live playlist named this address in the last minute. (mu held)
+func (f *front) livePiece(uri string) bool {
+	t, ok := livePieces[f.base+" "+uri]
+	return ok && mono()-t <= 60
+}
+
 type hlsRow struct {
 	first, last             float64
 	who, id, provider, port string
@@ -590,6 +621,9 @@ func servePlaylist(w http.ResponseWriter, status int, h http.Header, data []byte
 		}
 		if film != nil && status < 300 { // a film's: what it names is read no faster than set (advanced.go)
 			own.noteFilm(text, film)
+		}
+		if film == nil && status == 200 && own != nil {
+			own.noteLive(text)
 		}
 		data = []byte(fullAddresses(text, askedAt(r)))
 	} else if status >= 400 && own != nil {
