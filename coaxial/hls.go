@@ -643,7 +643,7 @@ func fetchShared(ctx context.Context, target string, h http.Header, wait float64
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || cdnForbidden.MatchString(cdnAddress(u)) {
 			return nil, "", &refused{status: 403}
 		}
-		if home, err := leadsHome(ctx, u.Hostname()); err != nil {
+		if home, err := ledHome(ctx, u.Hostname()); err != nil {
 			return nil, "", err
 		} else if home {
 			return nil, "", &refused{status: 403}
@@ -1179,6 +1179,47 @@ func nameOK(ctx context.Context, host string) bool {
 		mu.Unlock()
 	}
 	return c.ok
+}
+
+// led: where the names of playlists' servers led when last looked up (ok: not home), kept a minute as well.
+var led = map[string]checked{}
+
+// ledHome: leadsHome for a playlist's server (fetchShared), with the answer kept a minute. A player reloads a
+// live playlist every few seconds, over a connection that is already open, and a lookup at every reload made
+// each one wait for the resolver: one lookup that failed gave the player a 502 and opened the channel again at
+// the provider. A lookup that fails or takes long leaves the last answer standing and is tried again a little
+// later. Nothing is given up for it: the address of every new connection is still checked when it is made (see
+// dialer), a kept one was checked when it was made, and with no answer no new one can be made at all.
+func ledHome(ctx context.Context, host string) (bool, error) {
+	host, now := strings.ToLower(host), mono()
+	mu.Lock()
+	c, have := led[host]
+	mu.Unlock()
+	if have && now-c.at < 60 {
+		return !c.ok, nil
+	}
+	lctx := ctx
+	if have { // (an answer is in hand: the reload does not wait long for a new one)
+		var cancel context.CancelFunc
+		lctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+	}
+	home, err := leadsHome(lctx, host)
+	if err != nil && !home {
+		if !have {
+			return false, err
+		}
+		home, c.at = !c.ok, now-50 // (asked again 10 s on)
+	} else {
+		c = checked{now, !home}
+	}
+	mu.Lock()
+	if len(led) > 2000 {
+		led = map[string]checked{}
+	}
+	led[host] = c
+	mu.Unlock()
+	return home, nil
 }
 
 // ---------------------------------------------------------------------------
