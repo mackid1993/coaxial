@@ -522,13 +522,16 @@ func (f *front) decide(who string, w what, follow bool, now float64) (verdict, s
 		}
 	}
 	if lim := f.limit(); lim > 0 {
-		// What makes room first: the device's own read of the same thing (a seek, a rewind), then a session nobody
+		// What makes room first: the device's own read of the same thing (a seek, a rewind), then a connection
+		// nobody is on (the HLS session of a channel whose last MPEG-TS reader hung up), then a session nobody
 		// asks for, then the newest of the device's own (a device asking for something else is most often
 		// leaving what it opened last, and a media server that records and serves a viewer keeps its recording).
 		first := func(c, d *conn) bool {
 			switch {
 			case w.kind != "" && (c.w == w) != (d.w == w):
 				return c.w == w
+			case (len(c.who) == 0) != (len(d.who) == 0):
+				return len(c.who) == 0
 			case c.idle != d.idle:
 				return c.idle
 			}
