@@ -403,6 +403,11 @@ func (f *front) variant(target, who string) *session {
 			if s.who != nil && !isLoop(who) {
 				s.who[who] = mono()
 			}
+			// (the device plays on: its row in the status list goes on too. The row was only kept up by asks for
+			// the channel's own playlist, which a player of a variant makes once: it ended 30 s after the tune.)
+			if row := hlsRows[who+" "+f.base+" "+channelID(strings.TrimPrefix(k, f.base+" "))]; row != nil && mono()-row.last <= 30 {
+				row.last = mono()
+			}
 			return s
 		}
 	}
