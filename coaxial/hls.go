@@ -374,6 +374,7 @@ type session struct {
 	target     float64            // its playlist's target duration (0: not known yet)
 	seq        int64              // its playlist's MEDIA-SEQUENCE when last read (hasSeq: read at all)
 	hasSeq     bool
+	moved      float64 // when that number last moved on (see stood)
 	refusedAt  float64 // when opening the channel again in its place was last refused (see renewGap)
 }
 
@@ -398,9 +399,23 @@ func (s *session) note(data []byte) {
 	}
 	if m := seqTagRe.FindSubmatch(data); m != nil {
 		if n, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
+			if !s.hasSeq || n != s.seq {
+				s.moved = mono()
+			}
 			s.seq, s.hasSeq = n, true
 		}
 	}
+}
+
+// stoodStill: seconds a live playlist may stand still before a player that tunes the channel again is given a
+// new session (never less than three of its target durations). A provider's playlist stands still between
+// its lumps, 12 s at the most seen; longer than this, a player that has given up and asks for the channel
+// afresh is not handed the same stopped playlist back. (A variable for the tests.)
+var stoodStill = 15.0
+
+// stood: the session's playlist has been read and has not moved on for too long (mu held).
+func (s *session) stood(now float64) bool {
+	return s.hasSeq && s.moved > 0 && now-s.moved > math.Max(stoodStill, 3*s.target)
 }
 
 // held: how long after its last request the session still counts as a connection; idle: how long until it
@@ -972,6 +987,31 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	}
 	of := vs != nil
 	mu.Unlock()
+	// A player that asks for the channel at its own address (not for its session's playlist) has tuned it again.
+	// Straight at the provider that opens a new session. Here it was handed the remembered one whatever state
+	// that was in: a session whose playlist had stopped moving still answers 200, with the same playlist, so a
+	// player that gave up on it and tuned again got the stopped playlist back each time and never recovered.
+	// When the remembered session's playlist has stood still (see stoodStill), the channel is opened again in
+	// its place, as for a session whose reload fails. A new session's clock starts at its first read, so a
+	// channel that stays stopped is opened again at most once in that time, however often it is asked for.
+	if m == nil && s != nil && !back {
+		mu.Lock()
+		still, from, since := s.stood(mono()), s.loc, mono()-s.moved
+		mu.Unlock()
+		if still {
+			if ns, d, err := openChannel(key, target, h, from, asked); err == nil && d == nil && ns != nil && ns != s {
+				mu.Lock()
+				ns.what = s.what // (still the same stream, and the same devices on it)
+				for dev, t := range s.who {
+					ns.who[dev] = t
+				}
+				mu.Unlock()
+				lg.Info().Str("device", who).Str("channel", channelID(plainURI)).Str("provider", rt.f.name).Float64("stood_still_s", round1(since)).
+					Msgf("%s tuned a live HLS channel again whose playlist had stood still for %.0f s: opened again at the provider", who, since)
+				s = ns
+			}
+		}
+	}
 	if s == nil || back {
 		// A new session at the provider: by the rules it has on (advanced.go). Others asking for the same
 		// channel meanwhile share it. (The relay's own bridge was let through when its reader came.)
