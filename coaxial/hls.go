@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf16"
+
+	"github.com/rs/zerolog"
 )
 
 var errNotHLS = errors.New("not joinable HLS")
@@ -219,6 +221,12 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 		var pub numbering
 		var rn *renumber
 		var sent []string // names of the newest 60 pieces
+		// Where a piece's clock starts over (a 24/7 channel's next episode), the MPEG-TS made here carries it on,
+		// with the same clockFix as a provider's own MPEG-TS (tsSource): recorders read a clock that starts over
+		// as time going backwards. Pieces whose clock runs on are handed on unchanged.
+		var clk clockFix
+		clk.tag = func(e *zerolog.Event) *zerolog.Event { return e.Str("channel", ch.id) }
+		var passed int64 // bytes handed on so far
 		for {
 			began := mono()
 			var at string
@@ -325,6 +333,10 @@ func hlsSource(start, agent string, via http.RoundTripper) source {
 					rn.part = nil
 					data = rn.apply(data)
 				}
+				if data = clk.fix(data, passed); len(data) == 0 {
+					continue
+				}
+				passed += int64(len(data))
 				var parts [][]byte // whole 188-byte packets
 				for j := 0; j < len(data); j += 65424 {
 					parts = append(parts, data[j:min(j+65424, len(data))])
@@ -425,9 +437,14 @@ type session struct {
 	pieces     map[string]bool    // the addresses its playlist last gave the players (see inUse)
 	owner      *front             // the provider account it is opened for (see conns in advanced.go)
 	target     float64            // its playlist's target duration (0: not known yet)
+	seq        int64              // its playlist's MEDIA-SEQUENCE when last read (hasSeq: read at all)
+	hasSeq     bool
 }
 
-var targetRe = regexp.MustCompile(`(?m)^\s*#EXT-X-TARGETDURATION:\s*([0-9]+(?:\.[0-9]*)?)`)
+var (
+	targetRe = regexp.MustCompile(`(?m)^\s*#EXT-X-TARGETDURATION:\s*([0-9]+(?:\.[0-9]*)?)`)
+	seqTagRe = regexp.MustCompile(`(?m)^\s*#EXT-X-MEDIA-SEQUENCE:\s*([0-9]+)`)
+)
 
 // note: what a playlist of the session says about it: its target duration, which players wait between
 // asks for it (at most a minute is taken from it). (mu held)
@@ -435,6 +452,11 @@ func (s *session) note(data []byte) {
 	if m := targetRe.FindSubmatch(data); m != nil {
 		if t, err := strconv.ParseFloat(string(m[1]), 64); err == nil && t > 0 {
 			s.target = math.Min(t, 60)
+		}
+	}
+	if m := seqTagRe.FindSubmatch(data); m != nil {
+		if n, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
+			s.seq, s.hasSeq = n, true
 		}
 	}
 }
@@ -928,6 +950,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	var hd http.Header
 	var data []byte
 	var final string
+	var was *session // the session this one replaced, when it was opened again (for the log line below)
 	for attempt := 1; attempt <= 2; attempt++ {
 		mu.Lock()
 		loc := s.loc
@@ -965,6 +988,9 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			}
 		}
 		mu.Unlock()
+		if ns != s {
+			was = s
+		}
 		s = ns
 	}
 	var pieces map[string]bool
@@ -976,6 +1002,15 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	if status == 200 {
 		s.pieces = pieces
 		s.note(data)
+		if was != nil && was.hasSeq && s.hasSeq { // does the new session carry on the numbering players have?
+			ev := lg.Info()
+			if s.seq < was.seq || s.seq > was.seq+64 {
+				ev = lg.Warn()
+			}
+			ev.Str("channel", channelID(uri)).Str("device", who).Int64("from", was.seq).Int64("to", s.seq).
+				Bool("same_server", hostOf(was.final) == hostOf(final)).
+				Msgf("a live HLS channel opened again at the provider: its playlist numbering went from %d to %d", was.seq, s.seq)
+		}
 		hlsSeen[port+chanOrig] = mono()
 		if len(hlsSeen) > 300 {
 			for k, t := range hlsSeen {
