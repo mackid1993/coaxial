@@ -1,7 +1,8 @@
 #!/bin/sh
 # Smoke test of a built Coaxial image: the program in the image itself is started (its proxy part, without the
 # VPN) in front of a stand-in provider, and a stand-in player logs in and watches a live channel through it,
-# as MPEG-TS and as HLS, and opens a catch-up as HLS.
+# as MPEG-TS and as HLS, and opens a catch-up as HLS. A second channel it watches as HLS on the provider that is
+# set to MPEG-TS, where the proxy cuts the HLS from the MPEG-TS itself.
 # The image build runs this before the image is given its tag; an image that fails it is never published.
 #
 #   .github/smoke/smoke.sh <image>

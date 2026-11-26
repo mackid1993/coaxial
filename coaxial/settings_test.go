@@ -49,9 +49,25 @@ func TestSaveUnchangedRestartsNothing(t *testing.T) {
 	if r, _ := got["restarting"].(map[string]any); r["vpn"] != false || r["proxy"] != false {
 		t.Errorf("an unchanged save restarts %v", r)
 	}
-	time.Sleep(200 * time.Millisecond) // (what the save starts in the background)
+	// What the save starts in the background (apply) is waited for until it is done, where it was given a
+	// flat 200 ms: on a slow test machine the look below came before apply had decided anything, and a stop
+	// made after it went unseen. apply notes what the proxy part is started with as soon as it has compared
+	// the settings, and holds l.work until it has stopped and started what it meant to.
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		l.mu.Lock()
+		begun := l.proxyIn != ""
+		l.mu.Unlock()
+		if begun {
+			break
+		}
+	}
+	l.work.Lock()
+	l.work.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.proxyIn == "" {
+		t.Errorf("5 s after the save, what it starts in the background has not run")
+	}
 	if l.vpn == nil || l.vpn.stopped {
 		t.Errorf("the VPN was stopped by an unchanged save")
 	}

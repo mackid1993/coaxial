@@ -78,7 +78,9 @@ func TestItemSeekWhileOldReadStalls(t *testing.T) {
 			t.Fatalf("on=%v: the seek: %d", on, seek.StatusCode)
 		}
 		seek.Body.Close()
-		if took > time.Second {
+		// (1.5 s where it was 1 s, for slow test machines. Not more: the fault this guards is a seek that
+		// waits out the grace time, 2 s, and the limit has to stay under that to see it.)
+		if took > 1500*time.Millisecond {
 			t.Errorf("on=%v: the seek took %.1f s to start", on, took.Seconds())
 		}
 		if on {

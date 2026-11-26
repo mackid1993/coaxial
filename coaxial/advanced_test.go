@@ -737,7 +737,10 @@ func TestShareLists(t *testing.T) {
 		return true
 	})
 	f, base := advFront(t, fp, "ts", advanced{Share: true})
-	f.shareFor = 0.6 // (minutes in the settings; a moment here)
+	// (Minutes in the settings; seconds here. Copies are kept 5 s while sharing is tested: at 0.6 s the seven
+	// requests below had to fit into that time, and on a slow test machine a copy ran out between two of
+	// them. That copies do run out is tested further down with a short life of its own.)
+	f.shareFor = 5
 	get := func(host, q string) (int, string) {
 		req, _ := http.NewRequest("GET", base+q, nil)
 		req.Host = host
@@ -768,11 +771,20 @@ func TestShareLists(t *testing.T) {
 	if a, b, c := fp.count(fp.hits, "/player_api.php"), fp.count(fp.hits, "/player_api.php?get_series"), fp.count(fp.hits, "/xmltv.php"); a != 2 || b != 2 || c != 1 {
 		t.Errorf("the login answer is never shared (asked %d times, want 2), nor an error (%d, want 2); the guide is (%d, want 1)", a, b, c)
 	}
-	time.Sleep(700 * time.Millisecond)
-	get("tv-a.lan:18601", list)
+	// A copy that has run out is not used. (A list of its own, downloaded with a life of 0.6 s: a wait can
+	// only make it older, so a slow machine cannot fail this.)
+	f.shareFor = 0.6
+	short := list + "&category_id=3"
+	get("tv-a.lan:18601", short)
 	if n := fp.count(fp.hits, "/player_api.php?get_live_streams"); n != 2 {
-		t.Errorf("an expired copy was used: downloaded %d times, want 2", n)
+		t.Errorf("a list asked for with another query was not downloaded for itself: %d downloads, want 2", n)
 	}
+	time.Sleep(700 * time.Millisecond)
+	get("tv-a.lan:18601", short)
+	if n := fp.count(fp.hits, "/player_api.php?get_live_streams"); n != 3 {
+		t.Errorf("an expired copy was used: downloaded %d times, want 3", n)
+	}
+	f.shareFor = 5
 	// Several players at once, while the provider is slow: one download, and every one gets all of it.
 	var wg sync.WaitGroup
 	got := make([]string, 4)
@@ -801,8 +813,8 @@ func TestShareLists(t *testing.T) {
 		r := ask(t, base2, "192.0.2.1", "/player_api.php?username=tv&password=easy&action=get_live_streams")
 		r.Body.Close()
 	}
-	if n := fp.count(fp.hits, "/player_api.php?get_live_streams"); n != 4 {
-		t.Errorf("with the option off, the list was downloaded %d times in all, want 4", n)
+	if n := fp.count(fp.hits, "/player_api.php?get_live_streams"); n != 5 { // (three above, and these two)
+		t.Errorf("with the option off, the list was downloaded %d times in all, want 5", n)
 	}
 }
 
@@ -810,8 +822,13 @@ func TestShareLists(t *testing.T) {
 // Limit movie download speed
 // ---------------------------------------------------------------------------
 
+// (The film is 6 MB where it was 2.5 MB: at 1 MB a second, with one second's worth let through at once, a
+// slowed read takes 5 s and one that is not slowed a moment. The two were 1.5 s and "under 0.8 s", so a test
+// machine that stood still for half a second failed the reads that must not be slowed. Now a read counts as
+// not slowed under 2.5 s, half of what slowing costs, as before; the slowed one must still take nine tenths of
+// its time.)
 func TestMovieSpeedLimit(t *testing.T) {
-	const size = 2500000
+	const size = 6000000
 	fp := newFakeProv(t, false, func(fp *fakeProv, w http.ResponseWriter, r *http.Request) bool {
 		if strings.HasPrefix(r.URL.Path, "/movie/") || strings.HasPrefix(r.URL.Path, "/timeshift/") {
 			fp.stream(w, r, "x", false, size)
@@ -828,16 +845,16 @@ func TestMovieSpeedLimit(t *testing.T) {
 		}
 		return time.Since(began).Seconds()
 	}
-	if s := took("/movie/tv/easy/4.mkv"); s < 1.2 || s > 4 {
-		t.Errorf("2.5 MB of a film at 8 Mbit/s took %.2f s, want about 1.5", s)
+	if s := took("/movie/tv/easy/4.mkv"); s < 4.5 || s > 9 {
+		t.Errorf("6 MB of a film at 8 Mbit/s took %.2f s, want about 5", s)
 	}
-	if s := took("/timeshift/tv/easy/9/2026-01-01:10-00/22.ts"); s > 0.8 {
+	if s := took("/timeshift/tv/easy/9/2026-01-01:10-00/22.ts"); s > 2.5 {
 		t.Errorf("catch-up is slowed too: %.2f s", s)
 	}
 	_, fast := advFront(t, fp, "ts", advanced{})
 	began := time.Now()
 	body(ask(t, fast, "192.0.2.1", "/movie/tv/easy/4.mkv"))
-	if s := time.Since(began).Seconds(); s > 0.8 {
+	if s := time.Since(began).Seconds(); s > 2.5 {
 		t.Errorf("with the option off, a film is slowed: %.2f s", s)
 	}
 }

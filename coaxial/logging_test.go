@@ -66,6 +66,16 @@ func linesWith(log string, parts ...string) []string {
 	return out
 }
 
+// logSoon: waits, up to 5 s, until the log holds what cond looks for. A line about a request is written when
+// its handler ends, a moment after the player has its answer: the tests below slept 100 or 200 ms and then
+// read the log, and on a slow test machine the line was not there yet. The checks themselves are unchanged,
+// and each still waits its old 100 or 200 ms after this, so a line written twice is seen as before.
+func logSoon(b *syncBuf, cond func(log string) bool) {
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && !cond(b.String()); {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func getAs(t *testing.T, url, dev string) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest("GET", url, nil)
@@ -113,6 +123,9 @@ func TestLog403IsAWarning(t *testing.T) {
 	if r.StatusCode != 403 {
 		t.Errorf("the list: the player was given %d, want 403", r.StatusCode)
 	}
+	logSoon(b, func(log string) bool {
+		return len(linesWith(log, " WRN ", "the provider answered 403", "kind=stream")) > 0 && len(linesWith(log, " WRN ", "the provider answered 403", "kind=player_api")) > 0
+	})
 	time.Sleep(200 * time.Millisecond)
 	log := b.String()
 	if got := linesWith(log, " WRN ", "the provider answered 403", "kind=stream", "channel=4031", "device=198.51.100.7", "provider=Adv", "status=403", "ms="); len(got) != 1 {
@@ -132,6 +145,7 @@ func TestLogUnreachableProvider(t *testing.T) {
 	r := getAs(t, base+"/movie/tv/easy/77.mkv", "198.51.100.9")
 	io.Copy(io.Discard, r.Body)
 	r.Body.Close()
+	logSoon(b, func(log string) bool { return len(linesWith(log, " WRN ", "the provider could not be reached")) > 0 })
 	time.Sleep(200 * time.Millisecond)
 	if got := linesWith(b.String(), " WRN ", "the provider could not be reached", "kind=movie", "item=77", "device=198.51.100.9", "reason="); len(got) != 1 {
 		t.Errorf("want one WRN line for the unreachable provider:\n%s", b.String())
@@ -240,6 +254,9 @@ func TestLogRoutineQuiet(t *testing.T) {
 		io.Copy(io.Discard, r.Body)
 		r.Body.Close()
 	}
+	logSoon(b, func(log string) bool {
+		return strings.Contains(log, "kind=health") && len(linesWith(log, " WRN ", "answered 404", "kind=piece", "device=198.51.100.12")) > 0
+	})
 	time.Sleep(100 * time.Millisecond)
 	if strings.Contains(b.String(), "kind=cdn") || !strings.Contains(b.String(), "kind=health") ||
 		len(linesWith(b.String(), " WRN ", "answered 404", "kind=piece", "device=198.51.100.12")) != 1 {
@@ -297,7 +314,15 @@ func TestLogLevelSetting(t *testing.T) {
 	if err != nil || back.masked()["ui"].(map[string]any)["log_level"] != "quiet" {
 		t.Errorf("loaded again: %v %v", err, back)
 	}
-	time.Sleep(100 * time.Millisecond) // (what the save starts in the background)
+	// (what the save starts in the background: waited for, up to 5 s, where it was given a flat 100 ms)
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		l.mu.Lock()
+		set := l.proxyIn != ""
+		l.mu.Unlock()
+		if set {
+			break
+		}
+	}
 	l.mu.Lock()
 	if !strings.Contains(l.proxyIn, `"log_level":"quiet"`) || strings.Contains(l.proxyKey, "log_level") {
 		t.Errorf("the proxy part's next start must get the level (%s) without it counting as a change (%s)", l.proxyIn, l.proxyKey)

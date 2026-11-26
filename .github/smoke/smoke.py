@@ -5,11 +5,15 @@ serve: a stand-in provider. It knows one login and one live channel, whose MPEG-
        channels come: a burst, then lumps with pauses between them, one of them long. It also has that channel
        as HLS and one catch-up as HLS, the way providers do: its own address sends the player on to a video
        server (here its second port), every open of the live channel there is a new session, and the newest
-       session is the only one that still answers.
+       session is the only one that still answers. A second live channel is a real one (program tables,
+       video with a keyframe every 4 s, sound), sent as MPEG-TS: 24 s of it at once, then nothing more.
 check: a player. Through the proxy part of the image it logs in, is refused with a wrong password, opens the
        status page and watches the channel; what it is sent must be, byte for byte, what the stand-in sent.
        Then it watches the channel as HLS and opens the catch-up, following every address the way a player
        does: none may lead anywhere but the proxy, and every piece must be what the stand-in sent.
+       Last it watches the second channel as HLS on the port whose provider is set to MPEG-TS: that HLS is cut
+       from the channel's MPEG-TS by the proxy itself, and its pieces must be the stand-in's packets, cut at
+       its keyframes, while a recorder reads the same channel as MPEG-TS over the same one connection.
 """
 import json
 import sys
@@ -27,7 +31,10 @@ CATCH_UP = "60/2026-01-01:10-00/2.m3u8"      # the catch-up: an hour of channel 
 PIECE_PACKETS = 400                          # an HLS piece: 75 kB
 
 counting = threading.Lock()
-counts = {"opens": 0, "playlists": 0}        # opens of the live HLS channel; asks for its playlist
+counts = {"opens": 0, "playlists": 0,        # opens of the live HLS channel; asks for its playlist
+          "real_ts": 0, "real_m3u8": 0}      # asks for the real channel as MPEG-TS, and as HLS (never)
+REAL_GROUPS = 6                              # the real channel: 6 keyframes 4 s apart, 24 s of video
+REAL_FRAMES = 100                            # frames from one keyframe to the next (25 a second)
 
 
 def live_piece(number):
@@ -50,6 +57,77 @@ def packets(first, count):
             p[k] = (i * 31 + k * 7) & 0xFF
         out += p
     return bytes(out)
+
+
+def crc32_mpeg(data):
+    crc = 0xFFFFFFFF
+    for b in data:
+        crc ^= b << 24
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF if crc & 0x80000000 else (crc << 1) & 0xFFFFFFFF
+    return crc.to_bytes(4, "big")
+
+
+def stamp(prefix, t):
+    """A PES timestamp (PTS) of t ticks of 1/90000 s."""
+    return bytes([prefix << 4 | (t >> 29) & 0x0E | 1, (t >> 22) & 0xFF, (t >> 14) & 0xFE | 1, (t >> 7) & 0xFF, (t << 1) & 0xFE | 1])
+
+
+def real_channel():
+    """The real channel as MPEG-TS: a list of (kind, packet), kind "table" for the program tables (PAT, PMT)
+    that stand before every keyframe, "key" for a keyframe's first packet, "av" for every other video or
+    sound packet. H.264 video on PID 0x100 (it carries the clock), AAC sound on PID 0x101; the first frame is
+    shown 10 s into the stream's clock."""
+    out, cc = [], {}
+
+    def packet(kind, pid, start, field, payload, pad):
+        n = cc.get(pid, 0)
+        cc[pid] = n + 1
+        p = bytearray([0x47, (0x40 if start else 0) | pid >> 8, pid & 0xFF, (0x30 if field else 0x10) | n & 0x0F])
+        if field:
+            p += bytes([len(field)]) + field
+        p += payload
+        while len(p) < 188:                              # (never a zero: no start code hides in the padding)
+            p.append(pad if pad else 0x11 + (len(out) * 7 + len(p) * 13) % 0xE0)
+        out.append((kind, bytes(p)))
+
+    pat = bytes([0x00, 0xB0, 13, 0, 1, 0xC1, 0, 0, 0, 1, 0xF0, 0x00])
+    pmt = bytes([0x02, 0xB0, 23, 0, 1, 0xC1, 0, 0, 0xE1, 0x00, 0xF0, 0, 0x1B, 0xE1, 0x00, 0xF0, 0, 0x0F, 0xE1, 0x01, 0xF0, 0])
+    key_start = bytes([0, 0, 0, 1, 0x09, 0x10, 0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1F, 0xAC, 0xD9, 0, 0, 0, 1, 0x68, 0xEE, 0x3C, 0x80, 0, 0, 0, 1, 0x65, 0x88])
+    other_start = bytes([0, 0, 0, 1, 0x09, 0x30, 0, 0, 0, 1, 0x41, 0x9A])
+    for f in range(REAL_GROUPS * REAL_FRAMES):
+        key = f % REAL_FRAMES == 0
+        t = 900000 + f * 3600
+        if key:
+            packet("table", 0, True, b"", b"\x00" + pat + crc32_mpeg(pat), 0xFF)
+            packet("table", 0x1000, True, b"", b"\x00" + pmt + crc32_mpeg(pmt), 0xFF)
+        clock = t - 45000                                # (the PCR runs half a second ahead of the pictures)
+        field = bytes([0x50 if key else 0x10, clock >> 25 & 0xFF, clock >> 17 & 0xFF, clock >> 9 & 0xFF, clock >> 1 & 0xFF, (clock & 1) << 7 | 0x7E, 0])
+        packet("key" if key else "av", 0x100, True, field, bytes([0, 0, 1, 0xE0, 0, 0, 0x80, 0x80, 5]) + stamp(2, t) + (key_start if key else other_start), 0)
+        for _ in range(7 if key else 2):
+            packet("av", 0x100, False, b"", b"", 0)
+        packet("av", 0x101, True, b"", bytes([0, 0, 1, 0xC0, 0, 170, 0x80, 0x80, 5]) + stamp(2, t) + bytes([0xFF, 0xF1, 0x4C, 0x80]), 0)
+    return out
+
+
+def real_ts():
+    return b"".join(p for _, p in real_channel())
+
+
+def real_pieces():
+    """The pieces the proxy must cut the real channel into: one per keyframe that is followed by another. Each
+    is the tables that stood before its keyframe, then every video and sound packet up to the next keyframe."""
+    pieces, tables, now = [], [], None
+    for kind, p in real_channel():
+        if kind == "table":
+            tables.append(p)
+            continue
+        if kind == "key":
+            if now is not None:
+                pieces.append(bytes(now))
+            now = bytearray(b"".join(tables[-2:]))
+        now += p
+    return pieces
 
 
 class Provider(BaseHTTPRequestHandler):
@@ -128,6 +206,26 @@ class Provider(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        if u.path == "/live/%s/%s/3.m3u8" % (REAL_USER, REAL_PASS):   # (set to MPEG-TS, it is never asked for as HLS)
+            with counting:
+                counts["real_m3u8"] += 1
+            return self.send(404)
+        if u.path == "/live/%s/%s/3.ts" % (REAL_USER, REAL_PASS):
+            with counting:
+                counts["real_ts"] += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                self.wfile.write(real_ts())                # all of it at once: nothing here depends on the clock
+                self.wfile.flush()
+                self.connection.settimeout(300)
+                self.connection.recv(1)                    # (the channel stays open until the proxy lets go of it)
+            except OSError:
+                pass
             return
         if u.path == "/live/%s/%s/1.ts" % (REAL_USER, REAL_PASS):
             self.send_response(200)
@@ -243,6 +341,63 @@ def check_hls(hls, provider, want):
     want(same == len(pieces) and same > 0, "the catch-up's pieces are byte for byte what the provider sent (%d of %d)" % (same, len(pieces)))
 
 
+def check_hls_from_ts(base, provider, want):
+    """Live HLS on the port whose provider is set to MPEG-TS: the proxy cuts it from the channel's MPEG-TS."""
+    expected = real_pieces()
+    status, body, at, away = play("%s/live/%s/%s/3.m3u8" % (base, EASY_USER, EASY_PASS), base)
+    text = body.decode("utf-8", "replace")
+    pieces, first = listed(text)
+    want(status == 200 and "#EXTM3U" in text and len(pieces) >= 2 and first is not None and not away,
+         "a channel of the MPEG-TS provider is served as HLS (%d, %d pieces%s)" % (status, len(pieces), ", sent away to " + away if away else ""))
+    # The stand-in sent all it has at once, so the playlist comes to hold every piece that can be cut from it
+    # (one per keyframe that is followed by another), and stays so.
+    began = first
+    for _ in range(50):
+        if len(pieces) >= len(expected) or status != 200:
+            break
+        time.sleep(0.1)
+        status, body, _, away = play(at, base)
+        text = body.decode("utf-8", "replace")
+        pieces, first = listed(text)
+    want(status == 200 and len(pieces) == len(expected) and first == began and "#EXT-X-ENDLIST" not in text,
+         "its playlist names the %d pieces the stand-in's keyframes make, from the same first number, and has no end mark (%d pieces, first %s then %s)"
+         % (len(expected), len(pieces), began, first))
+    lengths = [l.strip() for l in text.splitlines() if l.startswith("#EXTINF:")]
+    want(lengths and all(l == "#EXTINF:4.000," for l in lengths) and "#EXT-X-TARGETDURATION:4\n" in text,
+         "every piece is given as 4 s long, the time from one keyframe to the next (%s)" % ", ".join(sorted(set(lengths))))
+    full = [urljoin(at, p) for p in pieces]
+    off = [a for a in full if urlparse(a).netloc != urlparse(base).netloc]
+    want(not off, "every piece's address, worked out the way a player does, leads to the proxy (%s)"
+         % (off[0] if off else "%d of %d" % (len(full), len(full))))
+    same, tables = 0, 0
+    for i, a in enumerate(full):
+        s, data, _, away = play(a, base)
+        same += s == 200 and not away and i < len(expected) and data == expected[i]
+        tables += len(data) > 376 and data[1] & 0x1F == 0 and data[2] == 0 and data[189:191] == b"\x50\x00"
+    want(tables == len(full) and tables > 0, "every piece starts with the program tables (%d of %d)" % (tables, len(full)))
+    want(same == len(full) and same > 0,
+         "the pieces are the stand-in's video and sound packet for packet, cut at its keyframes (%d of %d)" % (same, len(full)))
+    # A recorder reads the same channel as MPEG-TS meanwhile: it shares the HLS viewer's connection.
+    got, sent = b"", real_ts()
+    try:
+        with urllib.request.urlopen("%s/live/%s/%s/3.ts" % (base, EASY_USER, EASY_PASS), timeout=6) as r:
+            while len(got) < 188 * 1000:
+                chunk = r.read1(1 << 16)
+                if not chunk:
+                    break
+                got += chunk
+    except (OSError, urllib.error.HTTPError) as e:
+        want(False, "a recorder reads the same channel as MPEG-TS (%s)" % e)
+    want(len(got) >= 188 * 1000 and got[:188 * 1000] == sent[:188 * 1000],
+         "a recorder on the same channel is sent its MPEG-TS from the start, byte for byte (%d bytes)" % len(got))
+    status, body, _, _ = play(at, base)
+    want(status == 200 and listed(body.decode("utf-8", "replace")) == (pieces, began),
+         "asked for again, the playlist is the same: the stand-in has sent nothing more (%d)" % status)
+    n = json.loads(get(provider + "/smoke/counts")[1])
+    want(n["real_ts"] == 1 and n["real_m3u8"] == 0,
+         "the provider was asked for that channel once, as MPEG-TS, for both devices, and never as HLS (%d and %d)" % (n["real_ts"], n["real_m3u8"]))
+
+
 def check(base, hls="", provider=""):
     bad = []
 
@@ -296,6 +451,7 @@ def check(base, hls="", provider=""):
 
     if hls:
         check_hls(hls, provider, want)
+        check_hls_from_ts(base, provider, want)
 
     print("smoke test: %s" % ("FAILED: " + "; ".join(bad) if bad else "all passed"), flush=True)
     return 1 if bad else 0

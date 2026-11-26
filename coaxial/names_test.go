@@ -98,7 +98,10 @@ func TestChannelNamesAreFetchedOnlyAfterAnIdleHour(t *testing.T) {
 	lists, undo := namesProvider(t, port)
 	defer undo()
 	keptIdle, keptLook := namesIdle, namesLook
-	namesIdle, namesLook = 0.6, 20*time.Millisecond
+	// (The idle spell is 3 s here and looked at half way through it, where it was 0.6 s and 0.3 s: a test
+	// machine that stood still for a third of a second between the two lines below failed this test with
+	// the program doing exactly what it should. The half of the spell that must pass unused is the same.)
+	namesIdle, namesLook = 3, 20*time.Millisecond
 	stopPlaying := playOn(port)
 	stop, done := make(chan struct{}), make(chan struct{})
 	go func() { namesLoop(stop); close(done) }()
@@ -109,11 +112,11 @@ func TestChannelNamesAreFetchedOnlyAfterAnIdleHour(t *testing.T) {
 		t.Fatalf("a channel plays and the provider's live list was fetched %d time(s)", n)
 	}
 	stopPlaying()
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(1500 * time.Millisecond)
 	if n := lists.Load(); n != 0 {
-		t.Errorf("0.3 s after the last channel stopped the live list was fetched %d time(s): the idle spell (0.6 s here, an hour for real) was not waited for", n)
+		t.Errorf("1.5 s after the last channel stopped the live list was fetched %d time(s): the idle spell (3 s here, an hour for real) was not waited for", n)
 	}
-	for end := time.Now().Add(5 * time.Second); lists.Load() == 0 && time.Now().Before(end); {
+	for end := time.Now().Add(10 * time.Second); lists.Load() == 0 && time.Now().Before(end); {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if lists.Load() != 1 {
