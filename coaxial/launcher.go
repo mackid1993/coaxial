@@ -777,6 +777,9 @@ func (l *launcher) apiSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		l.work.Lock() // (not in the middle of a change)
 		_, key, _ := l.gluetunEnv(s)
+		if server := l.pickOverride(s); server != "" { // (as apply works the key out: the server Coaxial chose is part of it)
+			key += "picked " + server + "\n"
+		}
 		l.mu.Lock()
 		vpnToo := key != l.vpnKey
 		proxyToo := vpnToo || string(s.forProxy()) != l.proxyKey
