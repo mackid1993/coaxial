@@ -198,13 +198,53 @@
     chk.classList.toggle('busy', progBusy === 'check'); upd.classList.toggle('busy', progBusy === 'update');
     chk.disabled = upd.disabled = !!progBusy;
   }
+  // ask: a question in the page's own style, in place of the browser's box. title, a few short lines, the main
+  // button's words, and a warning line if there is one. Resolves true only for the main button; Escape, Cancel
+  // and a click outside the panel all mean no. The keyboard starts in the panel and goes back to "from" after.
+  function ask(title, lines, yes, warn, from) {
+    return new Promise(function (resolve) {
+      var no = h('button', { type: 'button', class: 'btn ghost', text: 'Cancel' });
+      var ok = h('button', { type: 'button', class: 'btn primary', text: yes });
+      var box = h('div', { class: 'ask card', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        h('h3', { class: 'ask-title', text: title }),
+        lines.map(function (t) { return h('p', { class: 'ask-line', text: t }); }),
+        warn ? h('p', { class: 'ask-warn', text: warn }) : null,
+        h('div', { class: 'ask-btns' }, no, ok));
+      var back = h('div', { class: 'ask-back' }, box);
+      function done(answer) {
+        document.removeEventListener('keydown', key, true);
+        back.remove();
+        if (from && from.focus) from.focus();
+        resolve(answer);
+      }
+      function key(e) {
+        if (e.key === 'Escape') { e.preventDefault(); done(false); }
+        else if (e.key === 'Tab') { // (the keyboard stays between the two buttons)
+          e.preventDefault();
+          (document.activeElement === ok ? no : ok).focus();
+        }
+      }
+      no.addEventListener('click', function () { done(false); });
+      ok.addEventListener('click', function () { done(true); });
+      back.addEventListener('mousedown', function (e) { if (e.target === back) done(false); });
+      document.addEventListener('keydown', key, true);
+      document.body.appendChild(back);
+      ok.focus();
+    });
+  }
+
   // "Refresh channel names" on a provider's card: says what it does first, then asks Coaxial to fetch them.
   async function namesAct(el) {
     var btn = $('.pn-btn', el);
     if (btn.disabled) return;
     var busy = !!(st.data && st.data.playing && st.data.playing.length);
-    if (!window.confirm('Refresh the channel names for ' + (el.dataset.name || 'this provider') + ' now?\n\nThis contacts your provider once: one login and its channel list. Coaxial also does this by itself once a day, after an hour with nothing playing.' +
-      (busy ? '\n\nSomething is playing or recording right now. A login to your provider during a stream can disturb it. To be safe, do this when nothing is playing.' : ''))) return;
+    var go = await ask('Refresh channel names for ' + (el.dataset.name || 'this provider') + '?',
+      ['This contacts your provider once: one login and its channel list.',
+        'Coaxial also does this by itself once a day, after an hour with nothing playing.'],
+      'Yes, do this',
+      busy ? 'Something is playing or recording right now. A login to your provider during a stream can disturb it. To be safe, do this when nothing is playing.' : '',
+      btn);
+    if (!go) return;
     btn.disabled = true; btn.classList.add('busy');
     try {
       var r = await api('POST', '/api/provider/names?port=' + encodeURIComponent(el.dataset.port));
