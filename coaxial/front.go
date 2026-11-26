@@ -269,6 +269,60 @@ func (f *front) ownServer(u *url.URL) bool {
 	return norm(u.Host) == norm(f.hostport)
 }
 
+// loginServers: other servers a provider sent a player on to with the account's login in the address (a second
+// server of the same provider), by port, scheme and name. The player was given such an address with the easy
+// login; only for these servers is the provider's login put back on the way out. A server the provider never
+// named this way is never sent the provider's login. (mu)
+var loginServers = map[string]bool{}
+
+// elsewhere: an address on another server as a player is given it. When it carries the provider's login (in
+// two parts of the path, or as username= and password=), the player gets it with the easy login, and the
+// server is remembered so that the login is put back when the player asks for it (realForm). ok=false: it
+// carries no login, or cannot be given this way.
+func (f *front) elsewhere(u *url.URL) (string, bool) {
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Host == "" || u.User != nil {
+		return "", false
+	}
+	was := u.EscapedPath()
+	if u.RawQuery != "" {
+		was += "?" + u.RawQuery
+	}
+	p, ok := f.easyForm(u)
+	if !ok || was == "" || p == was {
+		return "", false
+	}
+	mu.Lock()
+	if k := f.port + " " + scheme + "/" + strings.ToLower(u.Host); loginServers[k] || len(loginServers) < 500 {
+		loginServers[k] = true
+	} else {
+		ok = false // (more servers than any provider has: given as before)
+	}
+	mu.Unlock()
+	return "/__cdn/" + scheme + "/" + u.Host + p, ok
+}
+
+// realForm: the real address behind a /__cdn/ request (target), with the provider's login put back where the
+// player's address has the easy one, for a server the provider itself sent a player to with its login
+// (elsewhere). Any other server's address goes on as it is.
+func (f *front) realForm(scheme, hostport, target string) string {
+	mu.Lock()
+	known := loginServers[f.port+" "+scheme+"/"+strings.ToLower(hostport)]
+	mu.Unlock()
+	u, err := url.Parse(target)
+	if !known || err != nil {
+		return target
+	}
+	was := u.EscapedPath()
+	if u.RawQuery != "" {
+		was += "?" + u.RawQuery
+	}
+	if up, _ := f.swap(&url.URL{Path: u.Path, RawPath: u.RawPath, RawQuery: u.RawQuery}); up != was {
+		return scheme + "://" + hostport + up
+	}
+	return target
+}
+
 // cleanSlashes: a path with doubled slashes written once (as the front door's swap writes it).
 func cleanSlashes(p string) string {
 	for strings.Contains(p, "//") {
@@ -445,6 +499,7 @@ func (f *front) serve(c *counted, r *http.Request) {
 			answer(c, 403, "", "That address leads to this machine or a home network.\n")
 			return
 		}
+		target = f.realForm(scheme, hostport, target) // (a provider's second server: see elsewhere)
 		mu.Lock()
 		c.live = f.inUse(r.URL.RequestURI(), whoIs(r)) // (a piece of an HLS session: it is still playing)
 		c.live = c.live || f.livePiece(r.URL.RequestURI())
@@ -644,6 +699,12 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 		// back to the provider's own server: to its port, with the easy login (never the real one)
 		if u, err := out.URL.Parse(loc); err == nil && f.ownServer(u) {
 			if p, ok := f.easyForm(u); ok {
+				moved = p
+			}
+		} else if err == nil {
+			// on to another server with the provider's login in the address (Xtream servers send a film to
+			// their second server this way): with the easy login too
+			if p, ok := f.elsewhere(u); ok {
 				moved = p
 			}
 		}
