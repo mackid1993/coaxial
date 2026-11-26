@@ -91,7 +91,12 @@ func getAs(t *testing.T, url, dev string) *http.Response {
 func TestLogLineFormat(t *testing.T) {
 	b := captureLog(t)
 	(&askLog{kind: "stream", id: "1234", device: "198.51.100.7", provider: "Main"}).answered(403, 210*time.Millisecond)
-	line := strings.TrimSpace(b.String())
+	// (only this test's own line: a test run just before can still be writing its last lines)
+	mine := linesWith(b.String(), "answered 403", "channel=1234")
+	if len(mine) != 1 {
+		t.Fatalf("want one line for the 403, got %d:\n%s", len(mine), b.String())
+	}
+	line := strings.TrimSpace(mine[0])
 	re := regexp.MustCompile(`^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ WRN coaxial: the provider answered 403 \(forbidden\) ` +
 		`channel=1234 device=198.51.100.7 kind=stream ms=210 provider=Main status=403$`)
 	if !re.MatchString(line) {
@@ -237,7 +242,8 @@ func TestLogBackgroundTag(t *testing.T) {
 }
 
 // Routine asks (playlist reloads, video pieces) are not logged when they go well, only when they do not; and an
-// access line for a video piece is written at no level the page offers.
+// access line for a video piece is written at no level the page offers when it went well, and as a WRN when it
+// failed or was slow (cd8897b).
 func TestLogRoutineQuiet(t *testing.T) {
 	b := captureLog(t)
 	a := &askLog{kind: "piece", provider: "P", routine: true}
@@ -258,9 +264,11 @@ func TestLogRoutineQuiet(t *testing.T) {
 		return strings.Contains(log, "kind=health") && len(linesWith(log, " WRN ", "answered 404", "kind=piece", "device=198.51.100.12")) > 0
 	})
 	time.Sleep(100 * time.Millisecond)
-	if strings.Contains(b.String(), "kind=cdn") || !strings.Contains(b.String(), "kind=health") ||
+	cdn := linesWith(b.String(), "kind=cdn")
+	failed := linesWith(b.String(), " WRN ", "kind=cdn", "status=404", "client=198.51.100.12")
+	if len(cdn) != len(failed) || len(failed) != 1 || !strings.Contains(b.String(), "kind=health") ||
 		len(linesWith(b.String(), " WRN ", "answered 404", "kind=piece", "device=198.51.100.12")) != 1 {
-		t.Errorf("kind=cdn access lines must stay out of the log, others in:\n%s", b.String())
+		t.Errorf("a kind=cdn access line belongs in the log only as a WRN for a failed piece, others in:\n%s", b.String())
 	}
 }
 
