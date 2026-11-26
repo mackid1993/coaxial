@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 // front: one provider and its port.
@@ -668,6 +670,10 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 		h.Del("Content-Length")
 		src = io.MultiReader(bytes.NewReader(f.hideLogin(page)), src)
 	}
+	if hd != nil && hd.w.kind == "ch" && resp.StatusCode == 200 && r.Method == "GET" && out.Header.Get("Range") == "" &&
+		resp.Header.Get("Content-Encoding") == "" {
+		h.Del("Content-Length") // catch-up MPEG-TS has its clock kept running on (catchUpClock): its length may change
+	}
 	c.WriteHeader(resp.StatusCode)
 	c.Flush()
 	if r.Method == "HEAD" {
@@ -680,6 +686,9 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 	}
 	if p := f.speedOf(r, hd); p != nil && resp.StatusCode < 300 {
 		src = &throttle{r: src, ctx: r.Context(), p: p}
+	}
+	if cb := catchUpClock(hd, out, resp, src, who); cb != nil {
+		src = cb
 	}
 	if _, err := copyFlush(c, src); err != nil && (r.Context().Err() == nil || hd.wasCut()) {
 		panic(http.ErrAbortHandler) // cut off: the player must see a broken answer, not a short complete one
@@ -924,3 +933,57 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 }
 
 func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
+
+// catchUpClock: catch-up is a channel's archive, stored as one file after another. Where the provider's
+// archive moves on to its next file the stream's clock starts over mid-connection, exactly as on a live
+// channel at an episode change, and players read it as time going backwards. So a catch-up answer that is
+// MPEG-TS goes through the same clockFix as live channels (tsSource). A stream whose clock never jumps is
+// passed on byte for byte. Asked with a Range (a seek inside one answer), or packed: passed on as it is.
+func catchUpClock(hd *hold, out *http.Request, resp *http.Response, src io.Reader, who string) io.Reader {
+	if hd == nil || hd.w.kind != "ch" || resp.StatusCode != 200 || out.Method != "GET" || out.Header.Get("Range") != "" ||
+		resp.Header.Get("Content-Encoding") != "" {
+		return nil
+	}
+	cb := &clockBody{r: src}
+	id := hd.w.item
+	cb.clk.tag = func(e *zerolog.Event) *zerolog.Event {
+		return e.Str("channel", id).Str("device", who).Str("kind", "catch-up")
+	}
+	return cb
+}
+
+// clockBody: a reader passing an MPEG-TS answer through a clockFix. Anything that is not MPEG-TS (its first
+// byte is not a packet start) is passed on untouched.
+type clockBody struct {
+	r       io.Reader
+	clk     clockFix
+	sent    int64
+	out     []byte
+	checked bool
+	plain   bool
+}
+
+func (b *clockBody) Read(p []byte) (int, error) {
+	for len(b.out) == 0 {
+		buf := make([]byte, 64*1024) // (a fresh one each time: clockFix may keep the end of the last read)
+		n, err := b.r.Read(buf)
+		data := buf[:n]
+		if n > 0 && !b.checked {
+			b.checked, b.plain = true, data[0] != 0x47
+		}
+		if n > 0 && !b.plain {
+			data = b.clk.fix(data, b.sent)
+			b.sent += int64(len(data))
+		}
+		b.out = data
+		if err != nil {
+			if len(b.out) > 0 {
+				break
+			}
+			return 0, err
+		}
+	}
+	n := copy(p, b.out)
+	b.out = b.out[n:]
+	return n, nil
+}
