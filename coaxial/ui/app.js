@@ -181,7 +181,7 @@
         : (sv.name ? 'Server ' + sv.name + (now ? ': ' + ping(now) : '') + (sv.at ? ', chosen ' + when(sv.at) : '') + '. ' : '')
           + (sv.checked_at ? 'Pinged ' + plural(n, 'server') + ' in your cities ' + when(sv.checked_at) + (b || !sv.name ? '.' : sv.best === sv.name ? ', and this one is the best of them.' : ', and this one is among the best.')
             : 'When nothing is playing, Coaxial pings every server in your cities once an hour and keeps you on the closest healthy one.')
-          + (b ? ' ' + b.name + ' looks better: ' + b.why + '. Coaxial moves there by itself once nothing has played for 2 minutes.' : ''));
+          + (b ? ' ' + b.name + ' looks better: ' + b.why + '. Coaxial moves there by itself once nothing has played for 5 minutes.' : ''));
       pickBtn.hidden = !sv.possible; pickBtn.disabled = !!(sv.checking || sv.switching); pickBtn.classList.toggle('busy', !!sv.checking);
       swBtn.hidden = !(sv.possible && b); swBtn.disabled = !!sv.switching; swBtn.classList.toggle('busy', !!sv.switching);
     }

@@ -32,7 +32,7 @@ const (
 	probeWait     = 3 * time.Second        // a round ends after this, answered or not
 	probeMark     = 0xca6c                 // gluetun's mark for the VPN's own packets: they leave outside the tunnel
 	probeFloorFor = 24 * time.Hour         // a server's lowest ping over this long is taken as its distance
-	probeIdle     = 2 * time.Minute        // nothing playing for this long before the VPN is moved by itself
+	probeIdle     = 5 * time.Minute        // nothing playing for this long before the VPN is moved by itself (as long as quietSpell)
 	probeCloser   = 15.0                   // ms: a server that answers this much sooner, two rounds running, is better
 	probeBadLoss  = 10.0                   // percent of pings lost, two rounds running: the server is bad
 	probeSkipFor  = time.Hour              // a server that would not connect is left out this long
@@ -441,9 +441,9 @@ func (l *launcher) probeTick(quiet time.Duration) {
 	if s == nil {
 		return
 	}
-	// Nothing is pinged while anything plays or records (quiet 0): the network is left to the streams. The
-	// rounds pick up again once it is quiet, and the page's button still runs one at any time.
-	if quiet == 0 && !asked {
+	// Nothing is pinged while anything plays or records, nor until nothing has played for quietSpell: the network
+	// is left to the streams, and to a viewer on its way back. The page's button still runs a round at any time.
+	if quiet < quietSpell && !asked {
 		return
 	}
 	if pickKey(s.vpnEnv()) == "" {

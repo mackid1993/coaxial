@@ -40,7 +40,8 @@ func playingSocket(t *testing.T) (play func()) {
 // Rule 1: nothing talks over the VPN on a timer while anything plays or records. The launcher's watch loop
 // asked the VPN program's registry (a token and a manifest, through the tunnel) once an hour, and 20 s after
 // every start, whatever was playing. A newer build is installed only after 10 minutes with nothing playing,
-// so asking only then loses nothing. (Runs about 70 s: the loop looks every 20 s.)
+// so asking only then loses nothing. And not the moment the last stream ends either: only once nothing has
+// played for a quiet spell. (Runs about two minutes: the loop looks every 20 s.)
 func TestHourlyUpdateCheckWaitsWhilePlaying(t *testing.T) {
 	if testing.Short() {
 		t.Skip("about 70 s")
@@ -49,6 +50,9 @@ func TestHourlyUpdateCheckWaitsWhilePlaying(t *testing.T) {
 	oldRegs, oldTry := registries, tryProgram
 	defer func() { registries, tryProgram = oldRegs, oldTry }()
 	registries, tryProgram = []registry{f.reg()}, func(string) error { return nil }
+	oldQuiet := quietSpell
+	quietSpell = 50 * time.Second // (five minutes, shortened)
+	defer func() { quietSpell = oldQuiet }()
 	play := playingSocket(t)
 	play() // a recording runs
 	l := &launcher{dir: t.TempDir(), quit: make(chan int, 4), prog: builtinProgram}
@@ -66,15 +70,21 @@ func TestHourlyUpdateCheckWaitsWhilePlaying(t *testing.T) {
 	if n := asked(); n != 0 {
 		t.Errorf("a recording runs and the registry was asked %d time(s) through the VPN by the hourly check", n)
 	}
-	// Control: once nothing plays, the loop does ask.
+	// The recording ends. Nothing plays, but only just: a viewer may be on its way back. The check waits for a
+	// quiet spell, where it used to ask at the loop's next look or the one after (20 to 40 s on).
 	mu.Lock()
 	channels = map[string]*channel{}
 	mu.Unlock()
+	time.Sleep(45 * time.Second)
+	if n := asked(); n != 0 {
+		t.Errorf("nothing has played for 45 s and the registry was asked %d time(s): the quiet spell (%v here) was not waited for", n, quietSpell)
+	}
+	// Control: once the quiet spell is over, the loop does ask.
 	for end := time.Now().Add(45 * time.Second); asked() == 0 && time.Now().Before(end); {
 		time.Sleep(250 * time.Millisecond)
 	}
 	if asked() == 0 {
-		t.Errorf("control: with nothing playing the hourly check never asked the registry")
+		t.Errorf("control: with nothing playing for a quiet spell the hourly check never asked the registry")
 	}
 }
 

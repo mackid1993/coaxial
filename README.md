@@ -270,14 +270,14 @@ leave both server boxes empty, Coaxial chooses the server for you. It does not d
   times spread (jitter), its lowest answer time over the last day (its distance), and how far the middle answer sits
   above that lowest one (time spent waiting at a busy server). Servers are ranked by lost pings first, then by answer
   time plus twice the jitter. A server that lost 10% or more in two rounds running counts as bad.
-- **How often.** Once an hour, and only while nothing plays or records. While anything plays, nothing is pinged, so
-  the network is left to the streams. Servers in one city rarely change places, and a constant sweep of a VPN
+- **How often.** Once an hour, and only once nothing has played or recorded for 5 minutes. While anything plays, and
+  for those 5 minutes after, nothing is pinged, so the network is left to the streams and to a viewer on the way back. Servers in one city rarely change places, and a constant sweep of a VPN
   service's servers from one address can look like scanning to it, so once an hour is enough.
   `Check servers now` runs a round at any time.
 - **When Coaxial moves you.** When no server is chosen yet for your settings, when the one in use has been losing
   pings for two rounds running, or when another server has answered at least 15 ms sooner for two hourly rounds in a
   row. A server that is merely a few milliseconds closer is not worth a reconnect. Coaxial moves by itself only once
-  nothing has played or recorded for 2 minutes; until then, the Status view shows the better server and a
+  nothing has played or recorded for 5 minutes; until then, the Status view shows the better server and a
   `Switch now` button, which asks first because anything playing stops for a few seconds.
 - **Staying put is normal.** Servers in one city are usually within a few milliseconds of each other, and the one
   at the top of the ranking changes from round to round. Coaxial does not chase that: as long as the server in use
@@ -318,7 +318,7 @@ not need a new Coaxial image, Coaxial fetches that file itself.
   be reached, a check fails or the new program does not run, Coaxial uses the last good copy, or else the program built
   into the image. The look-up and download get two minutes at most.
 - **While it runs**, Coaxial asks the registry once an hour whether a newer build is out, and Status says so. It asks
-  only while nothing plays or records, and skips it while the VPN is down or servers are being tried. `Check for updates` asks at once. Neither reconnects the VPN.
+  only once nothing has played or recorded for 5 minutes, and skips it while the VPN is down or servers are being tried. `Check for updates` asks at once. Neither reconnects the VPN.
 - **A newer build installs by itself, but only when nothing is playing.** Once no one has watched or recorded anything
   for 10 minutes, Coaxial restarts the VPN with the new build.
 - **If the VPN does not connect** within 2 minutes on the new build, Coaxial goes back to the build before it and skips

@@ -762,6 +762,12 @@ const (
 
 var updateWait = 2 * time.Minute // the VPN must be up again within this, or the update is undone (a variable for the tests)
 
+// quietSpell: nothing must have played for this long before the launcher does its timed work unasked: the hourly
+// ping round and the hourly look for a newer VPN program. "Nothing plays right now" is not enough. A viewer whose
+// player dropped out for half a minute and is on its way back found every VPN server being pinged and the
+// registry asked just as it tuned again. (A variable for the tests.)
+var quietSpell = 5 * time.Minute
+
 // errSkipped: the newest build is the one left alone (see skipped).
 var errSkipped = errors.New("the newest build is the one left alone after an update it did not connect with")
 
@@ -1013,7 +1019,7 @@ func (l *launcher) watchProgram() {
 			writeWhole(filepath.Join(bin, "good.json"), map[string]string{"digest": works})
 			good = works
 		}
-		// The VPN servers are pinged once an hour while nothing plays (probeTick), and the VPN is
+		// The VPN servers are pinged once an hour, once nothing has played for quietSpell (probeTick), and the VPN is
 		// moved to a better one once nothing has played for a while (probe.go).
 		playing := !nothingPlaying()
 		quiet := time.Duration(0)
@@ -1028,9 +1034,9 @@ func (l *launcher) watchProgram() {
 		if quietSince.IsZero() {
 			quietSince = time.Now()
 		}
-		// Is a newer VPN program out? Asked once an hour, and like the pings only once nothing has played for a
-		// look (rule 1): a newer build is installed only after idleMinutes with nothing playing, so this loses nothing.
-		if quiet > 0 && time.Since(asked) >= updateEvery {
+		// Is a newer VPN program out? Asked once an hour, and like the pings only once nothing has played for
+		// quietSpell (rule 1): a newer build is installed only after idleMinutes with nothing playing, so this loses nothing.
+		if quiet >= quietSpell && time.Since(asked) >= updateEvery {
 			l.checkProgram("hourly")
 			asked = time.Now()
 		}
