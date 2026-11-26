@@ -2,47 +2,65 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 )
 
-// chunks: a reader handing data on in reads of random sizes, as a provider's answer arrives.
-type chunks struct {
-	data []byte
-	rnd  *rand.Rand
+// cuServe serves data as a catch-up file that takes Range, like an archive server.
+func cuServe(data []byte) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp2t")
+		http.ServeContent(w, r, "x.ts", time.Time{}, bytes.NewReader(data))
+	}))
 }
 
-func (c *chunks) Read(p []byte) (int, error) {
-	if len(c.data) == 0 {
-		return 0, io.EOF
-	}
-	n := min(len(p), len(c.data), 1+c.rnd.Intn(40000))
-	copy(p, c.data[:n])
-	c.data = c.data[n:]
-	return n, nil
-}
-
-func throughCatchUp(t *testing.T, data []byte, seed int64) []byte {
+// cuRead reads the file from byte start the way a player through the proxy gets it.
+func cuRead(t *testing.T, url string, start int64) []byte {
 	t.Helper()
-	out, err := io.ReadAll(&clockBody{r: &chunks{data, rand.New(rand.NewSource(seed))}})
+	out, _ := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+	out.Header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+	resp, err := sharedTransport.RoundTrip(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return out
+	defer resp.Body.Close()
+	var src io.Reader = resp.Body
+	if r := catchUpClock(&hold{w: what{"ch", "1"}}, out, resp, src); r != nil {
+		src = r
+	}
+	b, err := io.ReadAll(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
-// Catch-up whose archive moves on to its next file mid-answer: the clock carries on, as on a live channel.
-func TestCatchUpClockFileChange(t *testing.T) {
-	data := ecSynthetic()
-	for seed := int64(1); seed <= 5; seed++ {
-		ecCheck(t, "catch-up across archive files", data, throughCatchUp(t, data, seed))
+func cuCheck(t *testing.T, what string, data []byte) {
+	t.Helper()
+	srv := cuServe(data)
+	defer srv.Close()
+	whole := cuRead(t, srv.URL+"/a.ts", 0)
+	ecCheck(t, what, data, whole) // the clock runs straight through; length and every other byte the provider's
+	// a seek anywhere gets exactly the bytes a read from the start has there
+	for _, f := range []float64{0.1, 0.33, 0.5, 0.71, 0.97} {
+		at := int64(float64(len(data)) * f)
+		if got := cuRead(t, srv.URL+"/a.ts", at); !bytes.Equal(got, whole[at:]) {
+			t.Errorf("%s: a seek to byte %d got other timestamps than a read from the start", what, at)
+		}
 	}
 }
 
-// A recorded episode change, read as a catch-up answer: no clock jump reaches the player.
+// A catch-up file spanning an episode change (the archive's next stored file): one clock, seekable.
+func TestCatchUpClockFileChange(t *testing.T) {
+	cuCheck(t, "catch-up across an episode change", ecSynthetic())
+}
+
 func TestCatchUpClockReplay(t *testing.T) {
 	path := os.Getenv("COAXIAL_REPLAY_EPISODE")
 	if path == "" {
@@ -52,12 +70,10 @@ func TestCatchUpClockReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for seed := int64(1); seed <= 5; seed++ {
-		ecCheck(t, "recorded episode change as catch-up", data, throughCatchUp(t, data, seed))
-	}
+	cuCheck(t, "recorded episode change as catch-up", data)
 }
 
-// Catch-up whose clock never jumps passes byte for byte; so does anything that is not MPEG-TS.
+// A catch-up file whose clock never starts over passes byte for byte, read from anywhere.
 func TestCatchUpClockUntouched(t *testing.T) {
 	path := os.Getenv("COAXIAL_REPLAY_TS")
 	if path == "" {
@@ -67,52 +83,20 @@ func TestCatchUpClockUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for seed := int64(1); seed <= 3; seed++ {
-		if out := throughCatchUp(t, data, seed); !bytes.Equal(out, data) {
-			t.Fatalf("seed %d: a stream with no clock jump was changed (%d bytes in, %d out)", seed, len(data), len(out))
+	srv := cuServe(data)
+	defer srv.Close()
+	for _, at := range []int64{0, int64(len(data) / 3)} {
+		if got := cuRead(t, srv.URL+"/b.ts", at); !bytes.Equal(got, data[at:]) {
+			t.Fatalf("a file with no clock restart was changed (read from %d)", at)
 		}
-	}
-	other := bytes.Repeat([]byte("not a transport stream "), 5000)
-	if out := throughCatchUp(t, other, 1); !bytes.Equal(out, other) {
-		t.Fatal("an answer that is not MPEG-TS was changed")
 	}
 }
 
-// Only a whole catch-up answer is touched: not a seek inside one, not a film.
+// Films and answers outside catch-up are not touched.
 func TestCatchUpClockOnlyCatchUp(t *testing.T) {
 	ok := &http.Response{StatusCode: 200, Header: http.Header{}}
-	get := func(rng string) *http.Request {
-		r, _ := http.NewRequest("GET", "http://x/timeshift/a/b/60/2026-11-25:21-00/1.ts", nil)
-		if rng != "" {
-			r.Header.Set("Range", rng)
-		}
-		return r
-	}
-	ch := &hold{w: what{"ch", "1"}}
-	if catchUpClock(ch, get(""), ok, nil, "tv") == nil {
-		t.Error("a catch-up answer was not given the clock fix")
-	}
-	if catchUpClock(ch, get("bytes=100-"), ok, nil, "tv") != nil {
-		t.Error("a seek inside a catch-up answer was changed")
-	}
-	if catchUpClock(&hold{w: what{"vod", "movie/1"}}, get(""), ok, nil, "tv") != nil {
-		t.Error("a film was given the clock fix")
-	}
-	if catchUpClock(nil, get(""), ok, nil, "tv") != nil {
-		t.Error("an unadmitted answer was given the clock fix")
-	}
-}
-
-// Catch-up keeps the provider's length (players seek in it by that); anything left out is made up with null packets.
-func TestCatchUpClockKeepsLength(t *testing.T) {
-	data := ecSynthetic()
-	out, err := io.ReadAll(&clockBody{r: &chunks{data, rand.New(rand.NewSource(7))}, size: int64(len(data))})
-	if err != nil || len(out) != len(data) {
-		t.Fatalf("%d bytes out for a %d-byte answer (%v)", len(out), len(data), err)
-	}
-	short := int64(len(data) + 2*188)
-	out, _ = io.ReadAll(&clockBody{r: &chunks{data, rand.New(rand.NewSource(7))}, size: short})
-	if int64(len(out)) != short || out[len(data)] != 0x47 || out[len(data)+1] != 0x1f || out[len(data)+2] != 0xff {
-		t.Fatalf("made-up end: %d bytes, want %d of null packets", len(out), short)
+	r, _ := http.NewRequest("GET", "http://x/movie/a/b/1.ts", nil)
+	if catchUpClock(&hold{w: what{"vod", "movie/1"}}, r, ok, nil) != nil || catchUpClock(nil, r, ok, nil) != nil {
+		t.Fatal("a film or an unadmitted answer was given the catch-up clock fix")
 	}
 }

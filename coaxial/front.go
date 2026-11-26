@@ -25,8 +25,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/rs/zerolog"
 )
 
 // front: one provider and its port.
@@ -683,7 +681,7 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 	if p := f.speedOf(r, hd); p != nil && resp.StatusCode < 300 {
 		src = &throttle{r: src, ctx: r.Context(), p: p}
 	}
-	if cb := catchUpClock(hd, out, resp, src, who); cb != nil {
+	if cb := catchUpClock(hd, out, resp, src); cb != nil {
 		src = cb
 	}
 	if _, err := copyFlush(c, src); err != nil && (r.Context().Err() == nil || hd.wasCut()) {
@@ -930,77 +928,22 @@ func runProxy(in io.Reader, stop <-chan struct{}) int {
 
 func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
 
-// catchUpClock: catch-up is a channel's archive, stored as one file after another. Where the provider's
-// archive moves on to its next file the stream's clock starts over mid-connection, exactly as on a live
-// channel at an episode change, and players read it as time going backwards. So a catch-up answer that is
-// MPEG-TS goes through the same clockFix as live channels (tsSource). A stream whose clock never jumps is
-// passed on byte for byte. Asked with a Range (a seek inside one answer), or packed: passed on as it is.
-func catchUpClock(hd *hold, out *http.Request, resp *http.Response, src io.Reader, who string) io.Reader {
-	if hd == nil || hd.w.kind != "ch" || resp.StatusCode != 200 || out.Method != "GET" || out.Header.Get("Range") != "" ||
-		resp.Header.Get("Content-Encoding") != "" {
+// catchUpClock: a catch-up answer (MPEG-TS, any Range the player asks for) with its clock made to run straight
+// through where the channel's archive starts its next stored file (see catchup.go). nil: passed on as it is.
+func catchUpClock(hd *hold, out *http.Request, resp *http.Response, src io.Reader) io.Reader {
+	if hd == nil || hd.w.kind != "ch" || out.Method != "GET" || resp.Header.Get("Content-Encoding") != "" ||
+		(resp.StatusCode != 200 && resp.StatusCode != 206) {
 		return nil
 	}
-	cb := &clockBody{r: src, size: resp.ContentLength}
-	id := hd.w.item
-	cb.clk.tag = func(e *zerolog.Event) *zerolog.Event {
-		return e.Str("channel", id).Str("device", who).Str("kind", "catch-up")
+	start := cuStart(out)
+	if resp.StatusCode == 200 {
+		start = 0
+	} else if cr := resp.Header.Get("Content-Range"); start < 0 || !strings.HasPrefix(cr, fmt.Sprintf("bytes %d-", start)) {
+		return nil
 	}
-	return cb
-}
-
-// clockBody: a reader passing an MPEG-TS answer through a clockFix. Anything that is not MPEG-TS (its first
-// byte is not a packet start) is passed on untouched. The answer keeps the provider's own length (players seek
-// in catch-up by it): if clockFix left any video out, the end is made up with MPEG-TS null packets.
-type clockBody struct {
-	r       io.Reader
-	clk     clockFix
-	size    int64 // the provider's Content-Length (-1: none given)
-	sent    int64
-	out     []byte
-	checked bool
-	plain   bool
-	padded  bool
-}
-
-// nullPad: n bytes of MPEG-TS null packets (PID 0x1FFF, which every player skips); a part packet at the end, if
-// any, is 0xFF stuffing.
-func nullPad(n int64) []byte {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = 0xff
+	m := cuMapFor(out.Context(), out)
+	if m == nil {
+		return nil
 	}
-	for i := int64(0); i+188 <= n; i += 188 {
-		b[i], b[i+1], b[i+2], b[i+3] = 0x47, 0x1f, 0xff, 0x10
-	}
-	return b
-}
-
-func (b *clockBody) Read(p []byte) (int, error) {
-	for len(b.out) == 0 {
-		buf := make([]byte, 64*1024) // (a fresh one each time: clockFix may keep the end of the last read)
-		n, err := b.r.Read(buf)
-		data := buf[:n]
-		if n > 0 && !b.checked {
-			b.checked, b.plain = true, data[0] != 0x47
-		}
-		if n > 0 && !b.plain {
-			data = b.clk.fix(data, b.sent)
-			b.sent += int64(len(data))
-		}
-		b.out = data
-		if err == io.EOF && !b.padded && !b.plain && b.size > 0 && b.sent < b.size {
-			b.padded = true // (the whole answer came: what clockFix left out is made up)
-			b.out = append(b.out, nullPad(b.size-b.sent)...)
-			b.sent = b.size
-		}
-		if err != nil {
-			if len(b.out) > 0 {
-				break
-			}
-			return 0, err
-		}
-	}
-	n := copy(p, b.out)
-	b.out = b.out[n:]
-	return n, nil
+	return &cuBody{r: src, m: m, pos: start}
 }
