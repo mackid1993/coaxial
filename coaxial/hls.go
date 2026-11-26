@@ -1162,15 +1162,28 @@ type checked struct {
 
 var checks = map[string]checked{}
 
-// nameOK: false when the name leads to this machine or a home network.
+// nameOK: false when the name leads to this machine or a home network. A piece of a live channel is asked for
+// every few seconds over a connection that is already open, so, as for a playlist's server (ledHome), a lookup
+// that fails or takes long leaves the last answer standing and is tried again a little later: with a resolver
+// that said nothing, the piece waited for it for up to 10 s, longer than a player waits for a piece.
 func nameOK(ctx context.Context, host string) bool {
 	host, now := strings.ToLower(host), mono()
 	mu.Lock()
 	c, have := checks[host]
 	mu.Unlock()
 	if !have || now-c.at >= 60 {
-		home, _ := leadsHome(ctx, host) // no answer: the connection's own lookup fails the same way
-		c = checked{now, !home}
+		lctx := ctx
+		if have { // (an answer is in hand: the piece does not wait long for a new one)
+			var cancel context.CancelFunc
+			lctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+		}
+		home, err := leadsHome(lctx, host) // no answer: the connection's own lookup fails the same way
+		if have && err != nil && !home {
+			c.at = now - 50 // (asked again 10 s on)
+		} else {
+			c = checked{now, !home}
+		}
 		mu.Lock()
 		if len(checks) > 2000 {
 			checks = map[string]checked{}
