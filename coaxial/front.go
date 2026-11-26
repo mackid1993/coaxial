@@ -820,7 +820,11 @@ func (in inside) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.RemoteAddr, r.Host, r.RequestURI, r.Body = "127.0.0.1:0", req.URL.Host, req.URL.RequestURI(), http.NoBody
 	go func() {
 		defer func() {
-			if e := recover(); e != nil {
+			// (called off before the handler was done, by the reader's own wait for bytes: what it wrote is not
+			// the whole answer either, and must not read as one. A handler does not cut an answer short on
+			// purpose once its player is gone, so without this a piece that went quiet part way ended cleanly
+			// here and was handed on as if whole)
+			if e := recover(); e != nil || r.Context().Err() != nil {
 				pw.CloseWithError(io.ErrUnexpectedEOF)
 			}
 			w.WriteHeader(200)
