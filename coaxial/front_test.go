@@ -162,8 +162,20 @@ func TestVPNEnv(t *testing.T) {
 	}
 	s := goodSettings()
 	delete(s.VPN.Vars, "update_hours")
+	if got := s.vpnEnv()["UPDATER_PERIOD"]; got != "0" {
+		// (gluetun's updater downloads the list through the VPN on its timer whatever plays: rule 1)
+		t.Errorf("gluetun's own server list update must be off unless update_hours is set: got %q", got)
+	}
+	if m := s.masked()["vpn"].(map[string]any); m["update_hours"] != 0 {
+		t.Errorf("the page is told update_hours %v when it is not set, want 0", m["update_hours"])
+	}
+	sample := &settings{}
+	if err := sample.parse([]byte(sampleSettings)); err != nil || sample.vpnEnv()["UPDATER_PERIOD"] != "0" {
+		t.Errorf("the sample settings turn gluetun's own server list update on (%v): %q", err, sample.vpnEnv()["UPDATER_PERIOD"])
+	}
+	s.VPN.Vars["update_hours"] = "24" // (asked for in settings.json: still honored)
 	if got := s.vpnEnv()["UPDATER_PERIOD"]; got != "24h" {
-		t.Errorf("the server list should be updated once a day unless set otherwise: got %q", got)
+		t.Errorf("update_hours 24 should refresh the list once a day: got %q", got)
 	}
 	s.VPN.Vars["update_hours"] = "0"
 	if got := s.vpnEnv()["UPDATER_PERIOD"]; got != "0" {

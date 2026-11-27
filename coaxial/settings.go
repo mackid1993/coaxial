@@ -7,7 +7,7 @@
 //	                                                          advanced: what a provider needs handled (see advanced)
 //	  "ui":        {"port": 8195, "log_level": "detailed"}, the web interface and the health check; how much the
 //	                                                          log tells: detailed (also when not set), normal or quiet
-//	  "vpn":       {"service_provider": "", "type": "wireguard", ..., "update_hours": 24, "gluetun_version": "latest",
+//	  "vpn":       {"service_provider": "", "type": "wireguard", ..., "update_hours": 0, "gluetun_version": "latest",
 //	                "extra": {"ANY_GLUETUN_VARIABLE": "value"}}
 //	}
 //
@@ -31,8 +31,10 @@ import (
 
 const (
 	defaultUIPort = 8195
-	// gluetun's own periodic update of the VPN service's server list (its UPDATER_PERIOD), in hours
-	defaultUpdateHours = 24
+	// gluetun's own periodic update of the VPN service's server list (its UPDATER_PERIOD), in hours. Off unless
+	// set: gluetun downloads the list through the VPN on its timer whatever plays (rule 1 in AGENTS.md). The
+	// page's "Refresh server list" button does it when asked.
+	defaultUpdateHours = 0
 )
 
 // port: a port as written in the file or sent by the web page: a number, or text that should be one.
@@ -234,7 +236,7 @@ func envName(key string) string {
 }
 
 // updateHours: how often gluetun refreshes its list of the VPN service's servers ("update_hours" under
-// "vpn"; 0 = never). Not set: once a day.
+// "vpn"; 0 = never). Not set: never.
 func (s *settings) updateHours() (int, bool) {
 	v, set := s.VPN.Vars["update_hours"]
 	if !set || v == "" {
@@ -696,7 +698,7 @@ const sampleSettings = `{
     "wireguard_addresses": "10.64.0.2/32",
     "server_countries": "",
     "server_cities": "",
-    "update_hours": 24,
+    "update_hours": 0,
     "gluetun_version": "latest",
     "extra": {
       "TZ": "America/New_York"

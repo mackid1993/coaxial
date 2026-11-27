@@ -223,7 +223,14 @@ func (l *launcher) gluetunEnv(s *settings) (env []string, key string, names []st
 
 // apply brings what runs in line with the settings: the VPN is started again only if its own settings
 // changed; the proxy part only if the player or provider settings did.
-func (l *launcher) apply() {
+func (l *launcher) apply() { l.applyIf(false, nil) }
+
+// applyIf is apply. again: the VPN is started again even if its settings are the same (to take another
+// program). mayStop, when given, is asked right before anything is stopped: after the registry was asked
+// through the VPN and after any wait for another change to finish, both of which can take seconds. When it
+// says no, nothing is stopped or started and applyIf returns false. Every stop nobody asked for (a server
+// move, an update, an undo) looks at what plays there, not only before.
+func (l *launcher) applyIf(again bool, mayStop func() bool) bool {
 	l.work.Lock()
 	defer l.work.Unlock()
 	l.mu.Lock()
@@ -247,14 +254,17 @@ func (l *launcher) apply() {
 	}
 	l.mu.Lock()
 	l.proxyIn = pin // (the log detail may have changed alone: the next start of the proxy part is given it)
-	vpnSame := key == l.vpnKey && (l.vpn != nil || !want)
+	vpnSame := !again && key == l.vpnKey && (l.vpn != nil || !want)
 	proxySame := pkey == l.proxyKey
 	l.mu.Unlock()
+	if !vpnSame && want {
+		tag, _ := s.gluetunVersion()
+		l.askBeforeStop(tag)
+	}
+	if mayStop != nil && (!vpnSame || !proxySame) && !mayStop() {
+		return false
+	}
 	if !vpnSame {
-		if want {
-			tag, _ := s.gluetunVersion()
-			l.askBeforeStop(tag)
-		}
 		l.stopProxy()
 		l.stopVPN()
 		l.mu.Lock()
@@ -272,6 +282,7 @@ func (l *launcher) apply() {
 		l.mu.Unlock()
 	}
 	l.startProxy()
+	return true
 }
 
 func (l *launcher) startVPN(env, names []string, tag string) {

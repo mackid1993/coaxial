@@ -808,7 +808,7 @@
     return h('div', { class: 'servers span-2' }, btn,
       h('div', { class: 'servers-text' },
         h('p', { id: 'vpn-updated', 'aria-live': 'polite' }),
-        h('p', { class: 'hint', text: 'Coaxial also checks for a new server list on its own once a day.' })));
+        h('p', { class: 'hint', text: 'The list is not refreshed on its own: the download goes through the VPN and could disturb what is playing. Set update_hours in settings.json to have it refreshed on a timer anyway.' })));
   }
   function paintServers() {
     var btn = $('#vpn-refresh'), line = $('#vpn-updated');

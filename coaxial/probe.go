@@ -406,11 +406,23 @@ func (l *launcher) switchServer(asked bool) {
 	if !asked && someonePlaying() {
 		return
 	}
-	say("VPN server: moving to %s: %s", b.Name, why)
+	var mayStop func() bool
+	if asked {
+		say("VPN server: moving to %s, as asked for from the web page (anything playing stops for a few seconds): %s", b.Name, why)
+	} else {
+		say("VPN server: moving to %s: %s", b.Name, why)
+		mayStop = quietNow // (looked at again right before the VPN is stopped: the registry may have been asked through it first)
+	}
 	l.mu.Lock()
 	l.pickTry = b.env
 	l.mu.Unlock()
-	l.apply()
+	if !l.applyIf(false, mayStop) {
+		say("VPN server: something started playing; the move to %s waits until nothing plays", b.Name)
+		l.mu.Lock()
+		l.pickTry = ""
+		l.mu.Unlock()
+		return
+	}
 	if !l.waitUp(switchWait) {
 		warn("VPN server: %s did not connect; going back", b.Name)
 		l.mu.Lock()

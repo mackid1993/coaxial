@@ -177,7 +177,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
     "wireguard_addresses": "10.64.0.2/32",
     "server_countries": "",
     "server_cities": "",
-    "update_hours": 24,
+    "update_hours": 0,
     "gluetun_version": "latest",
     "extra": { "ANY_GLUETUN_VARIABLE": "value" }
   }
@@ -194,7 +194,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | `ui.port` | The port of the web page and of the health check. If left out, `UI_PORT` from `.env` (8195 if that is not set either). If you change it, change `UI_PORT` in `.env` to match. |
 | `ui.log_level` | How much goes into the log: `everything`, `detailed` (also when left out), `normal` or `quiet`. See [The log](#the-log). |
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
-| `vpn.update_hours` | How often gluetun refreshes its list of your VPN service's servers (its `UPDATER_PERIOD`). 24 if left out, 0 for never. |
+| `vpn.update_hours` | How often, in hours, gluetun refreshes its list of your VPN service's servers by itself (its `UPDATER_PERIOD`). 0, never, if left out: gluetun downloads the list through the VPN on its own timer whatever is playing, so Coaxial leaves it off and `Refresh server list` does it when you ask. Set a number to turn it on anyway. |
 | `vpn.gluetun_version` | Which gluetun program runs: `latest` (also when left out), a tag of gluetun's image such as `v3.41.3` to stay on one version, or `builtin` to fetch nothing and run the one in this image. |
 | `WIREGUARD_MTU` (under `vpn.extra`) | WireGuard's packet size. Coaxial sets 1320, gluetun's long-standing default, so the tunnel never depends on a size found at start. Set a number here only if your VPN service asks for one. |
 | `vpn.extra` | Any other gluetun variable under its own name, such as `OPENVPN_PROTOCOL`. It is applied last, so it wins over the settings above. Refused here and under `vpn`, because anyone who can reach the web page could use them: gluetun's `..._COMMAND` variables, OpenVPN options that run programs (such as `--up`) in `OPENVPN_FLAGS`, `HTTP_CONTROL_SERVER_*` settings other than `HTTP_CONTROL_SERVER_LOG`, and values on more than one line (except the OpenVPN certificate and keys). |

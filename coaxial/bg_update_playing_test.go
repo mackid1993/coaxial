@@ -23,11 +23,13 @@ func playingSocket(t *testing.T) (play func()) {
 	keptChannels, keptRows, keptFilms := channels, hlsRows, films
 	channels, hlsRows, films = map[string]*channel{}, map[string]*hlsRow{}, map[string]*film{}
 	mu.Unlock()
+	keptVideo := videoAt.Swap(0) // (no video either: an earlier test's player may have had some moments ago)
 	t.Cleanup(func() {
 		srv.Close()
 		mu.Lock()
 		channels, hlsRows, films = keptChannels, keptRows, keptFilms
 		mu.Unlock()
+		videoAt.Store(keptVideo)
 	})
 	return func() {
 		ch := &channel{key: "/ts bgtest 2", readers: map[*reader]bool{{kind: "MPEG-TS", who: "192.0.2.8"}: true}}

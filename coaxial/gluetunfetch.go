@@ -813,13 +813,14 @@ func nothingPlaying() bool {
 // registry is asked first, through the VPN that still runs: gluetun leaves its firewall and its name server
 // (127.0.0.1) behind when it stops, so nothing can be fetched from the moment the VPN is stopped until it is up
 // again. The start that follows takes what was found from the cache.
-func (l *launcher) restartForProgram(why string) { l.restartIf(why, false, false) }
+func (l *launcher) restartForProgram(why string) { l.restartIf(why, false, nil) }
 
 // restartIf is restartForProgram; with onlyNewer ("Update now"), the VPN is left running, and false returned, when
 // the registry gave no build other than the one in use: starting it again would cut what plays for nothing. With
-// idle (an update installed unasked), the same when something started playing while the registry was asked: the
-// build is kept in the cache and installed at the next quiet spell.
-func (l *launcher) restartIf(why string, onlyNewer, idle bool) bool {
+// mayStop (a restart nobody asked for: an update installed by itself, a build undone), the same when it says no
+// right before the VPN is stopped, after the registry was asked: an update's build is kept in the cache and
+// installed at the next quiet spell.
+func (l *launcher) restartIf(why string, onlyNewer bool, mayStop func() bool) bool {
 	l.mu.Lock()
 	s := l.set
 	l.mu.Unlock()
@@ -841,15 +842,28 @@ func (l *launcher) restartIf(why string, onlyNewer, idle bool) bool {
 			}
 		}
 	}
-	if idle && someonePlaying() { // (looked at again right before the VPN is stopped, as switchServer does)
-		say("VPN program: something started playing while the update was fetched; it is installed once nothing plays")
-		return false
-	}
+	return l.applyIf(true, mayStop)
+}
+
+// stillDown: the look a restart of a VPN called down takes right before it stops it (a build undone, a chosen
+// server dropped): the health check still calls it down and no video reached a player in the last 30 s. The
+// registry is asked first through that VPN, which can take as long as fetchLimit; a VPN that came up meanwhile,
+// or that carries video again (the look failed, the tunnel works), is left as it is. A proxy part that does not
+// answer cannot say video moves: a VPN that never came up has none.
+func (l *launcher) stillDown() bool {
 	l.mu.Lock()
-	l.vpnKey = why
+	up := l.vpnUp
 	l.mu.Unlock()
-	l.apply()
-	return true
+	return !up && !videoMovedWithin(30*time.Second)
+}
+
+// keepNote puts a note file back as it was before (data, or no file when it had none).
+func keepNote(file string, data []byte, had bool) {
+	if had {
+		os.WriteFile(file, data, 0o644)
+	} else {
+		os.Remove(file)
+	}
 }
 
 // askBeforeStop: a start of the VPN that will want the registry (another tag, or the last look-up is old) asks
@@ -877,7 +891,8 @@ func (l *launcher) autoUpdate() {
 	want, had := l.updDigest, l.prog.Digest
 	l.mu.Unlock()
 	say("VPN program: a newer gluetun (%s) is out and nothing has played for %d minutes; updating now", short(want), idleMinutes)
-	if !l.restartIf("(update)", false, true) {
+	if !l.restartIf("(update)", false, quietNow) {
+		say("VPN program: something started playing while the update was fetched; it is installed once nothing plays")
 		return
 	}
 	up := false
@@ -905,9 +920,14 @@ func (l *launcher) autoUpdate() {
 		warn("VPN program: the VPN did not come back after an update attempt, on the same program as before; nothing to undo")
 		return
 	}
-	writeWhole(filepath.Join(bin, "skip.json"), map[string]string{"digest": got})
+	skip := filepath.Join(bin, "skip.json")
+	before, err := os.ReadFile(skip)
+	writeWhole(skip, map[string]string{"digest": got})
 	warn("VPN program: the VPN did not connect within %d minutes on gluetun %s; going back to the one before and leaving that build alone", int(updateWait.Minutes()), short(got))
-	l.restartForProgram("(update undone)")
+	if !l.restartIf("(update undone)", false, l.stillDown) {
+		keepNote(skip, before, err == nil)
+		say("VPN program: the VPN came up on gluetun %s, or carries video again, while the build before was looked up; the update is kept", short(got))
+	}
 }
 
 // newest asks the registries which image the tag names now. Only a manifest is fetched: a few KB.
@@ -1011,24 +1031,23 @@ func (l *launcher) watchProgram() {
 			// container was restarted in the middle of an update), is undone like a failed update.
 			if downSince.IsZero() {
 				downSince = time.Now()
-			} else if l.undoBuild(good, time.Since(downSince)) {
-				downSince = time.Time{}
-				continue
-			} else if named && time.Since(downSince) > 2*time.Minute && videoMovedWithin(30*time.Second) {
+			} else if down := time.Since(downSince); (l.undoDue(good, down) || named && down > 2*time.Minute) && videoMovedWithin(30*time.Second) {
 				// The health check calls the VPN down, but video still goes through it: a look that fails while
-				// the tunnel works (a busy machine) must not cut what plays. A dead tunnel stops video within
-				// seconds, and then the choice is dropped as below.
+				// the tunnel works (a busy machine) must not cut what plays, nor mark the build it works on as one
+				// it never connected with. A dead tunnel stops video within seconds, and then it is done as below.
 				if !keptNoted {
-					warn("VPN server: the VPN health check has failed for 2 minutes, but video is still going through; the server is kept")
+					if l.undoDue(good, down) {
+						warn("VPN program: the VPN health check has failed for %d minutes on a build it never connected with here, but video is still going through; the build is kept", int(down.Minutes()))
+					} else {
+						warn("VPN server: the VPN health check has failed for 2 minutes, but video is still going through; the server is kept")
+					}
 					keptNoted = true
 				}
-			} else if named && time.Since(downSince) > 2*time.Minute {
-				warn("VPN server: the VPN has not connected for 2 minutes on the server chosen; letting gluetun choose")
-				l.mu.Lock()
-				l.pick, l.pickTry = picked{}, ""
-				l.mu.Unlock()
-				os.Remove(pickFile(l.dir))
-				l.apply()
+			} else if l.undoBuild(good, down) {
+				downSince = time.Time{}
+				continue
+			} else if named && down > 2*time.Minute {
+				l.dropChoice()
 				downSince = time.Time{}
 			}
 			quietSince = time.Time{}
@@ -1072,17 +1091,32 @@ func (l *launcher) watchProgram() {
 // here (good: the one it last did), and for updateWait, the build is left alone (skip.json) and the VPN started
 // again, on the one before. (watchProgram)
 func (l *launcher) undoBuild(good string, down time.Duration) bool {
+	if !l.undoDue(good, down) {
+		return false
+	}
 	l.mu.Lock()
 	running := l.prog.Digest
 	l.mu.Unlock()
-	if running == "" || good == "" || running == good || down <= updateWait {
-		return false
-	}
-	writeWhole(filepath.Join(binDir(l.dir), "skip.json"), map[string]string{"digest": running})
+	skip := filepath.Join(binDir(l.dir), "skip.json")
+	before, err := os.ReadFile(skip)
+	writeWhole(skip, map[string]string{"digest": running}) // (before the registry is asked: it must not name this build again)
 	warn("VPN program: the VPN has not connected for %d minutes on gluetun %s, which it never connected with here; going back to %s and leaving that build alone",
 		int(updateWait.Minutes()), short(running), short(good))
-	l.restartForProgram("(build undone)")
+	if !l.restartIf("(build undone)", false, l.stillDown) {
+		keepNote(skip, before, err == nil)
+		say("VPN program: the VPN came up on gluetun %s, or carries video again, while the build before was looked up; it is kept", short(running))
+		return false
+	}
 	return true
+}
+
+// undoDue: the VPN has been down this long, for more than updateWait, on a build it never connected with here
+// (good: the one it last did).
+func (l *launcher) undoDue(good string, down time.Duration) bool {
+	l.mu.Lock()
+	running := l.prog.Digest
+	l.mu.Unlock()
+	return running != "" && good != "" && running != good && down > updateWait
 }
 
 // apiProgramCheck: "check now".
@@ -1109,7 +1143,8 @@ func (l *launcher) apiProgramUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	say("VPN program: an update was asked for from the web interface; starting the VPN again")
 	os.Remove(filepath.Join(binDir(l.dir), "skip.json")) // (asked for by hand: a build left alone before is tried again)
-	done := l.restartIf("(update)", true, false)
+	// (asked for: it goes on whatever plays; the page said what that costs before it asked)
+	done := l.restartIf("(update)", true, nil)
 	l.mu.Lock()
 	p := l.prog
 	l.mu.Unlock()

@@ -145,6 +145,43 @@ func (l *launcher) pickOverride(s *settings) string {
 // already counts it as something playing (nothingPlaying): the move or update waits for the next quiet spell.
 func someonePlaying() bool { return !nothingPlaying() }
 
+// quietNow: the look a stop nobody asked for takes right before it stops the VPN while the VPN is up (applyIf's
+// mayStop for a server move or an update): the proxy part answers, nothing plays, and no video reached a player in
+// the last 30 s. A proxy part that does not answer counts as playing, as for someonePlaying.
+func quietNow() bool {
+	var in struct {
+		Playing []any
+		Video   *float64 `json:"video_s"`
+	}
+	data, ok := askProxy("/playing", 8*time.Second)
+	return ok && json.Unmarshal(data, &in) == nil && len(in.Playing) == 0 && (in.Video == nil || *in.Video < 0 || *in.Video >= 30)
+}
+
+// dropChoice: the VPN has not connected for 2 minutes on the server chosen (watchProgram): the choice is dropped
+// and gluetun picks for itself. If, by the time the VPN would be stopped, it came up or carries video again (a
+// wait for another change, such as the proxy part being started again, can come first), the choice is kept.
+func (l *launcher) dropChoice() bool {
+	warn("VPN server: the VPN has not connected for 2 minutes on the server chosen; letting gluetun choose")
+	l.mu.Lock()
+	prev, prevTry := l.pick, l.pickTry
+	l.pick, l.pickTry = picked{}, ""
+	l.mu.Unlock()
+	os.Remove(pickFile(l.dir))
+	if l.applyIf(false, l.stillDown) {
+		return true
+	}
+	l.mu.Lock()
+	if l.pick == (picked{}) && l.pickTry == "" {
+		l.pick, l.pickTry = prev, prevTry
+	}
+	l.mu.Unlock()
+	if prev.Env != "" {
+		writeWhole(pickFile(l.dir), prev)
+	}
+	say("VPN server: the VPN came up, or carries video again, before it was stopped; the server chosen is kept")
+	return false
+}
+
 func (l *launcher) waitUp(d time.Duration) bool {
 	for end := time.Now().Add(d); time.Now().Before(end); {
 		time.Sleep(time.Second)
