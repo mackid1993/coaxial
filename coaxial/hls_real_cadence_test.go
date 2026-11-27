@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,8 +14,18 @@ import (
 // cadenceHLS: a provider whose live playlists state target and move every cadence seconds (time-scaled from a
 // live evening: one tenth). stuckAfter > 0: the first session stops moving after that many seconds.
 func cadenceHLS(t *testing.T, target, cadence, stuckAfter float64) *newestHLS {
+	h, _ := cadenceHLSSeen(t, target, cadence, stuckAfter)
+	return h
+}
+
+// cadenceHLSSeen: cadenceHLS, and the time a player was first handed the last playlist of the session that
+// stalls (the last move the player saw).
+func cadenceHLSSeen(t *testing.T, target, cadence, stuckAfter float64) (*newestHLS, *atomic.Int64) {
 	h := newNewestHLS(t)
 	began := time.Now()
+	var seen atomic.Int64
+	served := map[string]int{}
+	var mu sync.Mutex
 	var stuckTok atomic.Value // (the session in use when the stall begins: that one stops, a new one moves on)
 	h.playHook = func(n int, w http.ResponseWriter, r *http.Request) bool {
 		el := time.Since(began).Seconds()
@@ -24,11 +36,22 @@ func cadenceHLS(t *testing.T, target, cadence, stuckAfter float64) *newestHLS {
 		if tok, _ := stuckTok.Load().(string); tok != "" && strings.Contains(r.URL.Path, tok) {
 			seq = 1000 + int(stuckAfter/cadence)
 		}
+		tok := tokRe.FindString(r.URL.Path)
+		mu.Lock()
+		if seq > served[tok] {
+			served[tok] = seq
+			if st, _ := stuckTok.Load().(string); st == "" || st == tok {
+				seen.Store(time.Now().UnixNano())
+			}
+		}
+		mu.Unlock()
 		fmt.Fprintf(w, "#EXTM3U\n#EXT-X-TARGETDURATION:%g\n#EXT-X-MEDIA-SEQUENCE:%d\n#EXTINF:%g,\np%d.ts\n", target, seq, cadence, seq)
 		return true
 	}
-	return h
+	return h, &seen
 }
+
+var tokRe = regexp.MustCompile(`/tok[0-9]+/`)
 
 // play: device dev tunes and reloads every every seconds for d seconds.
 func play(t *testing.T, h *newestHLS, dev string, every, d float64) {
@@ -77,26 +100,30 @@ func TestHLSRealStallsAreStillRescued(t *testing.T) {
 		name                          string
 		target, cadence, every, limit float64
 	}{
-		{"5 s pieces", 0.5, 0.5, 0.2, 0.75}, {"9 s pieces", 0.9, 0.85, 0.2, 1.0},
+		{"5 s pieces", 0.5, 0.5, 0.2, 0.94}, {"9 s pieces", 0.9, 0.85, 0.2, 1.0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			scaleCap(t)
-			h := cadenceHLS(t, c.target, c.cadence, 4*c.cadence)
+			h, seen := cadenceHLSSeen(t, c.target, c.cadence, 4*c.cadence)
 			began := time.Now()
+			before := int32(-1) // (opens when the stall began: a wasted rescue before it does not count)
 			const own, list = "/live/tv/easy/44.m3u8", "/__ch/live/tv/easy/44.m3u8/__index.m3u8"
 			devGet(h.base, "192.0.2.1", own, 10*time.Second)
-			for time.Since(began).Seconds() < 4*c.cadence+2.5 && h.opens.Load() < 2 {
+			for time.Since(began).Seconds() < 4*c.cadence+2.5 && (before < 0 || h.opens.Load() <= before) {
+				if before < 0 && time.Since(began).Seconds() > 4*c.cadence {
+					before = h.opens.Load()
+				}
 				devGet(h.base, "192.0.2.1", list, 10*time.Second)
 				time.Sleep(time.Duration(c.every * float64(time.Second)))
 			}
-			if h.opens.Load() < 2 {
+			if before < 0 || h.opens.Load() <= before {
 				t.Fatalf("a stalled session (%s) was never rescued", c.name)
 			}
-			at := time.Since(began).Seconds() - 4*c.cadence
-			t.Logf("%s: rescued %.1f s (x10) after the playlist stopped", c.name, at*10)
-			// At the first reload past the limit after the last move seen (moves are seen at reloads too): one
-			// reload late at most for each. The freezes came 11 and 12.5 s in.
-			if at > c.limit+2*c.every+0.15 {
+			// From the last move the player was handed, as it counts a standstill: the rescue comes on its first
+			// reload past the limit (10 s for 9 s pieces). The freezes came 11 and 12.5 s in.
+			at := time.Since(time.Unix(0, seen.Load())).Seconds()
+			t.Logf("%s: rescued %.1f s (x10) after the last move the player saw", c.name, at*10)
+			if at > c.limit+c.every+0.05 {
 				t.Errorf("a stalled session (%s) was rescued %.1f s (x10) after it stopped, later than the first reload past its limit", c.name, at*10)
 			}
 		})
@@ -134,6 +161,34 @@ func TestHLSRealPaceReplayedIsNotRescued(t *testing.T) {
 			play(t, h, "192.0.2.1", 0.2, at[len(at)-1])
 			if n := h.opens.Load(); n > 3 {
 				t.Errorf("the real pace of a channel (%s) opened it %d times at the provider, want at most 3", c.name, n)
+			}
+		})
+	}
+}
+
+// The other way in: a player that asks for the channel's own address again every few seconds (some do at each
+// refresh) while its playlist moves at a provider's healthy pace. A rescue through that path that finds the
+// provider no further on must teach the channel its pace too, or it reopens the channel for as long as it plays.
+func TestHLSRetunesAtRealPaceAreNotRescued(t *testing.T) {
+	for _, c := range []struct {
+		name            string
+		target, cadence float64
+	}{{"stated 11 s, moving every 12 s", 1.1, 1.2}, {"stated 4 s, moving every 6.6 s", 0.4, 0.66}} {
+		t.Run(c.name, func(t *testing.T) {
+			scaleCap(t)
+			h := cadenceHLS(t, c.target, c.cadence, 0)
+			const own, list = "/live/tv/easy/44.m3u8", "/__ch/live/tv/easy/44.m3u8/__index.m3u8"
+			devGet(h.base, "192.0.2.1", own, 10*time.Second)
+			for i, end := 0, time.Now().Add(24*time.Second); time.Now().Before(end); i++ {
+				p := list
+				if i%3 == 2 { // (about every 0.5 s: its own address again)
+					p = own
+				}
+				devGet(h.base, "192.0.2.1", p, 10*time.Second)
+				time.Sleep(200 * time.Millisecond)
+			}
+			if n := h.opens.Load(); n > 3 {
+				t.Errorf("a player asking its channel's own address again at a healthy pace (%s) had it opened %d times at the provider in 4 minutes (x10), want at most 3", c.name, n)
 			}
 		})
 	}
