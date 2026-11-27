@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     name: test (slice ${{ matrix.shard }})
     steps:
       - name: Checkout repository
@@ -46,7 +46,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/out"
           docker network create --subnet 198.18.200.0/24 coaxial-tests
-          docker run --rm --network coaxial-tests -e SHARD=${{ matrix.shard }} -e SHARDS=8 \
+          docker run --rm --network coaxial-tests -e SHARD=${{ matrix.shard }} -e SHARDS=16 \
             -v "$PWD:/repo" -v "$RUNNER_TEMP/out:/out" -w /repo/coaxial golang:alpine sh /repo/.github/test-shard.sh
 
       # When the run fails: the program's own files this push changed (the tests left out) and the lines of each
