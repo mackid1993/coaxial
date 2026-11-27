@@ -430,6 +430,31 @@ func (s *session) note(data []byte) {
 	}
 }
 
+// notePart: a playlist of one of the session's quality levels (see variant), read for a player. What it says of
+// its target duration is noted. For a film or an episode its pieces are the film's too: the session's own list
+// names only its quality levels, and the pieces of the one the player reads were in no list, so they did not
+// count as the film being watched (see inUse). base: where the playlist really came from.
+func (s *session) notePart(data []byte, base string, f *front) {
+	var text string
+	mu.Lock()
+	film := s.what.kind == "vod"
+	mu.Unlock()
+	if film {
+		text, _ = rewritePlaylist(string(data), base, f)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	s.note(data)
+	if film && text != "" {
+		if s.pieces == nil {
+			s.pieces = map[string]bool{}
+		}
+		for a := range playlistPieces(text) {
+			s.pieces[a] = true
+		}
+	}
+}
+
 // logMove: a live playlist moved on (to MEDIA-SEQUENCE n). How long it stood still before is measured from the
 // provider's own playlists as they were read, so it is what the players were handed. Longer than the limit for a
 // live playlist (1.5 target durations, RFC 8216 6.2.2) it is written at the detailed level; longer than the
@@ -1140,9 +1165,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			return err
 		}
 		if vs != nil && status == 200 { // (the variant's pieces set how often it is asked for)
-			mu.Lock()
-			vs.note(data)
-			mu.Unlock()
+			vs.notePart(data, final, rt.f)
 		}
 		// A catch-up's playlist, at the address the provider sent the player on to (catchUpPlaylist): it is
 		// complete and asked for once, so a session of its own counts it at the provider while its pieces are
@@ -1209,7 +1232,8 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		mu.Unlock()
 		if still {
 			ns, d, err := openChannel(key, target, h, from, asked)
-			if err != nil || (d != nil && d.status >= 400) { // (refused or failed: not asked again for renewGap, as on a reload)
+			// (refused, failed, or answered with no new session to move to: not asked again for renewGap, as on a reload)
+			if err != nil || d != nil {
 				mu.Lock()
 				s.refusedAt = mono()
 				mu.Unlock()
@@ -1261,11 +1285,17 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 				return err
 			} else if d != nil {
 				if d.status == 200 && of {
+					vs.notePart(d.data, target, rt.f)
+				} else if d.status == 200 && (want.kind == "vod" || rt.f.catchUpOf(&url.URL{Path: chanOrig, RawQuery: oquery}) != "") {
+					rt.f.keepDirect(key, target, who, want, d.data) // (a catch-up's or a film's: complete, asked for once)
+				} else if cu, follow := rt.f.followed(r); d.status == 200 && follow && cu.kind == "ch" {
+					// A catch-up's playlist the provider sent the player on to on its own server (catchUpPlaylist
+					// gives it there with the easy login): kept as at /__cdn/ above. Without it nothing counted
+					// the catch-up while its pieces were read, and pieces typed as text did not count as playing.
+					rt.f.keepDirect(key, target, who, cu, d.data)
 					mu.Lock()
-					vs.note(d.data)
+					rt.f.keepFor(who, cu, 0)
 					mu.Unlock()
-				} else if d.status == 200 && rt.f.catchUpOf(&url.URL{Path: chanOrig, RawQuery: oquery}) != "" {
-					rt.f.keepDirect(key, target, who, want, d.data)
 				} else if d.status == 200 && want.kind == "ch" {
 					rt.f.keepLive(key, target, who, channelID(uri), port+chanOrig, want, d.data)
 				}
@@ -1352,11 +1382,22 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if err == nil {
 			status, hd, data, final = st, hdr, text, fin
 		}
-		if err != nil {
-			if kept.on && ctx.Err() == nil { // (the new session failed: the stalled one's answer, as before)
-				status, hd, data, final, s, was = kept.status, kept.hd, kept.data, kept.final, kept.s, nil
-				break
+		// The channel was just opened again and the new session's own playlist failed (some providers send a
+		// reopen on to a session whose playlist answers 403). That counts as a refused reopen: the channel is
+		// not opened again before renewGap, or every reload opened it at the provider once more.
+		if attempt == 2 && ctx.Err() == nil && (err != nil || status != 200) {
+			mu.Lock()
+			s.refusedAt = mono()
+			if kept.on {
+				kept.s.refusedAt = s.refusedAt
 			}
+			mu.Unlock()
+		}
+		if kept.on && ctx.Err() == nil && (err != nil || status != 200) { // (the new session failed: the stalled one's answer, as before)
+			status, hd, data, final, s, was = kept.status, kept.hd, kept.data, kept.final, kept.s, nil
+			break
+		}
+		if err != nil {
 			if attempt == 2 || ctx.Err() != nil { // (the player hung up: nothing failed at the provider)
 				return err
 			}
@@ -1401,20 +1442,21 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			break
 		}
 		ns, d, err := openChannel(key, target, h, loc, asked) // the remembered session is gone (or stuck)
+		// Not opened again: no answer (a dropped connection, a time-out), a refusal, or, for a stalled session,
+		// an answer that is no new session to move to. Not asked again for renewGap, as on the re-tune door: a
+		// failed rescue was otherwise tried again at every reload, 17 times in 3 s.
+		if err != nil || (d != nil && (d.status >= 400 || stalled)) {
+			mu.Lock()
+			s.refusedAt = mono()
+			mu.Unlock()
+		}
+		if (err != nil || d != nil) && stalled { // (the stalled session's own answer goes on, never the refusal)
+			status, hd, data, final = kept.status, kept.hd, kept.data, kept.final
+			break
+		}
 		if err != nil {
-			if stalled {
-				break // (the stalled session's own answer goes on)
-			}
 			return err
 		} else if d != nil {
-			if d.status >= 400 {
-				mu.Lock()
-				s.refusedAt = mono()
-				mu.Unlock()
-			}
-			if stalled {
-				break
-			}
 			return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film, r)
 		}
 		mu.Lock()

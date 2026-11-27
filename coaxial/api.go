@@ -231,6 +231,20 @@ func watching(who string) func() {
 	}
 }
 
+// filmRead: device who asked for a piece of a film or an episode watched as HLS (see inUse). Its playlist is
+// complete and asked for once, so its pieces are all that shows it is being watched, and a server may type them
+// as anything (text, or nothing at all). Without this the film counted as playing only while its playlist was
+// asked for, about 30 s, and a VPN server move or an update could run under the rest of it. Each piece counts
+// as a film answer that just ended (see playingNow). (mu held)
+func filmRead(who string) {
+	f := films[who]
+	if f == nil {
+		f = &film{}
+		films[who] = f
+	}
+	f.last = mono()
+}
+
 // playingNow: who is playing, counted as statusData counts them, without asking anyone anything. The launcher
 // asks this every 20 s, day and night; /status would ask each provider for its account each time, and for its
 // channel list every minute while that fails. That is for the page, while someone looks at it. A film, an

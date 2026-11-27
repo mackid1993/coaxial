@@ -431,6 +431,9 @@ func (f *front) inUse(uri, who string) bool {
 			if strings.HasSuffix(k, " direct") && s.what.kind == "ch" && !isLoop(who) { // (a catch-up's: it is being watched)
 				f.catchUpRead(who, s.what.item)
 			}
+			if s.what.kind == "vod" && !isLoop(who) { // (a film's or an episode's: it is being watched, see filmRead)
+				filmRead(who)
+			}
 		}
 	}
 	return part
