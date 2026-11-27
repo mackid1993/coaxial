@@ -241,3 +241,30 @@ func TestHLSLearnedPaceThroughRetunesIsKeptForTheNextTune(t *testing.T) {
 		t.Errorf("tuning again a channel whose pace was learned through re-tunes opened it %d times at the provider, want 1 (the tune)", n)
 	}
 }
+
+// A channel stating 5 s pieces whose playlist moves every 6.3 s and now and then stands still 10.3 to 11.1 s in
+// healthy playback (the real pace of one, one tenth of the time). Held at stallCap (10 s) it was opened again at
+// each long pause; it learns past that, up to 12 s, so after one wasted reopen it is left alone.
+func TestHLSShortPieceChannelLearnsPastTheCap(t *testing.T) {
+	scaleCap(t)
+	h := newNewestHLS(t)
+	gaps := []float64{0.64, 0.63, 0.65, 0.64, 1.03, 0.63, 0.65, 0.64, 0.66, 1.05, 0.63, 0.64, 0.65, 0.63, 1.11,
+		0.64, 0.63, 0.65, 0.64, 1.06, 0.63, 0.65, 0.64, 0.63, 1.08, 0.64, 0.65, 0.63}
+	at := []float64{0}
+	for _, g := range gaps {
+		at = append(at, at[len(at)-1]+g)
+	}
+	began := time.Now()
+	h.playHook = func(n int, w http.ResponseWriter, r *http.Request) bool {
+		el, seq := time.Since(began).Seconds(), 0
+		for seq < len(at)-1 && at[seq+1] <= el {
+			seq++
+		}
+		fmt.Fprintf(w, "#EXTM3U\n#EXT-X-TARGETDURATION:0.5\n#EXT-X-MEDIA-SEQUENCE:%d\n#EXTINF:0.5,\np%d.ts\n", 1000+seq, seq)
+		return true
+	}
+	play(t, h, "192.0.2.1", 0.2, at[len(at)-1])
+	if n := h.opens.Load(); n > 2 {
+		t.Errorf("a 5 s channel whose healthy pauses reach 11 s was opened %d times at the provider, want at most 2 (the tune and one it learns from)", n)
+	}
+}

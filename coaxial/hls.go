@@ -543,14 +543,19 @@ func keepPace(key string, s *session) {
 // When a new session turns out at most one piece further on than the stalled one, the standstill that set it
 // off was the provider's own pace (the next piece was just due): learned is raised 1.3 times past it, so the channel is not rescued at that pace again. (mu held)
 //
-// What is learned never goes past stallCap on a channel whose pieces are shorter than that (a player froze 11 s
-// into a standstill on 9 s pieces): only a channel whose pieces are stallCap or longer learns past it, up to 1.25
-// of its target duration (a freeze 1.3 piece lengths into a standstill was seen on 9 s pieces).
+// How far a channel may learn: up to 1.25 target durations when its pieces are stallCap or longer (a freeze 1.3
+// piece lengths into a standstill was seen on 9 s pieces); up to stallCap for pieces between; and up to 1.2
+// stallCap (12 s) for pieces of 0.6 stallCap (6 s) or shorter. A channel stating 4 to 6 s pieces stood still up
+// to 11.1 s in healthy playback, and held at 10 s it was opened again at each such pause, 8 times in 20 minutes,
+// 7 of them finding the provider no further on; a player froze only from 12.5 s on 5 s pieces.
 func (s *session) loneLimit() float64 {
 	base := math.Max(math.Min(1.5*s.target, stallCap), s.target)
 	top := stallCap
-	if s.target >= stallCap {
+	switch {
+	case s.target >= stallCap:
 		top = 1.25 * s.target
+	case s.target <= 0.6*stallCap:
+		top = 1.2 * stallCap
 	}
 	return math.Max(base, math.Min(s.learned, top))
 }
