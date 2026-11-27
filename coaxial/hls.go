@@ -375,6 +375,7 @@ type session struct {
 	seq        int64              // its playlist's MEDIA-SEQUENCE when last read (hasSeq: read at all)
 	hasSeq     bool
 	moved      float64 // when that number last moved on (see stood)
+	noted      float64 // when a playlist of it was last read (see note: a standstill nobody asked through is not one)
 	bridged    float64 // when the relay's own bridge (a recorder's MPEG-TS made from this HLS) last asked for it
 	refusedAt  float64 // when opening the channel again in its place was last refused (see renewGap)
 }
@@ -400,11 +401,54 @@ func (s *session) note(data []byte) {
 	}
 	if m := seqTagRe.FindSubmatch(data); m != nil {
 		if n, err := strconv.ParseInt(string(m[1]), 10, 64); err == nil {
-			if !s.hasSeq || n != s.seq {
-				s.moved = mono()
+			now := mono()
+			if s.hasSeq && n != s.seq {
+				s.logMove(now, n)
 			}
-			s.seq, s.hasSeq = n, true
+			if !s.hasSeq || n != s.seq {
+				s.moved = now
+			}
+			s.seq, s.hasSeq, s.noted = n, true, now
 		}
+	}
+}
+
+// logMove: a live playlist moved on (to MEDIA-SEQUENCE n). How long it stood still before is measured from the
+// provider's own playlists as they were read, so it is what the players were handed. Longer than the limit for a
+// live playlist (1.5 target durations, RFC 8216 6.2.2) it is written at the detailed level; longer than the
+// three target durations a player starts behind the live end (RFC 8216 6.3.3), the video it has in hand may
+// have run out, and it is written at the normal level. Every move is written at the everything level. A
+// standstill nobody asked through (no read for 1.5 target durations before this one) is left out: it says
+// nothing about the provider. (mu held)
+func (s *session) logMove(now float64, n int64) {
+	stood, target := now-s.moved, s.target
+	if s.moved <= 0 || target <= 0 {
+		return
+	}
+	e := lg.Trace()
+	quiet := now-s.noted > 1.5*target
+	switch {
+	case quiet:
+	case stood > 3*target:
+		e = lg.Info()
+	case stood > 1.5*target:
+		e = lg.Debug()
+	}
+	provider := ""
+	if s.owner != nil {
+		provider = s.owner.name
+	}
+	e = e.Str("channel", s.what.item).Str("provider", provider).Int64("seq", n).Float64("stood_s", round1(stood)).
+		Float64("target_s", target)
+	switch {
+	case quiet:
+		e.Msg("a live playlist moved on (nobody had asked for it for a while)")
+	case stood > 3*target:
+		e.Msgf("a live playlist stood still %.1f s, longer than the %.0f s a player keeps in hand; it moved on again", stood, 3*target)
+	case stood > 1.5*target:
+		e.Msgf("a live playlist stood still %.1f s before it moved on", stood)
+	default:
+		e.Msg("a live playlist moved on")
 	}
 }
 

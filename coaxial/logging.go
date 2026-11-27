@@ -33,9 +33,10 @@ import (
 
 // The log detail levels, as settings.json and the web page name them.
 const (
-	logDetailed = "detailed" // everything about streams and provider answers, background requests (the default)
-	logNormal   = "normal"   // starts, ends and every problem
-	logQuiet    = "quiet"    // problems only
+	logEverything = "everything" // detailed, plus one line per video piece sent and every live playlist move
+	logDetailed   = "detailed"   // everything about streams and provider answers, background requests (the default)
+	logNormal     = "normal"     // starts, ends and every problem
+	logQuiet      = "quiet"      // problems only
 )
 
 // Seconds a live stream may get nothing from its provider before it is logged. Providers send live video in
@@ -71,12 +72,14 @@ func zerologLevel(name string) zerolog.Level {
 		return zerolog.InfoLevel
 	case logQuiet:
 		return zerolog.WarnLevel
+	case logEverything:
+		return zerolog.TraceLevel
 	}
 	return zerolog.DebugLevel
 }
 
 func validLogLevel(name string) bool {
-	return name == "" || name == logDetailed || name == logNormal || name == logQuiet
+	return name == "" || name == logEverything || name == logDetailed || name == logNormal || name == logQuiet
 }
 
 // consoleTo: zerolog's console format, plain text, UTC times, "coaxial:" before the message.

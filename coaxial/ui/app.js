@@ -994,8 +994,9 @@
   }
 
   // How much Coaxial writes to the container's log (ui.log_level).
-  var LOGLEVELS = [['detailed', 'Detailed'], ['normal', 'Normal'], ['quiet', 'Quiet']];
+  var LOGLEVELS = [['everything', 'Everything'], ['detailed', 'Detailed'], ['normal', 'Normal'], ['quiet', 'Quiet']];
   var LOGHINT = {
+    everything: 'Detailed, plus one line for every video piece sent to a player and every time a live playlist moves on. A lot of lines: for finding a problem, not for every day.',
     detailed: 'Every stream start and end, every answer from your providers, pauses of 15 s or more and what Coaxial does in the background. Problems stand out as WRN lines.',
     normal: 'Who watches what, when channels start and stop, and every problem.',
     quiet: 'Problems only.'
