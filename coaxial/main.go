@@ -106,6 +106,25 @@ func (timeoutError) Timeout() bool { return true }
 var errStop = errors.New("the feed's reader stopped")
 
 // wentQuiet: the error is a server sending nothing for too long (idleBody's or a deadline's).
+// firstQuiet: a channel's first provider connection gave no answer, or answered and sent nothing, for firstWait
+// (a connection can go quiet without closing; through a VPN tunnel that happens). A player straight at the
+// provider asks again on a new connection after its own wait; the readers waiting here are asked for again the
+// same way, twice at most, while anyone waits. It was answered 504 instead, with no new connection made.
+// firstWait: seconds a channel's first provider connection may take to answer and to send its first video before
+// it is asked again (firstQuiet). A provider's opening burst comes within a second; a player straight at the
+// provider waits 8 s (Media3) to 20 s (AetherEngine) before it reconnects, and a playlist of HLS built from the
+// MPEG-TS waits segWait (20 s) for its first pieces, so the new connection must come well before that.
+const firstWait = 12
+
+func firstQuiet(ctx context.Context, ch *channel, again bool, err error, tries *int, st *streamStats) bool {
+	if again || *tries >= 2 || ctx.Err() != nil || !wentQuiet(err) || !watched(ch) {
+		return false
+	}
+	*tries++
+	st.fields(lg.Warn()).Int("try", *tries).Msgf("a channel's first connection sent nothing for %d s; asked again on a new connection", firstWait)
+	return true
+}
+
 func wentQuiet(err error) bool { return errors.As(err, new(timeoutError)) || isTimeout(err) }
 
 func isTimeout(err error) bool {
@@ -1229,6 +1248,7 @@ func passHeaders(in http.Header) http.Header {
 func tsSource(target string, h http.Header, a *askLog) source {
 	run := func(ctx context.Context, ch *channel, yield func([]byte) bool, st *streamStats) error {
 		again, sent, tries, dropped := false, int64(0), 0, 0.0
+		firstTries := 0             // a channel's first connection that went quiet, asked again (see firstQuiet)
 		clockPID, clock := -1, -1.0 // the newest stream clock passed on (see spliceAt)
 		var clk clockFix            // keeps the stream's clock running on when the provider's feed starts a new file
 		clk.tag = st.fields
@@ -1237,6 +1257,9 @@ func tsSource(target string, h http.Header, a *askLog) source {
 			wait := float64(headerWait)
 			if again {
 				wait = reopenWait // readers are waiting
+			} else {
+				// Its first answer within firstWait, connecting included (see firstWait).
+				wait = math.Min(wait, firstWait-connectWait.Seconds())
 			}
 			r, err := fetch(ctx, target, h, opts{wait: wait, ask: st.asking(again)})
 			// A channel the provider ended while it was watched is often being restarted on the provider's side: for a
@@ -1264,6 +1287,9 @@ func tsSource(target string, h http.Header, a *askLog) source {
 				tries++
 				continue
 			}
+			if err != nil && firstQuiet(ctx, ch, again, err, &firstTries, st) {
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -1289,6 +1315,8 @@ func tsSource(target string, h http.Header, a *askLog) source {
 				setWait(r, liveQuiet)
 				if again {
 					setWait(r, 2*reopenWait)
+				} else if !got {
+					setWait(r, firstWait) // (its first video within firstWait too; then liveQuiet between reads)
 				}
 				clk.reask()     // (half a packet of the old stream is of no use; find the new one's packets)
 				var head []byte // a stream opened again is joined on at a whole packet
@@ -1349,6 +1377,9 @@ func tsSource(target string, h http.Header, a *askLog) source {
 			}()
 			if errors.Is(err, errStop) || ctx.Err() != nil {
 				return err
+			}
+			if err != nil && !got && firstQuiet(ctx, ch, again, err, &firstTries, st) {
+				continue
 			}
 			if err != nil && !got {
 				// A channel asked for again whose new connection answered but sent nothing (it went quiet or broke
