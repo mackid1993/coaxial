@@ -15,9 +15,11 @@ if [ "$SHARD" = 0 ]; then
 fi
 go test -list '.*' ./... | grep -E '^(Test|Fuzz|Example)' | sort -u > /out/all.txt
 times=../.github/test-times.txt
-[ -f "$times" ] || times=/dev/null
-awk -v s="$SHARD" -v n="$SHARDS" '
-  FNR == NR { t[$1] = $2; next }
+[ -f "$times" ] || times=""
+# (the times file is named with -v, not read as the first file: with no times file the test list itself was
+# taken for one, nothing was dealt out, and every slice passed with no tests run)
+awk -v s="$SHARD" -v n="$SHARDS" -v tf="$times" '
+  BEGIN { if (tf != "") while ((getline l < tf) > 0) { split(l, f, " "); t[f[1]] = f[2] } }
   { name[++k] = $1; w[k] = ($1 in t) ? t[$1] + 0 : 5 }
   END {
     # longest first (a simple selection sort: a few hundred tests), each to the lightest slice
@@ -25,9 +27,13 @@ awk -v s="$SHARD" -v n="$SHARDS" '
     for (i = 1; i <= k; i++) { m = i; for (j = i + 1; j <= k; j++) if (w[order[j]] > w[order[m]] || (w[order[j]] == w[order[m]] && name[order[j]] < name[order[m]])) m = j; x = order[i]; order[i] = order[m]; order[m] = x }
     for (i = 0; i < n; i++) load[i] = 0
     for (i = 1; i <= k; i++) { b = 0; for (j = 1; j < n; j++) if (load[j] < load[b]) b = j; load[b] += w[order[i]]; if (b == s) print name[order[i]] }
-  }' "$times" /out/all.txt > /out/mine.txt
+  }' /out/all.txt > /out/mine.txt
 echo "slice $SHARD of $SHARDS: $(wc -l < /out/mine.txt) of $(wc -l < /out/all.txt) tests"
-[ -s /out/mine.txt ] || exit 0
+total=$(wc -l < /out/all.txt)
+if [ ! -s /out/mine.txt ]; then
+  if [ "$total" -ge "$SHARDS" ]; then echo "slice $SHARD was dealt no tests out of $total: the dealing is broken"; exit 1; fi
+  exit 0
+fi
 pattern="^($(paste -sd '|' /out/mine.txt))\$"
 set +e
 go test -count=1 -timeout 30m -v -run "$pattern" ./... > /out/out.txt 2>&1
@@ -42,4 +48,9 @@ if [ $code -ne 0 ]; then
   echo "::endgroup::"
 fi
 echo "passed: $(grep -c '^--- PASS' /out/out.txt), failed: $(grep -c '^--- FAIL' /out/out.txt), skipped: $(grep -c '^--- SKIP' /out/out.txt)"
+# Every test dealt to this slice must have run (passed, failed or skipped): a slice that runs fewer than it was
+# dealt, or none, fails, so a broken -run pattern can never pass quietly.
+ran=$(grep -cE '^--- (PASS|FAIL|SKIP): ' /out/out.txt)
+want=$(wc -l < /out/mine.txt)
+if [ "$ran" -lt "$want" ]; then echo "slice $SHARD was dealt $want tests and $ran ran"; exit 1; fi
 exit $code
