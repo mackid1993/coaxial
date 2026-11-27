@@ -193,3 +193,51 @@ func TestHLSRetunesAtRealPaceAreNotRescued(t *testing.T) {
 		})
 	}
 }
+
+// A channel's pace, once learned, is kept for its next tune: tuning it again later (the session long gone) does
+// not cost a new session at the provider to learn it again.
+func TestHLSLearnedPaceIsKeptForTheNextTune(t *testing.T) {
+	scaleCap(t)
+	h := cadenceHLS(t, 0.4, 0.66, 0)
+	play(t, h, "192.0.2.1", 0.15, 8) // (it learns its pace)
+	mu.Lock()
+	for k := range sessions { // (the session forgotten, as a minute after the player left)
+		delete(sessions, k)
+	}
+	mu.Unlock()
+	before := h.opens.Load()
+	play(t, h, "192.0.2.1", 0.15, 8)
+	if n := h.opens.Load() - before; n != 1 {
+		t.Errorf("tuning a channel whose pace was learned opened it %d times at the provider, want 1 (the tune)", n)
+	}
+}
+
+// The same for a player that also asks its channel's own address again at its refreshes: the pace its rescue
+// learned is kept for the channel's next tune too.
+func TestHLSLearnedPaceThroughRetunesIsKeptForTheNextTune(t *testing.T) {
+	scaleCap(t)
+	h := cadenceHLS(t, 0.4, 0.66, 0)
+	const own, list = "/live/tv/easy/44.m3u8", "/__ch/live/tv/easy/44.m3u8/__index.m3u8"
+	retune := func(d time.Duration) {
+		devGet(h.base, "192.0.2.1", own, 10*time.Second)
+		for i, end := 0, time.Now().Add(d); time.Now().Before(end); i++ {
+			p := list
+			if i%3 == 2 {
+				p = own
+			}
+			devGet(h.base, "192.0.2.1", p, 10*time.Second)
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	retune(10 * time.Second) // (it learns its pace)
+	mu.Lock()
+	for k := range sessions {
+		delete(sessions, k)
+	}
+	mu.Unlock()
+	before := h.opens.Load()
+	retune(8 * time.Second)
+	if n := h.opens.Load() - before; n != 1 {
+		t.Errorf("tuning again a channel whose pace was learned through re-tunes opened it %d times at the provider, want 1 (the tune)", n)
+	}
+}

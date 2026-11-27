@@ -383,6 +383,7 @@ type session struct {
 	rescued   bool
 	fromSeq   int64
 	fromMoved float64
+	paceKey   string  // the channel's key, for keeping what its first playlist teaches (see paces)
 	bridged   float64 // when the relay's own bridge (a recorder's MPEG-TS made from this HLS) last asked for it
 	refusedAt float64 // when opening the channel again in its place was last refused (see renewGap)
 }
@@ -418,6 +419,7 @@ func (s *session) note(data []byte) {
 				if n <= s.fromSeq+1 {
 					s.hold = true
 					s.learned = math.Max(s.learned, 1.3*(now-s.fromMoved))
+					keepPace(s.paceKey, s) // (kept for the channel's next tune, as on the other paths)
 				}
 			}
 			if !s.hasSeq || n != s.seq {
@@ -495,6 +497,19 @@ func (s *session) stood(now float64, who string) bool {
 	return now-s.moved > limit
 }
 
+// paces: what each channel has learned of its own pace (see loneLimit), kept for its next tune. (mu held)
+var paces = map[string]float64{}
+
+// keepPace: what session s of channel key has learned, kept for the channel. (mu held)
+func keepPace(key string, s *session) {
+	if s.learned > paces[key] {
+		if len(paces) > 2000 {
+			paces = map[string]float64{}
+		}
+		paces[key] = s.learned
+	}
+}
+
 // loneLimit: how long the playlist of a session one device is alone on may stand still before it counts as
 // stuck: 1.5 target durations, at most stallCap, never under one target duration (a rescue sooner than one piece
 // fires on every piece), and never under what the channel has shown is its own normal. Some providers state a
@@ -504,13 +519,13 @@ func (s *session) stood(now float64, who string) bool {
 // off was the provider's own pace (the next piece was just due): learned is raised 1.3 times past it, so the channel is not rescued at that pace again. (mu held)
 //
 // What is learned never goes past stallCap on a channel whose pieces are shorter than that (a player froze 11 s
-// into a standstill on 9 s pieces): only a channel whose pieces are stallCap or longer learns past it, up to 1.5
-// of its target duration.
+// into a standstill on 9 s pieces): only a channel whose pieces are stallCap or longer learns past it, up to 1.25
+// of its target duration (a freeze 1.3 piece lengths into a standstill was seen on 9 s pieces).
 func (s *session) loneLimit() float64 {
 	base := math.Max(math.Min(1.5*s.target, stallCap), s.target)
 	top := stallCap
 	if s.target >= stallCap {
-		top = 1.5 * s.target
+		top = 1.25 * s.target
 	}
 	return math.Max(base, math.Min(s.learned, top))
 }
@@ -949,6 +964,7 @@ func openChannel(key, target string, h http.Header, renewFrom string, a *askLog)
 		s := &session{loc: u.String(), final: u.String(), used: mono(), opened: mono(), who: map[string]float64{}}
 		mu.Lock()
 		sessions[key] = s
+		s.learned = paces[key] // (what the channel learned of its own pace on an earlier tune)
 		mu.Unlock()
 		if renewFrom != "" {
 			a.fields(lg.Info()).Msg("a live HLS channel was opened again at the provider")
@@ -1201,14 +1217,15 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			if err == nil && d == nil && ns != nil && ns != s {
 				mu.Lock()
 				ns.what, ns.bridged = s.what, s.bridged // (still the same stream, and the same devices on it)
-				ns.learned = s.learned
+				ns.learned = math.Max(s.learned, paces[key])
 				switch { // (no further on than the stalled one: the provider's own pace; learn it and hold)
 				case s.hasSeq && ns.hasSeq && ns.seq <= s.seq+1:
 					ns.hold = true
 					ns.learned = math.Max(ns.learned, 1.3*(mono()-s.moved))
 				case s.hasSeq && !ns.hasSeq: // (its first playlist is not read yet: that one decides, see note)
-					ns.rescued, ns.fromSeq, ns.fromMoved = true, s.seq, s.moved
+					ns.rescued, ns.fromSeq, ns.fromMoved, ns.paceKey = true, s.seq, s.moved, key
 				}
+				keepPace(key, ns)
 				for dev, t := range s.who {
 					ns.who[dev] = t
 				}
@@ -1423,11 +1440,12 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		s.pieces = pieces
 		s.note(data)
 		if was != nil && s != was { // (the same stream: what it has shown carries over)
-			s.learned = was.learned
+			s.learned = math.Max(was.learned, paces[key])
 			if was.hasSeq && s.hasSeq && s.seq <= was.seq+1 { // at most one piece on: the provider's own pace
 				s.hold = true
 				s.learned = math.Max(s.learned, 1.3*(mono()-was.moved))
 			}
+			keepPace(key, s)
 		}
 		if was != nil && was.hasSeq && s.hasSeq { // does the new session carry on the numbering players have?
 			ev := lg.Info()
