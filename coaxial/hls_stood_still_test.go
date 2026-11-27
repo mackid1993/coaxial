@@ -37,7 +37,8 @@ func TestHLSTunedAgainAfterPlaylistStoodStillGetsANewSession(t *testing.T) {
 		t.Fatalf("a second ask right after the tune: status %d, %v, %d opens at the provider, want 200 and 1", st, err, h.opens.Load())
 	}
 	stuck.Store(true)
-	for i := 0; i < 8; i++ { // the player reloads its playlist for about 4 s and it never moves
+	for i := 0; i < 2; i++ { // the player reloads its playlist and it does not move, under 1.5 target durations
+		// (longer, the reloads alone open the channel again: TestHLSLoneReloaderOfAStalledPlaylistGetsANewSession)
 		st, data, _ := devGet(h.base, dev, list, 10*time.Second)
 		if st != 200 || !bytes.Contains(data, []byte("MEDIA-SEQUENCE:500")) {
 			t.Fatalf("reload %d of the stuck session: status %d, playlist %q", i+1, st, data)
@@ -45,8 +46,9 @@ func TestHLSTunedAgainAfterPlaylistStoodStillGetsANewSession(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	if n := h.opens.Load(); n != 1 {
-		t.Fatalf("reloads of a playlist that stands still opened the channel again (%d opens): only a new tune may", n)
+		t.Fatalf("reloads of a playlist that stood still under 1.5 target durations opened the channel again (%d opens)", n)
 	}
+	time.Sleep(3500 * time.Millisecond) // past both limits (1.5 target durations, and stoodStill 1.5 s / 3 targets)
 	// The player gives up and tunes the channel again.
 	st, data, err := devGet(h.base, dev, own, 10*time.Second)
 	if err != nil || st != 200 {

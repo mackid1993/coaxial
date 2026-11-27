@@ -475,10 +475,15 @@ func (s *session) stood(now float64, who string) bool {
 	}
 	limit := math.Max(stoodStill, 3*s.target)
 	if s.target > 0 && s.only(who, now) {
-		limit = 1.5 * s.target
+		limit = math.Min(1.5*s.target, stallCap)
 	}
 	return now-s.moved > limit
 }
+
+// stallCap: seconds a live playlist may stand still for a device alone on it, however long its pieces. A player
+// froze for good after 12.5 s without a move on 5 s pieces and after 11 s on 9 s pieces: 1.5 target durations
+// (13.5 s there) came too late. (A variable for the tests.)
+var stallCap = 10.0
 
 // only: device who is the one reader the session has (mu held).
 func (s *session) only(who string, now float64) bool {
@@ -1261,17 +1266,31 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	var data []byte
 	var final string
 	var was *session // the session this one replaced, when it was opened again (for the log line below)
+	// A stalled session's own answer, kept to be passed on when opening the channel again does not work out.
+	var kept struct {
+		on     bool
+		status int
+		hd     http.Header
+		data   []byte
+		final  string
+		s      *session
+	}
 	for attempt := 1; attempt <= 2; attempt++ {
 		mu.Lock()
 		loc := s.loc
 		mu.Unlock()
 		reload := *asked
 		reload.kind, reload.routine = asked.kind+" playlist", true
+		began := mono() // (a standstill is counted up to here: a wait on a quiet connection is not one)
 		st, hdr, text, fin, err := livePlaylist(ctx, loc, h, 25, &reload)
 		if err == nil {
 			status, hd, data, final = st, hdr, text, fin
 		}
 		if err != nil {
+			if kept.on && ctx.Err() == nil { // (the new session failed: the stalled one's answer, as before)
+				status, hd, data, final, s, was = kept.status, kept.hd, kept.data, kept.final, kept.s, nil
+				break
+			}
 			if attempt == 2 || ctx.Err() != nil { // (the player hung up: nothing failed at the provider)
 				return err
 			}
@@ -1281,8 +1300,30 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 				status = rf.status
 			}
 		}
-		if !renewOn[status] || attempt == 2 {
+		// A live playlist that has stood still past the limit for a live playlist (1.5 target durations for a
+		// device alone on it, RFC 8216 6.2.2; longer with others on it: see stood) while a player keeps
+		// reloading it is a session stuck at the provider: a new one moves on at once (seen 28 times out of 28
+		// on a live system). Players do not all start the channel over by themselves when that happens: one
+		// kept reloading the stopped playlist and then stopped asking for anything at all, frozen until its app
+		// was closed, twice in a day. So it is opened again here, and the player reloading the same address is
+		// handed the new session's playlist, as it is after it starts the channel over itself.
+		stalled := false
+		if err == nil && status == 200 && attempt == 1 && want.kind == "ch" {
+			mu.Lock()
+			if m := seqTagRe.FindSubmatch(data); m != nil && s.hasSeq && string(m[1]) == strconv.FormatInt(s.seq, 10) &&
+				s.stood(began, who) && mono()-s.refusedAt >= renewGap {
+				stalled = true
+				lg.Info().Str("device", who).Str("channel", channelID(uri)).Str("provider", rt.f.name).
+					Float64("stood_still_s", round1(began-s.moved)).
+					Msgf("a live HLS playlist stood still %.0f s while %s kept reloading it: opened again at the provider", began-s.moved, who)
+			}
+			mu.Unlock()
+		}
+		if (!renewOn[status] && !stalled) || attempt == 2 {
 			break
+		}
+		if stalled {
+			kept.on, kept.status, kept.hd, kept.data, kept.final, kept.s = true, status, hd, data, final, s
 		}
 		mu.Lock()
 		refusedNow := mono()-s.refusedAt < renewGap
@@ -1293,14 +1334,20 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			}
 			break
 		}
-		ns, d, err := openChannel(key, target, h, loc, asked) // the remembered session is gone
+		ns, d, err := openChannel(key, target, h, loc, asked) // the remembered session is gone (or stuck)
 		if err != nil {
+			if stalled {
+				break // (the stalled session's own answer goes on)
+			}
 			return err
 		} else if d != nil {
 			if d.status >= 400 {
 				mu.Lock()
 				s.refusedAt = mono()
 				mu.Unlock()
+			}
+			if stalled {
+				break
 			}
 			return servePlaylist(w, d.status, d.h, d.data, target, rt.f, film, r)
 		}
