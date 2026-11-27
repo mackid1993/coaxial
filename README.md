@@ -192,7 +192,7 @@ restart the container. If the file is missing at start, Coaxial writes `settings
 | `live_tv` | `ts` if your players watch live TV as MPEG-TS, `hls` if they use HLS. |
 | `advanced` | Options some providers need, all off but `stay_under_limit`. Left out, the defaults apply. See [Advanced options](#advanced-options-per-provider). |
 | `ui.port` | The port of the web page and of the health check. If left out, `UI_PORT` from `.env` (8195 if that is not set either). If you change it, change `UI_PORT` in `.env` to match. |
-| `ui.log_level` | How much goes into the log: `detailed` (also when left out), `normal` or `quiet`. See [The log](#the-log). |
+| `ui.log_level` | How much goes into the log: `everything`, `detailed` (also when left out), `normal` or `quiet`. See [The log](#the-log). |
 | `vpn` | gluetun's settings. Every key but `extra`, `update_hours` and `gluetun_version` is a gluetun variable written in small letters: `wireguard_private_key` is `WIREGUARD_PRIVATE_KEY`, `service_provider` and `type` are `VPN_SERVICE_PROVIDER` and `VPN_TYPE`. The VPN service must be set. |
 | `vpn.update_hours` | How often gluetun refreshes its list of your VPN service's servers (its `UPDATER_PERIOD`). 24 if left out, 0 for never. |
 | `vpn.gluetun_version` | Which gluetun program runs: `latest` (also when left out), a tag of gluetun's image such as `v3.41.3` to stay on one version, or `builtin` to fetch nothing and run the one in this image. |
@@ -295,7 +295,10 @@ leave both server boxes empty, Coaxial chooses the server for you. It does not d
 - **`Check servers now`** on the Status view runs a round right away. It never reconnects anything.
 - **A provider locked to one address.** Once a server is chosen, Coaxial does not move by itself; `Switch now` still
   works.
-- If the chosen server stops connecting for 2 minutes, Coaxial drops its choice and lets gluetun pick.
+- If the chosen server stops connecting for 2 minutes, Coaxial drops its choice and lets gluetun pick. If gluetun's
+  health check fails while video still goes through the tunnel, the server is kept: the check can fail on a busy
+  machine while the tunnel works, and starting the VPN again would cut what plays. Once no video has gone through for
+  30 seconds, the choice is dropped as above.
 - **The pinging** is done by [pro-bing](https://github.com/prometheus-community/pro-bing) (MIT), the ping library of
   the Prometheus project. See `ACKNOWLEDGMENTS.md`.
 
@@ -360,7 +363,18 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
   waits on one longer than a player would: a live MPEG-TS channel that sends nothing for 20 seconds is asked for
   again at once, however long it ran. An HLS playlist or piece of video that sends nothing for 8 seconds is asked
   for again at once on a new connection, and a piece that stopped part way is fetched on from where it stopped, so
-  the player gets it whole. A quiet playlist never opens the channel again at the provider.
+  the player gets it whole. A quiet playlist never opens the channel again at the provider. A channel's very first
+  connection that answers nothing, or sends nothing, for 12 seconds is asked for again on a new connection, twice at
+  most, so the player still gets its picture.
+- **When a live HLS session gets stuck.** Now and then a provider's session for a channel stops moving while a new
+  session for the same channel plays fine. Many players never recover from that: they reload the same stopped
+  playlist and freeze until the app is closed. When a device is alone on a channel and its playlist has not moved for
+  1.5 of its target durations (at most 10 seconds, never under one), Coaxial opens the channel again at the provider
+  and hands the device the new session on its next reload, or when it asks for the channel again. Some providers
+  move their playlists slower than the target they state; when a new session turns out no further on, Coaxial takes
+  that pace as normal for the channel, remembers it, and does not open it again for that. A refused reopen is not
+  tried again for 8 seconds. With another device or a recording on the session, it waits longer, so nobody else's
+  video is cut.
 - **When a provider restarts a channel.** Right after ending a stream, a provider is often restarting that channel on
   its side, and for a few seconds it answers "not found" or a server error. While someone is still watching, Coaxial
   asks again a few more times, further apart each time, for up to a minute, and the picture comes back on its own.
@@ -422,11 +436,15 @@ without a restart:
 
 | Log detail | What is written |
 | --- | --- |
+| Everything | Detailed, plus one line for every video piece sent to a player and every time a live playlist moves on. A lot of lines: for finding a problem, not for every day. |
 | Detailed (the default) | Everything below, plus each answer from a provider, each stream's end (why, how long, MB, the longest pause), a line every 10 minutes per channel playing, and what Coaxial asks on its own (status page account reads, VPN server pings, the VPN program's update check, the public address look-up), marked `background:`. |
 | Normal | Who watches what, channels starting and stopping, one line per request, and every problem. |
 | Quiet | Problems only. |
 
-A line for every video piece of an HLS stream is never written. The compose file keeps Docker's log to at most three
+A line for every video piece of an HLS stream is written only at Everything, or at any level when the piece failed
+or took 2 seconds or more to send. How long a live playlist stood still before it moved on is written at Detailed
+when it is longer than 1.5 of its target durations, and at Normal when it is longer than the three target durations
+a player keeps in hand. The compose file keeps Docker's log to at most three
 files of 10 MB each (`logging:` in `compose.yaml`), so the log never fills the disk; keep that block if you write
 your own compose file.
 

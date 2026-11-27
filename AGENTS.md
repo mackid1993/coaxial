@@ -64,6 +64,15 @@ cleanly, and send it all through the VPN. It is a proxy, not a player.
     the path his device uses, read each one, and test each with a fake that goes quiet (not one that
     closes or keeps sending). A log filtered for noise is not evidence that a device was absent: count
     its lines unfiltered first.
+16. **Every rule is tested both ways, on a provider that acts like a real one.** A test that a rule acts
+    when it should is half a test: the other half is that it stays quiet through healthy real use. Real
+    providers state a target duration their playlists do not keep (stated 4 s, moving every 6.2 to
+    6.7 s; stated 11 s, moving every 11 to 13.3 s), send pieces slowly at times, stand still 10 to
+    16 s on busy channels, refuse reopens, and go quiet without closing. The `*_realistic_test.go`
+    stand-ins do this; use them, replay real paces logged on a live system where you can, and prove a
+    new test bites by breaking the rule it guards in a scratch copy. The six real-clip replays skip in
+    CI: run them by hand (`COAXIAL_REPLAY_CLIPS`, `COAXIAL_REPLAY_TS`, `COAXIAL_REPLAY_EPISODE`) after
+    any change to the live path or the clock code. Fix every known bug before shipping, not after.
 
 ## Incident log
 
@@ -252,6 +261,35 @@ Dates are November 2026. "Commit" is in this repository unless the entry says ot
   fail on the old code; a normal 17 s provider pause is still left alone).
 - **Lesson:** rules 14 and 15.
 
+### 22. A live HLS player froze for good on a stuck provider session (Nov 26)
+- **Seen:** twice in one day, a player alone on a live HLS channel froze on one picture and stayed
+  frozen on every channel until its app was closed. Nothing failed in the log.
+- **Cause:** the provider's session for the channel stopped moving (12.5 s on 5 s pieces, about 11 s
+  on 9 s pieces) while a new session moved at once. Coaxial pins every viewer to one session, so it
+  kept handing the player the stopped playlist; the player's own recovery hung. Straight at the
+  provider, a fresh tune gets a fresh session.
+- **How it went:** the first fix only renewed when the player asked for the channel's own address
+  again, and at 15 s; the second only when it re-tuned. The player that froze only reloaded. The next
+  fix renewed on reloads after 1.5 target durations, and on a live evening it opened new sessions
+  20 times in half an hour on a channel whose playlist moves slower than its stated target (each
+  found the provider no further on). Independent reviews then found the re-tune path never learned
+  the pace, a refused re-tune was retried at every refresh, and the long-piece ceiling was too high.
+  The tests had passed every time because every stand-in moved exactly on its stated target.
+- **Fix:** `6ed5382`, `dcb640b`, `b352eb3`, `da64dc8`, `22546f0`, `a05f853`: a lone device's session is
+  renewed on a reload or a re-tune once its playlist has stood still past `loneLimit` (1.5 target
+  durations, at most `stallCap` 10 s, never under one target); a renewal that finds the provider at
+  most one piece on teaches the channel its pace (`learned`, kept per channel in `paces`) and holds
+  until the playlist moves; refused renewals wait `renewGap`. Stall lengths are logged exactly
+  (`logMove`). Tests: `hls_real_cadence_test.go` (real paces replayed), `hls_*realistic_test.go`.
+- **Also found by the same reviews and fixed:** a channel's first MPEG-TS connection that went quiet
+  was never asked again (504 after 20 to 30 s; `06e4a5f`, `firstWait`); a proxy part that did not
+  answer read as "nothing plays" before a VPN server move or update (`52437ae`); a film with no video
+  content type did not count as playing (`52437ae`); a failing VPN health check restarted a tunnel
+  video still used (`0b5a82a`: judged by video through the tunnel, as VPN clients judge theirs by
+  traffic).
+- **Lesson:** rule 16. A fix tested only against fakes that behave the way the fix assumes passed
+  six times and misfired on the first real evening.
+
 ### Not in Coaxial (so no one re-chases them)
 - A network switch near one TV slowed down every few days (300 ms pings); a scheduled power cycle fixed
   it. Ping the player first when everything is slow. Also incidents 9 and 12 (client side), late-night
@@ -282,3 +320,6 @@ Dates are November 2026. "Commit" is in this repository unless the entry says ot
    many of the freezes being chased. One tested deploy, only when nothing plays.
 8. **Waits longer than a player's.** A quiet connection costs the player whatever Coaxial waits. Fix a
    timeout on every path at once, and test with a fake that goes quiet.
+9. **Fakes that keep the rules the code assumes.** Playlists that move exactly on their stated target,
+   pieces that arrive at once, a provider that never refuses. Every rescue and timer passed against
+   them and misfired on real ones. Test both ways on realistic stand-ins (rule 16).
