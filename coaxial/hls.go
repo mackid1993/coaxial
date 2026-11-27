@@ -376,6 +376,8 @@ type session struct {
 	hasSeq     bool
 	moved      float64 // when that number last moved on (see stood)
 	noted      float64 // when a playlist of it was last read (see note: a standstill nobody asked through is not one)
+	learned    float64 // a standstill this channel's playlist has shown while the provider was no further on (see loneLimit)
+	hold       bool    // a new session in its place was just as far on: no rescue again until its playlist moves
 	bridged    float64 // when the relay's own bridge (a recorder's MPEG-TS made from this HLS) last asked for it
 	refusedAt  float64 // when opening the channel again in its place was last refused (see renewGap)
 }
@@ -404,6 +406,7 @@ func (s *session) note(data []byte) {
 			now := mono()
 			if s.hasSeq && n != s.seq {
 				s.logMove(now, n)
+				s.hold = false
 			}
 			if !s.hasSeq || n != s.seq {
 				s.moved = now
@@ -475,9 +478,29 @@ func (s *session) stood(now float64, who string) bool {
 	}
 	limit := math.Max(stoodStill, 3*s.target)
 	if s.target > 0 && s.only(who, now) {
-		limit = math.Min(1.5*s.target, stallCap)
+		limit = s.loneLimit()
 	}
 	return now-s.moved > limit
+}
+
+// loneLimit: how long the playlist of a session one device is alone on may stand still before it counts as
+// stuck: 1.5 target durations, at most stallCap, never under one target duration (a rescue sooner than one piece
+// fires on every piece), and never under what the channel has shown is its own normal. Some providers state a
+// shorter target than their playlists keep (stated 4 s, moving every 6.2 to 6.7 s; stated 11 s, moving every 11
+// to 13.3 s), and the stated number alone opened new sessions during normal playback, 20 times in half an hour.
+// When a new session turns out no further on than the stalled one, the standstill that set it off was the
+// provider's own pace: learned is raised past it, so the channel is not rescued at that pace again. (mu held)
+//
+// What is learned never goes past stallCap on a channel whose pieces are shorter than that (a player froze 11 s
+// into a standstill on 9 s pieces): only a channel whose pieces are stallCap or longer learns past it, up to 1.25
+// of its target duration.
+func (s *session) loneLimit() float64 {
+	base := math.Max(math.Min(1.5*s.target, stallCap), s.target)
+	top := stallCap
+	if s.target >= stallCap {
+		top = 1.25 * s.target
+	}
+	return math.Max(base, math.Min(s.learned, top))
 }
 
 // stallCap: seconds a live playlist may stand still for a device alone on it, however long its pieces. A player
@@ -1154,12 +1177,13 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	// channel that stays stopped is opened again at most once in that time, however often it is asked for.
 	if m == nil && s != nil && !back {
 		mu.Lock()
-		still, from, since := s.stood(mono(), who), s.loc, mono()-s.moved
+		still, from, since := !s.hold && s.stood(mono(), who), s.loc, mono()-s.moved
 		mu.Unlock()
 		if still {
 			if ns, d, err := openChannel(key, target, h, from, asked); err == nil && d == nil && ns != nil && ns != s {
 				mu.Lock()
 				ns.what, ns.bridged = s.what, s.bridged // (still the same stream, and the same devices on it)
+				ns.learned = s.learned
 				for dev, t := range s.who {
 					ns.who[dev] = t
 				}
@@ -1311,7 +1335,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 		if err == nil && status == 200 && attempt == 1 && want.kind == "ch" {
 			mu.Lock()
 			if m := seqTagRe.FindSubmatch(data); m != nil && s.hasSeq && string(m[1]) == strconv.FormatInt(s.seq, 10) &&
-				s.stood(began, who) && mono()-s.refusedAt >= renewGap {
+				!s.hold && s.stood(began, who) && mono()-s.refusedAt >= renewGap {
 				stalled = true
 				lg.Info().Str("device", who).Str("channel", channelID(uri)).Str("provider", rt.f.name).
 					Float64("stood_still_s", round1(began-s.moved)).
@@ -1373,6 +1397,13 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	if status == 200 {
 		s.pieces = pieces
 		s.note(data)
+		if was != nil && s != was { // (the same stream: what it has shown carries over)
+			s.learned = was.learned
+			if was.hasSeq && s.hasSeq && s.seq <= was.seq { // no further on: the provider's own pace
+				s.hold = true
+				s.learned = math.Max(s.learned, 1.1*(mono()-was.moved))
+			}
+		}
 		if was != nil && was.hasSeq && s.hasSeq { // does the new session carry on the numbering players have?
 			ev := lg.Info()
 			if s.seq < was.seq || s.seq > was.seq+64 {
