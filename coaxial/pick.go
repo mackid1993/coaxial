@@ -139,13 +139,11 @@ func (l *launcher) pickOverride(s *settings) string {
 	return ""
 }
 
-// someonePlaying: true only when the proxy part answers and says so (while the VPN is being changed the
-// proxy part is not running, and then nobody can be).
-func someonePlaying() bool {
-	var in struct{ Playing []any }
-	data, ok := askProxy("/playing", 8*time.Second)
-	return ok && json.Unmarshal(data, &in) == nil && len(in.Playing) > 0
-}
+// someonePlaying: the last look before the VPN is stopped by itself (a server move, an update). Only a proxy
+// part that answers and says nothing plays lets it go on. One that does not answer (stopped, being started again
+// after a crash, too busy) may have viewers and recordings on their way back to it, and watchProgram's own look
+// already counts it as something playing (nothingPlaying): the move or update waits for the next quiet spell.
+func someonePlaying() bool { return !nothingPlaying() }
 
 func (l *launcher) waitUp(d time.Duration) bool {
 	for end := time.Now().Add(d); time.Now().Before(end); {

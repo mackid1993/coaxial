@@ -765,8 +765,10 @@ func (f *front) forwardHeld(c *counted, r *http.Request, target, scheme, hostpor
 		return
 	}
 	kind, who := strings.ToLower(resp.Header.Get("Content-Type")), whoIs(r)
+	// (admitted under hd: a film, an episode or catch-up, however its server types it. Some send no type, and a
+	// web server left at its defaults types a .ts file as text.)
 	if resp.StatusCode < 300 && who != "127.0.0.1" && who != "::1" && // (not the relay's own bridge)
-		(strings.HasPrefix(kind, "video/") || strings.HasPrefix(kind, "audio/") || strings.HasPrefix(kind, "application/octet-stream")) {
+		(hd != nil || strings.HasPrefix(kind, "video/") || strings.HasPrefix(kind, "audio/") || strings.HasPrefix(kind, "application/octet-stream")) {
 		defer watching(who)() // a film, an episode or catch-up: someone is watching (see playingNow)
 	}
 	if p := f.speedOf(r, hd); p != nil && resp.StatusCode < 300 {
