@@ -563,11 +563,14 @@ func pesPTS(b []byte) (float64, bool) {
 // another, a multiview app, a media server), and letting the other go made the two open each other again at
 // every reload, a new connection at the provider and new numbering each time. There the old builder ends
 // when it is no longer asked for (segIdle), and the connection limit makes room sooner when it is reached
-// (decide in advanced.go), as for a live MPEG-TS channel (single in tsSource). Two providers in the settings can be two accounts on one server address:
-// a channel opened on one account frees nothing on the other, and a device that plays on both (a media server
-// with two lines) has not left its channel there, so only builders of the same account are let go. (mu held)
+// (decide in advanced.go), as for a live MPEG-TS channel (single in tsSource). What counts is the number typed
+// in (bought), not the limit kept: with stay_under_limit off the account still allows two or more, and limit()
+// is 0 there, which brought the two channels opening each other at every reload back. Two providers in the
+// settings can be two accounts on one server address: a channel opened on one account frees nothing on the
+// other, and a device that plays on both (a media server with two lines) has not left its channel there, so
+// only builders of the same account are let go. (mu held)
 func releaseFor(f *front, provider, who, key string) {
-	if f != nil && f.limit() > 1 {
+	if f != nil && f.bought > 1 {
 		return
 	}
 	for k, sg := range segmenters {

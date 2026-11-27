@@ -13,10 +13,16 @@ import (
 // two connections or more, opening the second channel let go of the first channel's HLS builder (a device that
 // opens another channel has left its old one), the first channel's next reload made a new builder, which let
 // go of the second, and so on: every reload opened a channel at the provider again. Each channel must be asked
-// for once.
+// for once, with stay_under_limit on or off: the account allows two either way (it came back with the option
+// off, when the rule read the limit kept, which is 0 there, instead of the number typed in).
 func TestOneAddressTwoChannelsAsHLSFromTSKeepsBoth(t *testing.T) {
-	for _, second := range []string{"m3u8", "ts"} {
-		t.Run("second as "+second, func(t *testing.T) {
+	for _, c := range []struct {
+		second, name string
+		a            advanced
+	}{{"m3u8", "", advanced{}}, {"ts", "", advanced{}},
+		{"m3u8", ", stay_under_limit off", advanced{StayUnder: off()}}, {"ts", ", stay_under_limit off", advanced{StayUnder: off()}}} {
+		second := c.second
+		t.Run("second as "+second+c.name, func(t *testing.T) {
 			p := &tsHLSProv{s: wreckBuild(11, wreckPart{secs: 34, clock: 1000}), burst: 14,
 				asks: map[string]int{}, open: map[string]int{}, closed: map[string]time.Time{}}
 			fp := newFakeProv(t, false, func(_ *fakeProv, w http.ResponseWriter, r *http.Request) bool {
@@ -26,7 +32,7 @@ func TestOneAddressTwoChannelsAsHLSFromTSKeepsBoth(t *testing.T) {
 				p.serve(w, r)
 				return true
 			})
-			_, base := limFront(t, fp, "ts", "2", advanced{})
+			_, base := limFront(t, fp, "ts", "2", c.a)
 			const dev = "192.0.2.72"
 			if st, _, _, _ := tsHLSGet(t, dev, base+"/live/tv/easy/7.m3u8"); st != 200 {
 				t.Fatalf("channel 7 as HLS: %d", st)

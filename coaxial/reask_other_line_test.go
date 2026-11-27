@@ -18,7 +18,8 @@ import (
 // recorder's account. other: the second provider in the settings the TV asks through (nil: the recorder's own).
 // tvStatus: the answer the TV must get (0: the TV plays its channel as HLS, which is built from the channel's
 // MPEG-TS, and whatever it is answered counts). asks: how often channel 12 must have been asked for in the end.
-func reaskCase(t *testing.T, connections number, other *provider, tvStatus, asks int) {
+// a: the recorder's account's advanced options (left out: none set).
+func reaskCase(t *testing.T, connections number, other *provider, tvStatus, asks int, a ...advanced) {
 	var asked atomic.Int32
 	fp := newFakeProv(t, false, func(fp *fakeProv, w http.ResponseWriter, r *http.Request) bool {
 		if r.URL.Path != "/live/realU/realP/12.ts" || asked.Add(1) != 1 {
@@ -38,7 +39,11 @@ func reaskCase(t *testing.T, connections number, other *provider, tvStatus, asks
 		}
 		return true
 	})
-	_, base := limFront(t, fp, "ts", connections, advanced{})
+	adv := advanced{}
+	if len(a) > 0 {
+		adv = a[0]
+	}
+	_, base := limFront(t, fp, "ts", connections, adv)
 	tvBase := base
 	if other != nil {
 		other.URL = fp.srv.URL

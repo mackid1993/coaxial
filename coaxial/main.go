@@ -113,7 +113,11 @@ var errStop = errors.New("the feed's reader stopped")
 // firstWait: seconds a channel's first provider connection may take to answer and to send its first video before
 // it is asked again (firstQuiet). A provider's opening burst comes within a second; a player straight at the
 // provider waits 8 s (Media3) to 20 s (AetherEngine) before it reconnects, and a playlist of HLS built from the
-// MPEG-TS waits segWait (20 s) for its first pieces, so the new connection must come well before that.
+// MPEG-TS waits segWait (20 s) for its first pieces, so the new connection must come well before that. Both are
+// counted from the ask, connecting included: the new connection goes out at most 13 s after it (an answer in the
+// last second still gets one for its first video, see leftOf). The first video used to get firstWait again once
+// the answer came, so an answer at 11 s that then sent nothing was asked again only after 23 s, once that
+// playlist had been answered 504. A provider that never answers in time is asked 3 times (about 36 to 39 s).
 const firstWait = 12
 
 func firstQuiet(ctx context.Context, ch *channel, again bool, err error, tries *int, st *streamStats) bool {
@@ -246,6 +250,11 @@ func (b *idleBody) Read(p []byte) (int, error) {
 func (b *idleBody) Close() error { b.cancel(); return b.ReadCloser.Close() }
 
 func setWait(r *http.Response, s float64) { r.Body.(*idleBody).wait.Store(int64(secs(s))) }
+
+// leftOf: what is left of a wait of s seconds begun at began (mono), never under a second. A wait meant as
+// "within s of the ask" and split between the answer and its first bytes passes on what is left: setWait
+// starts over, so passing s again let the real wait grow to twice s.
+func leftOf(began, s float64) float64 { return math.Max(1, s-(mono()-began)) }
 
 func isRedirect(s int) bool { return s == 301 || s == 302 || s == 303 || s == 307 || s == 308 }
 
@@ -1215,6 +1224,7 @@ func watched(ch *channel) bool {
 // reaskAllowed: whether an extra ask may still go out: not while a provider locked to one address waits after a
 // VPN change, and not (on an account that allows one connection, or whose limit is not set) once another channel
 // of this provider was opened since the drop (asking would end that one; the same rule as the first ask again).
+// What the account allows is the number typed in, whether or not stay_under_limit keeps it (see single below).
 func reaskAllowed(ch *channel, since float64) bool {
 	mu.Lock()
 	defer mu.Unlock()
@@ -1222,7 +1232,7 @@ func reaskAllowed(ch *channel, since float64) bool {
 	if f != nil && lockLeft(f.locked, f.lockWait, vpnChanged, mono()) > 0 {
 		return false
 	}
-	single := f == nil || f.limit() <= 1
+	single := f == nil || f.bought <= 1
 	return !(single && op.at > since && op.key != ch.key)
 }
 
@@ -1316,7 +1326,7 @@ func tsSource(target string, h http.Header, a *askLog) source {
 				if again {
 					setWait(r, 2*reopenWait)
 				} else if !got {
-					setWait(r, firstWait) // (its first video within firstWait too; then liveQuiet between reads)
+					setWait(r, leftOf(began, firstWait)) // (its first video within firstWait of the ask too; then liveQuiet)
 				}
 				clk.reask()     // (half a packet of the old stream is of no use; find the new one's packets)
 				var head []byte // a stream opened again is joined on at a whole packet
@@ -1403,8 +1413,9 @@ func tsSource(target string, h http.Header, a *askLog) source {
 			// in the last 15 s: asking would end that one.
 			mu.Lock()
 			ran, op := mono()-began, lastOpen[lineOf(ch.provider, ch.owner)]
-			// (an account that allows more than one connection: opening another channel did not end this one)
-			single := ch.owner == nil || ch.owner.limit() <= 1
+			// (an account that allows more than one connection: opening another channel did not end this one. The
+			// number typed in, not limit(): with stay_under_limit off that is 0, and a recording was let go again)
+			single := ch.owner == nil || ch.owner.bought <= 1
 			// (a connection that went quiet is asked again however long it ran: with the old 60 s wait it always
 			// ran past reopenAfter, and the shorter liveQuiet must not turn that into letting its readers go)
 			stop := len(ch.readers) == 0 || (ran < reopenAfter && !wentQuiet(err)) || (single && op.at > math.Max(began, mono()-15) && op.key != ch.key)
