@@ -19,6 +19,7 @@ func TestFailedUpdateNotRetriedByItself(t *testing.T) {
 	if runtime.GOARCH != "amd64" {
 		t.Skip("the canned image is for amd64")
 	}
+	playingSocket(t) // (the proxy part answers: nothing plays)
 	l := &launcher{dir: t.TempDir(), quit: make(chan int, 4), prog: builtinProgram}
 	l.set = &settings{}
 	l.set.parse([]byte(`{"vpn":{"service_provider":"custom","type":"wireguard","gluetun_version":"latest"}}`))

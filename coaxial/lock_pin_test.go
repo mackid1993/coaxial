@@ -13,6 +13,7 @@ func TestLockedProviderGetsAServerNamed(t *testing.T) {
 	switchWait = 2 * time.Second
 	defer func() { switchWait = old }()
 	fakePings(t, map[string]float64{"192.0.2.1": 6, "192.0.2.2": 5, "192.0.2.3": 7}, nil)
+	playingSocket(t) // (the proxy part answers: nothing plays)
 	l := &launcher{dir: t.TempDir(), quit: make(chan int, 4), prog: builtinProgram, pickLoaded: true}
 	fakeServers(t, l)
 	l.set.parse([]byte(`{"providers":[{"name":"One","advanced":{"locked_to_address":true}}],` +

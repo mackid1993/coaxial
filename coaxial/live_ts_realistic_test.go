@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -292,38 +295,59 @@ func TestLiveTSRealisticProbeThenPlay(t *testing.T) {
 // cushion (joinSeconds of video) and cuts pieces only at keyframes the stream marks; the cushion must already
 // hold segMinFirst pieces, so the first playlist is answered at once. Otherwise it waits for the provider's next
 // lumps (up to segWait, 20 s), and a player gives up on an answer after 8 s.
+// The HLS device comes at three moments, each on a channel of its own watched from the start: early, while the
+// provider's opening burst still counts in the channel's measured rate (the cushion then holds more video than
+// joinSeconds), and twice later, when the cushion is about joinSeconds of video and holds about two pieces.
 func TestHLSFromTSRealisticJoinerFirstPlaylistReplay(t *testing.T) {
 	path := os.Getenv("COAXIAL_REPLAY_TS")
 	if path == "" {
 		t.Skip("COAXIAL_REPLAY_TS names no recorded feed")
 	}
 	fd := replayFeed(t, path)
+	joins := map[string]float64{"7": 12, "8": 30, "9": 45} // channel: when the HLS device asks for it
 	start := time.Now()
-	var asked atomic.Int32
-	serve := leadProvider(fd, start, 1e9, &asked)
+	asked := map[string]*atomic.Int32{}
+	for id := range joins {
+		asked[id] = &atomic.Int32{}
+	}
 	fp := newFakeProv(t, true, func(_ *fakeProv, w http.ResponseWriter, r *http.Request) bool {
-		if r.URL.Path != "/live/realU/realP/7.ts" {
-			return false
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/live/realU/realP/"), ".ts")
+		if n := asked[id]; n != nil && r.URL.Path == "/live/realU/realP/"+id+".ts" {
+			leadProvider(fd, start, 1e9, n)(w, r) // (every channel plays the same recording from the same moment)
+			return true
 		}
-		serve(w, r)
-		return true
+		return false
 	})
 	_, base := limFront(t, fp, "ts", "", advanced{})
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	p := &tsRealProv{start: start, scale: 1}
-	viewer := rpRead(ctx, p, base, "192.0.2.62", "/live/tv/easy/7.ts", 0, 0)
-	for _, joinAt := range []float64{12} {
-		p.until(ctx, joinAt)
-		asked := p.wall()
-		st, list, _ := rpGet(t, base, "192.0.2.63", "/live/tv/easy/7.m3u8")
-		took := p.wall() - asked
-		pieces, _, _, _, _ := rpList(list)
-		t.Logf("HLS player joining at %.0f s: first playlist %d with %d pieces after %.1f s", joinAt, st, len(pieces), took)
-		if st != 200 || took > 1.5 { // (segmenterFor: the joiner's cushion makes the first pieces ready straight away)
-			t.Errorf("HLS player joining a channel watched as MPEG-TS at %.0f s: first playlist answered %d after %.1f s, want at once", joinAt, st, took)
+	var viewers []*rpReader
+	var wg sync.WaitGroup
+	k := 0
+	for id, joinAt := range joins {
+		k++
+		viewers = append(viewers, rpRead(ctx, p, base, fmt.Sprintf("192.0.2.%d", 61+2*k), "/live/tv/easy/"+id+".ts", 0, 0))
+		wg.Add(1)
+		go func(dev string) {
+			defer wg.Done()
+			p.until(ctx, joinAt)
+			from := p.wall()
+			st, list, _ := rpGet(t, base, dev, "/live/tv/easy/"+id+".m3u8")
+			took := p.wall() - from
+			pieces, _, _, _, _ := rpList(list)
+			t.Logf("HLS player joining at %.0f s: first playlist %d with %d pieces after %.1f s", joinAt, st, len(pieces), took)
+			if st != 200 || took > 1.5 { // (segmenterFor: the joiner's cushion makes the first pieces ready straight away)
+				t.Errorf("HLS player joining a channel watched as MPEG-TS at %.0f s: first playlist answered %d after %.1f s, want at once", joinAt, st, took)
+			}
+		}(fmt.Sprintf("192.0.2.%d", 62+2*k))
+	}
+	wg.Wait()
+	cancel()
+	rpWaitAll(viewers...)
+	for id, n := range asked {
+		if n.Load() != 1 {
+			t.Errorf("channel %s: the provider was asked %d times, want once", id, n.Load())
 		}
 	}
-	cancel()
-	rpWaitAll(viewer)
 }

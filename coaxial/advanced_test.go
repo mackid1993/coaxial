@@ -632,6 +632,7 @@ func TestLockWait(t *testing.T) {
 // With a provider locked to one address, a server once chosen is never changed on Coaxial's own, even when a
 // better one is found; the page's button still can (it is not run here: it starts the VPN).
 func TestLockedProviderKeepsServer(t *testing.T) {
+	playingSocket(t) // (the proxy part answers: nothing plays, so the lock alone keeps the server)
 	l := &launcher{dir: t.TempDir(), quit: make(chan int, 4), prog: builtinProgram, pickLoaded: true}
 	l.set = &settings{}
 	l.set.parse([]byte(`{"providers":[{"name":"One","advanced":{"locked_to_address":true}}],` +
