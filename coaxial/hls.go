@@ -1189,10 +1189,16 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 	// channel that stays stopped is opened again at most once in that time, however often it is asked for.
 	if m == nil && s != nil && !back {
 		mu.Lock()
-		still, from, since := !s.hold && s.stood(mono(), who), s.loc, mono()-s.moved
+		still, from, since := !s.hold && s.stood(mono(), who) && mono()-s.refusedAt >= renewGap, s.loc, mono()-s.moved
 		mu.Unlock()
 		if still {
-			if ns, d, err := openChannel(key, target, h, from, asked); err == nil && d == nil && ns != nil && ns != s {
+			ns, d, err := openChannel(key, target, h, from, asked)
+			if err != nil || (d != nil && d.status >= 400) { // (refused or failed: not asked again for renewGap, as on a reload)
+				mu.Lock()
+				s.refusedAt = mono()
+				mu.Unlock()
+			}
+			if err == nil && d == nil && ns != nil && ns != s {
 				mu.Lock()
 				ns.what, ns.bridged = s.what, s.bridged // (still the same stream, and the same devices on it)
 				ns.learned = s.learned
