@@ -1393,7 +1393,7 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			}
 			mu.Unlock()
 		}
-		if kept.on && ctx.Err() == nil && (err != nil || status != 200) { // (the new session failed: the stalled one's answer, as before)
+		if kept.on && ctx.Err() == nil && (err != nil || status != 200) { // (the new session failed: the stalled one's last answer, for this reload)
 			status, hd, data, final, s, was = kept.status, kept.hd, kept.data, kept.final, kept.s, nil
 			break
 		}
@@ -1450,7 +1450,8 @@ func playlistRequest(w http.ResponseWriter, r *http.Request, rt *route) error {
 			s.refusedAt = mono()
 			mu.Unlock()
 		}
-		if (err != nil || d != nil) && stalled { // (the stalled session's own answer goes on, never the refusal)
+		if (err != nil || d != nil) && stalled { // (this reload gets the stalled session's last answer, not the refusal; later reloads ask
+			// that session again, which a provider whose newest session wins may already have ended)
 			status, hd, data, final = kept.status, kept.hd, kept.data, kept.final
 			break
 		}

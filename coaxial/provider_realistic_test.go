@@ -124,6 +124,7 @@ type rpConn struct {
 	status  int     // answered with this status and a short text instead of video (a channel restarting: 404)
 	noHead  bool    // takes the request and never answers it
 	noBytes bool    // answers 200 and then sends nothing, without closing
+	headAt  float64 // answers only at this wall second (then as planned otherwise)
 	quietAt float64 // from the first lump at or after this wall second on, it sends nothing and stays open
 	dropAt  float64 // in the first lump at or after this wall second it sends half, cut in a packet, and closes
 }
@@ -268,6 +269,15 @@ func (p *tsRealProv) stream(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		p.mu.Unlock()
 	}()
+	if plan.headAt > 0 { // (a slow answer: it comes at headAt)
+		t := time.NewTimer(time.Until(p.start.Add(time.Duration(plan.headAt * p.scale * float64(time.Second)))))
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return
+		}
+	}
 	if plan.noHead {
 		<-ctx.Done()
 		return

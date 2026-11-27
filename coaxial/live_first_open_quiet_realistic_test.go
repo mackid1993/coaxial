@@ -63,3 +63,19 @@ func TestHLSFromTSRealisticFirstOpenQuietAskedAgain(t *testing.T) {
 			st, len(pieces), p.wall(), p.asked("7"))
 	}
 }
+
+// HLS built from the MPEG-TS, with a first connection that answers late (10 s) and then sends nothing: its first
+// video is due within firstWait of the ask, not firstWait again after the answer, so the new connection goes out
+// in time for the first playlist (segWait, 20 s). With the wait started over at the answer, it went out at 22 s
+// and the playlist was answered 504.
+func TestHLSFromTSRealisticFirstOpenAnsweredLateThenQuiet(t *testing.T) {
+	p := newTSRealProv(t, 1, 0)
+	feed := rpBuild(50, 1000, 27)
+	p.add("7", &rpChannel{feed: feed, lumps: rpLumps(14, 6, 12, 18, 24), back: 10, conns: []rpConn{{headAt: 10, noBytes: true}}})
+	base := rpFront(t, p, "ts", "")
+	st, list, _ := rpGet(t, base, "192.0.2.62", "/live/tv/easy/7.m3u8")
+	if pieces, _, _, _, _ := rpList(list); st != 200 || len(pieces) == 0 {
+		t.Fatalf("the player's first playlist was answered %d (%d pieces) after %.1f s; the provider was asked %d times",
+			st, len(pieces), p.wall(), p.asked("7"))
+	}
+}

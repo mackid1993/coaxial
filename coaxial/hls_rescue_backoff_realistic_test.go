@@ -70,7 +70,10 @@ func TestRealisticRescueWithNoAnswerIsNotTriedAtEveryReload(t *testing.T) {
 
 // The reopen is sent on to a new session whose own playlist answers 403 (some providers refuse at the video
 // server, not at the channel's address). The reload that made the rescue is handed the stalled session's
-// playlist, not the 403, and the channel is not opened again at every reload after it.
+// playlist, not the 403, and the channel is not opened again at every reload after it. Later reloads may get
+// the provider's 403: where the newest session wins, the reopen has already ended the stalled one, so there is
+// nothing valid left to hand back, as for a player straight at the provider. What this guards is that the
+// rescue is not tried again at every reload.
 func TestRealisticRescueWhoseNewSessionRefusesKeepsThePlaylist(t *testing.T) {
 	scaled(t, 1.0, 300)
 	p := newRealProv(t, realCfg{target: 0.4, gaps: []float64{0.4}, playlist: func(tok, n int, w http.ResponseWriter, r *http.Request) bool {

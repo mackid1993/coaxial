@@ -333,22 +333,10 @@ func TestWaitFirstOpenAnsweredLateThenQuiet(t *testing.T) {
 	}
 }
 
-// The same on HLS built from the MPEG-TS: its first playlist waits segWait (20 s) for pieces, so the new
-// connection must come before that or the player is answered 504.
-func TestWaitHLSFromTSFirstOpenAnsweredLateThenQuiet(t *testing.T) {
-	p := newWBProv(t, map[string][]wbConn{wbTS: {{head: 9, first: -1}}})
-	_, base := limFront(t, p.fp, "ts", "", advanced{})
-	st, list, _, took := wbGet(base, "192.0.2.72", "/live/tv/easy/7.m3u8")
-	if pieces, _, _, _, _ := rpList(list); st != 200 || len(pieces) == 0 {
-		t.Fatalf("the first playlist was answered %d (%d pieces) after %.1f s; the provider was asked at %v",
-			st, len(pieces), took, p.asked(wbTS))
-	}
-}
-
-// A slow but healthy first connection: it answers at 4 s and sends its opening burst at 7.5 s, both within
+// A slow but healthy first connection: it answers at 6 s and sends its opening burst at 10.5 s, both within
 // firstWait of the ask. It is asked once and plays.
 func TestWaitFirstOpenSlowAnswerLeftAlone(t *testing.T) {
-	p := newWBProv(t, map[string][]wbConn{wbTS: {{head: 4, first: 7.5}}})
+	p := newWBProv(t, map[string][]wbConn{wbTS: {{head: 6, first: 10.5}}})
 	_, base := limFront(t, p.fp, "ts", "", advanced{})
 	ctx, cancel := context.WithTimeout(context.Background(), secs(firstWait+6))
 	defer cancel()
@@ -357,8 +345,8 @@ func TestWaitFirstOpenSlowAnswerLeftAlone(t *testing.T) {
 	if n := len(p.asked(wbTS)); n != 1 {
 		t.Errorf("the provider was asked %d times, want 1: a slow but healthy first answer was given up on", n)
 	}
-	if at := rd.firstAfter(0); rd.status != 200 || at < 7 || at > 9 {
-		t.Errorf("the player was answered %d, first video at %.1f s (the provider sent it at 7.5 s)", rd.status, at)
+	if at := rd.firstAfter(0); rd.status != 200 || at < 10 || at > 12 {
+		t.Errorf("the player was answered %d, first video at %.1f s (the provider sent it at 10.5 s)", rd.status, at)
 	}
 }
 
