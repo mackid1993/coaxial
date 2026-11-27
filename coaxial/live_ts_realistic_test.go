@@ -107,8 +107,8 @@ func TestLiveTSRealisticSmallBufferPlayerKept(t *testing.T) {
 		t.Errorf("a player reading as fast as it plays was cut at %.1f s", rd.ended)
 	}
 	got := rd.bytes()
-	if at := rpIsPart(feed.data, got); at != 0 {
-		t.Errorf("the player was not sent the provider's stream in order from its start (found at %d)", at)
+	if at, want := rpIsPart(feed.data, got), p.firstFrom("9"); at != want {
+		t.Errorf("the player was not sent the provider's stream in order from its start (found at %d, the provider began at %d)", at, want)
 	}
 	if secs := float64(len(got)) / rate; secs < end-3 {
 		t.Errorf("the player was sent %.1f s of video in %.0f s", secs, end)

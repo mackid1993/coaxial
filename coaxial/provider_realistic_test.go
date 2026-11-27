@@ -157,6 +157,7 @@ type tsRealProv struct {
 	most   int            // the most open at once
 	kicked map[string]int // connections ended to make room (the cap) or by a new one for the same channel
 	sent   map[string]int // what the first connection of a channel has sent, in bytes
+	began  map[string]int // where in its feed the first connection of a channel started (see firstFrom)
 	pieces map[string]*rpHLS
 }
 
@@ -164,6 +165,7 @@ func newTSRealProv(t *testing.T, scale float64, cap int) *tsRealProv {
 	p := &tsRealProv{scale: scale, cap: cap, chans: map[string]*rpChannel{}, asks: map[string]int{},
 		kicked: map[string]int{}, sent: map[string]int{}, pieces: map[string]*rpHLS{}}
 	p.fp = newFakeProv(t, true, func(_ *fakeProv, w http.ResponseWriter, r *http.Request) bool { return p.serve(w, r) })
+	p.began = map[string]int{}
 	p.start = time.Now()
 	return p
 }
@@ -291,6 +293,16 @@ func (p *tsRealProv) stream(w http.ResponseWriter, r *http.Request, id string) {
 			}
 			from = c.feed.upTo(newest)
 		}
+	}
+	if n == 1 {
+		p.mu.Lock()
+		if _, ok := p.began[id]; !ok {
+			p.began[id] = from
+			if k > 0 {
+				p.began[id] = c.feed.upTo(c.lumps[k-1].upTo - c.back)
+			}
+		}
+		p.mu.Unlock()
 	}
 	for ; k < len(c.lumps); k++ {
 		l := c.lumps[k]
@@ -693,6 +705,15 @@ func rpPlay(ctx context.Context, t *testing.T, p *tsRealProv, base, dev, channel
 
 // rpIsPart: where got is found whole in want (-1: it is not), for a reader that should have been passed the
 // provider's bytes untouched.
+// firstFrom: where in its feed the first connection of channel id started. On a slow machine the first ask can
+// come later than 0.5 s after the provider started, and then its opening burst starts some seconds back from the
+// newest video, as a real provider's does.
+func (p *tsRealProv) firstFrom(id string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.began[id]
+}
+
 func rpIsPart(want, got []byte) int {
 	if len(got) == 0 {
 		return -1
