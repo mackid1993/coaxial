@@ -90,7 +90,11 @@ func insideStatus(w http.ResponseWriter, r *http.Request) {
 			answer(w, 400, "", "")
 		}
 	case "/playing": // what plays, and nothing else (see playingNow)
-		data, _ := json.Marshal(map[string]any{"playing": playingNow()})
+		video := -1.0 // (seconds since video last reached a player; -1: none since the start)
+		if at := videoAt.Load(); at > 0 {
+			video = time.Since(time.Unix(0, at)).Seconds()
+		}
+		data, _ := json.Marshal(map[string]any{"playing": playingNow(), "video_s": video})
 		answer(w, 200, "application/json", string(data))
 	default:
 		answer(w, 404, "", "")

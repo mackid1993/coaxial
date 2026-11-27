@@ -705,6 +705,9 @@ func (f *front) refusal(who string, w what, why string) *refused {
 		if lim == 1 {
 			line = "the one connection the account allows is in use"
 			text = "The one connection your provider allows is in use right now.\n"
+		} else if lim <= 0 { // (no number typed in: a stream cut to make room has not closed at the provider yet)
+			line = "a stream that was cut to make room has not closed at the provider yet"
+			text = "A stream that was stopped to make room for this one has not closed at your provider yet.\n"
 		}
 		text += "Coaxial turned this down so nobody who is watching or recording gets cut off. Try again when something stops.\n"
 	}

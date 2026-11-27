@@ -792,6 +792,17 @@ func noted(bin, file string) string {
 }
 
 // nothingPlaying: the proxy part answers and says no one is watching or recording.
+// videoMovedWithin: video reached a player in the last d, as the proxy part saw it. That is the tunnel working,
+// whatever its health check says: a VPN client judges its tunnel by the traffic that comes through (OpenVPN's
+// ping-restart), not by a separate look. No answer from the proxy part: not known, false.
+func videoMovedWithin(d time.Duration) bool {
+	var in struct {
+		Video *float64 `json:"video_s"`
+	}
+	data, ok := askProxy("/playing", 8*time.Second)
+	return ok && json.Unmarshal(data, &in) == nil && in.Video != nil && *in.Video >= 0 && *in.Video < d.Seconds()
+}
+
 func nothingPlaying() bool {
 	var in struct{ Playing []any }
 	data, ok := askProxy("/playing", 8*time.Second)
@@ -976,6 +987,7 @@ func (l *launcher) programUpdate() map[string]any {
 func (l *launcher) watchProgram() {
 	time.Sleep(20 * time.Second)
 	var asked, quietSince, downSince time.Time
+	keptNoted := false // (said once per spell: the choice kept while video still went through)
 	bin := binDir(l.dir)
 	good := connected(bin)
 	for ; ; time.Sleep(20 * time.Second) {
@@ -1002,6 +1014,14 @@ func (l *launcher) watchProgram() {
 			} else if l.undoBuild(good, time.Since(downSince)) {
 				downSince = time.Time{}
 				continue
+			} else if named && time.Since(downSince) > 2*time.Minute && videoMovedWithin(30*time.Second) {
+				// The health check calls the VPN down, but video still goes through it: a look that fails while
+				// the tunnel works (a busy machine) must not cut what plays. A dead tunnel stops video within
+				// seconds, and then the choice is dropped as below.
+				if !keptNoted {
+					warn("VPN server: the VPN health check has failed for 2 minutes, but video is still going through; the server is kept")
+					keptNoted = true
+				}
 			} else if named && time.Since(downSince) > 2*time.Minute {
 				warn("VPN server: the VPN has not connected for 2 minutes on the server chosen; letting gluetun choose")
 				l.mu.Lock()
@@ -1014,7 +1034,7 @@ func (l *launcher) watchProgram() {
 			quietSince = time.Time{}
 			continue
 		}
-		downSince = time.Time{}
+		downSince, keptNoted = time.Time{}, false
 		if works != "" && works != good {
 			writeWhole(filepath.Join(bin, "good.json"), map[string]string{"digest": works})
 			good = works

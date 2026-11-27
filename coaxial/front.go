@@ -397,8 +397,15 @@ func (c *counted) Write(p []byte) (int, error) {
 	}
 	n, err := c.ResponseWriter.Write(p)
 	c.bytes += int64(n)
+	if n > 0 && (c.kind == "media" || c.kind == "cdn") {
+		videoAt.Store(time.Now().UnixNano())
+	}
 	return n, err
 }
+
+// videoAt: when video last reached a player (live MPEG-TS, HLS pieces, films): the tunnel works (see
+// videoMovedWithin).
+var videoAt atomic.Int64
 
 func (c *counted) Flush() {
 	if fl, ok := c.ResponseWriter.(http.Flusher); ok {
