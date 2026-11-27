@@ -110,15 +110,15 @@ var errStop = errors.New("the feed's reader stopped")
 // (a connection can go quiet without closing; through a VPN tunnel that happens). A player straight at the
 // provider asks again on a new connection after its own wait; the readers waiting here are asked for again the
 // same way, twice at most, while anyone waits. It was answered 504 instead, with no new connection made.
-// firstWait: seconds a channel's first provider connection may take to answer and to send its first video before
+// firstWait: seconds (8, Media3's read timeout, AGENTS.md rule 14) a channel's first provider connection may take to answer and to send its first video before
 // it is asked again (firstQuiet). A provider's opening burst comes within a second; a player straight at the
 // provider waits 8 s (Media3) to 20 s (AetherEngine) before it reconnects, and a playlist of HLS built from the
 // MPEG-TS waits segWait (20 s) for its first pieces, so the new connection must come well before that. Both are
-// counted from the ask, connecting included: the new connection goes out at most 13 s after it (an answer in the
+// counted from the ask, connecting included: the new connection goes out at most 9 s after it (an answer in the
 // last second still gets one for its first video, see leftOf). The first video used to get firstWait again once
 // the answer came, so an answer at 11 s that then sent nothing was asked again only after 23 s, once that
-// playlist had been answered 504. A provider that never answers in time is asked 3 times (about 36 to 39 s).
-const firstWait = 12
+// playlist had been answered 504. A provider that never answers in time is asked 3 times (about 24 to 27 s).
+const firstWait = 8
 
 func firstQuiet(ctx context.Context, ch *channel, again bool, err error, tries *int, st *streamStats) bool {
 	if again || *tries >= 2 || ctx.Err() != nil || !wentQuiet(err) || !watched(ch) {
@@ -1269,7 +1269,7 @@ func tsSource(target string, h http.Header, a *askLog) source {
 				wait = reopenWait // readers are waiting
 			} else {
 				// Its first answer within firstWait, connecting included (see firstWait).
-				wait = math.Min(wait, firstWait-connectWait.Seconds())
+				wait = math.Min(wait, firstWait-connectWait.Seconds()) // (under 0: fetch's own timer is connectWait plus this)
 			}
 			r, err := fetch(ctx, target, h, opts{wait: wait, ask: st.asking(again)})
 			// A channel the provider ended while it was watched is often being restarted on the provider's side: for a
