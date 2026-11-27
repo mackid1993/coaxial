@@ -207,7 +207,7 @@ func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh 
 	mu.Lock()
 	if sg := segmenters[key]; sg != nil && !sg.over {
 		if sg.players[who] == 0 { // a device new to this builder has left any builder of its own
-			releaseFor(provider, who, key)
+			releaseFor(f, provider, who, key)
 		}
 		mu.Unlock()
 		return sg, nil
@@ -215,12 +215,12 @@ func segmenterFor(ctx context.Context, f *front, key, tsURI, who, id string, rh 
 	ch := channels[key]
 	first := ch == nil
 	if !first { // moving onto a channel already open: an HLS builder this device left goes too
-		releaseFor(provider, who, key)
+		releaseFor(f, provider, who, key)
 	}
 	if first {
 		was := lastOpen[lineOf(provider, f)]
 		lastOpen[lineOf(provider, f)] = opened{mono(), key}
-		releaseFor(provider, who, key)
+		releaseFor(f, provider, who, key)
 		for _, c := range channels { // channels of this provider that nobody reads go first (changing channel)
 			if c.provider == provider {
 				c.dropIfEmpty()
@@ -558,10 +558,18 @@ func pesPTS(b []byte) (float64, bool) {
 
 // releaseFor: a device that opens another channel of a provider has left its old one. A builder only that
 // device was using, or one every device has stopped asking for, lets go now, so its provider connection is
-// free at once (one-connection accounts). Two providers in the settings can be two accounts on one server address:
+// free at once (one-connection accounts). Only there, or where no number of connections is typed in: on an
+// account with two or more, one address may well read two channels at once (a TV recording one and showing
+// another, a multiview app, a media server), and letting the other go made the two open each other again at
+// every reload, a new connection at the provider and new numbering each time. There the old builder ends
+// when it is no longer asked for (segIdle), and the connection limit makes room sooner when it is reached
+// (decide in advanced.go), as for a live MPEG-TS channel (single in tsSource). Two providers in the settings can be two accounts on one server address:
 // a channel opened on one account frees nothing on the other, and a device that plays on both (a media server
 // with two lines) has not left its channel there, so only builders of the same account are let go. (mu held)
-func releaseFor(provider, who, key string) {
+func releaseFor(f *front, provider, who, key string) {
+	if f != nil && f.limit() > 1 {
+		return
+	}
 	for k, sg := range segmenters {
 		if sg.provider != provider || k == key || accountOf(k) != accountOf(key) {
 			continue

@@ -1681,14 +1681,14 @@ func live(w http.ResponseWriter, r *http.Request, rt *route, path string) {
 	ch := channels[key]
 	first := ch == nil
 	if !first { // moving onto a channel already open: an HLS builder this device left goes too
-		releaseFor(provider, rt.client, key)
+		releaseFor(rt.f, provider, rt.client, key)
 	}
 	if first {
 		// Changing channel: the hang-up on the old one and this request arrive in either order. Channels of
 		// this provider nobody reads go now; a hang-up just behind gets 30 ms; the provider gets dropGap to see it.
 		was := lastOpen[lineOf(provider, rt.f)]
 		lastOpen[lineOf(provider, rt.f)] = opened{mono(), key}
-		releaseFor(provider, rt.client, key)
+		releaseFor(rt.f, provider, rt.client, key)
 		var mine []*channel
 		live := false
 		for _, c := range channels {
