@@ -235,7 +235,10 @@ func TestClockFixReplayClips(t *testing.T) {
 		missed := 0
 		for seed := int64(1); seed <= 20; seed++ {
 			out, _ := runFixReads(in, seed, 1316, 32768)
-			if len(out) != len(in) {
+			// Nothing is added, and whole packets only are left out: video the provider sends again after a
+			// jump is dropped on purpose (fea1df4), so a clip that holds some comes out shorter. What matters
+			// is checked below: no clock jump reaches the player.
+			if len(out) > len(in) || len(out)%188 != len(in)%188 {
 				t.Errorf("%s seed %d: %d bytes out for %d in", filepath.Base(f), seed, len(out), len(in))
 			}
 			pcr, pts := tsClocks(out)
