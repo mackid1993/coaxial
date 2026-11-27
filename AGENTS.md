@@ -12,14 +12,21 @@ cleanly, and send it all through the VPN. It is a proxy, not a player.
    reads, list downloads, server pings, speed tests or health checks that leave the box. Background work
    runs only when nothing plays, as rarely as the job allows (hourly is the default, never minutes),
    and the page says "when nothing is playing". Every build that broke this caused freezes or
-   spinners that stopped the moment the work was removed.
+   spinners that stopped the moment the work was removed. Two things do run while something plays,
+   by design and small: the status page's exit-address look-up and its VPN pings, only while the page
+   is open; and gluetun's own server-list updater, off by default and only on when the user sets
+   `update_hours`. Every stop, move or update of the VPN checks what plays right before it acts (no
+   answer from the proxy part counts as playing, video still flowing counts as playing).
 2. **Never hold or delay video in the proxy.** No reserve, no smoothing, no pacing of the opener, no
    steady delivery for recorders, no held tail packet. Anything held is lost when a recorder hangs up on
    the minute, and every reshaping of the provider's bursts tried so far made players worse.
 3. **Measure a stream fix as seconds of video in hand at the player, never bytes.** Bytes reaching the
    player in the same second they arrive from the provider do not clear the proxy. Compute, per reader,
    video duration (PCR/PTS) delivered ahead of wall clock at the moment the next lump arrives after a
-   provider pause. A healthy build keeps about 9 to 11 s; the broken one fell to 0.3 s.
+   provider pause. On the player-lead bench's recorded feed (`live_lead_test.go`, `COAXIAL_REPLAY_TS`) a
+   healthy build's fewest seconds in hand are 5.8 s for the first player and 7.8 s for the joiner, with 0
+   stalls through a drop; the broken build fell to 0.3 s. (Earlier write-ups said 9 to 11 s, measured on
+   another feed at another moment: compare a change with the bench's own numbers before and after.)
 4. **Never rewrite proven live-path code to fix a rare glitch found only by synthetic tests.** The live
    path in `main.go` is the game-day build's (`bbbd5bf`). Any change to it must first match or beat that
    build on the player-lead bench (`live_lead_test.go`, first opener and joiner, through a provider drop).
@@ -55,7 +62,10 @@ cleanly, and send it all through the VPN. It is a proxy, not a player.
     player is simple and never recovers on its own: it waits for whatever Coaxial waits, and a player
     that does reconnect lands back on the same shared channel. So no wait on a live path may be
     longer than a player's own (ExoPlayer reads 8 s, AetherEngine 20 s): give up, ask again at once on a
-    new connection, and carry a half-sent piece on with a Range. When one path gets a timeout fix, check
+    new connection, and carry a half-sent piece on with a Range. HLS uses 8 s (`pieceWait`). Live
+    MPEG-TS uses longer waits on purpose: `liveQuiet` 20 s between reads, because healthy providers pause
+    15 to 17 s between lumps, and `firstWait` 12 s for a channel's first answer and video, counted from
+    the ask, so a provider that needs a few seconds still plays as it would straight at a player. When one path gets a timeout fix, check
     the same rule on every other path (live MPEG-TS, HLS playlists, HLS pieces, the HLS-to-TS bridge,
     HLS built from TS) in the same change. Watch for these log lines; each one is a connection that went
     quiet: `asked again on a new connection`, `stopped part way`, `a channel asked for again`.

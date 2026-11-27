@@ -347,8 +347,8 @@ relies on, such as `iptables` and `openvpn`, come from the image and change only
 - **Mixed formats.** On a `ts` provider, a player that asks for a live channel as HLS is given HLS cut from the same
   shared MPEG-TS stream, in pieces of about 4 seconds that each start at a keyframe. That HLS leaves the channel 30
   seconds after its players stop asking for it. On an `hls` provider, a reader that asks for MPEG-TS is fed from the
-  players' one HLS session, at playing speed, with everything waiting sent just before each whole minute so a
-  recording that stops on the minute loses nothing. If the provider's pieces start numbering their
+  players' one HLS session. Each piece is handed on whole the moment it has been fetched, never held back or
+  paced, so a recording that stops on the minute loses nothing. If the provider's pieces start numbering their
   streams afresh (another packager, an advert), they are handed on under the numbers the reader started with, so
   recorders carry on.
 - **When a provider drops a channel.** If a stream that ran at least 30 seconds ends while someone is watching,
