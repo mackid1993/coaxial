@@ -690,7 +690,7 @@ func playing(provName map[string]string) string {
 		}
 	}
 	for _, h := range hlsRows {
-		if now-h.last <= 30 {
+		if now-h.last <= h.keep() {
 			rows = append(rows, row{h.who, h.id, h.port, h.provider, h.format(), hms(h.last - h.first), "-"})
 		}
 	}

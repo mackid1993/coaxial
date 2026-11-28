@@ -633,6 +633,21 @@ type hlsRow struct {
 	catchUp                 bool  // a catch-up watched as HLS (see catchUpRead), not a live channel
 }
 
+// catchUpRowFor: seconds a catch-up watched as HLS still counts as being watched after its last piece. Its
+// playlist is complete and asked for once, and a player reads its pieces ahead in bursts: one read 3 pieces
+// (30 s of video) about every 30 s, at times 31 s apart, and each such gap ended the row and started a new one,
+// a "stopped reading" and a "started reading" line every minute, and "Playing right now" flickered. Live
+// channels keep 30 s: their playlist is asked for every few seconds.
+const catchUpRowFor = 90.0
+
+// keep: how long after its last request the row still counts as playing.
+func (h *hlsRow) keep() float64 {
+	if h.catchUp {
+		return catchUpRowFor
+	}
+	return 30
+}
+
 // format: what the status list calls the row.
 func (h *hlsRow) format() string {
 	if h.catchUp {
@@ -923,7 +938,7 @@ func forgetIdle() { // (mu held)
 		}
 	}
 	for k, row := range hlsRows {
-		if now-row.last > 30 {
+		if now-row.last > row.keep() {
 			delete(hlsRows, k)
 		}
 	}
@@ -1086,13 +1101,13 @@ func (f *front) keepLive(key, target, who, id, seen string, want what, data []by
 
 // catchUpRead: device who asked for a piece of a catch-up watched as HLS (a session kept by keepDirect). Its
 // playlist is complete and asked for once, so the pieces are all that shows it is being watched: they give it a
-// row in the status list, and it counts as playing (playingNow), until no piece of it was asked for in 30 s, as
-// a live HLS channel does by its playlist requests. Without the row nothing showed it, and what waits while
+// row in the status list, and it counts as playing (playingNow), until no piece of it was asked for in
+// catchUpRowFor seconds, as a live HLS channel does by its playlist requests. Without the row nothing showed it, and what waits while
 // anything plays knew of it only where the pieces came typed as video. One log line when the reading starts and
 // one when it ends, none per piece. Nobody is asked anything. (mu held)
 func (f *front) catchUpRead(who, id string) {
 	now, rk := mono(), who+" "+f.base+" "+id+" catch-up"
-	if row := hlsRows[rk]; row != nil && now-row.last <= 30 {
+	if row := hlsRows[rk]; row != nil && now-row.last <= row.keep() {
 		row.last = now
 		return
 	}
@@ -1103,7 +1118,7 @@ func (f *front) catchUpRead(who, id string) {
 	go func() { // (looks again when the row would be over, and every few seconds until then)
 		for {
 			mu.Lock()
-			left := row.last + 30 - mono()
+			left := row.last + row.keep() - mono()
 			if left < 0 {
 				if hlsRows[rk] == row {
 					delete(hlsRows, rk)

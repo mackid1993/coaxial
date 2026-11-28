@@ -183,7 +183,7 @@ func statusData() map[string]any {
 		}
 	}
 	for _, h := range hlsRows {
-		if now-h.last <= 30 {
+		if now-h.last <= h.keep() {
 			row(h.who, h.id, h.port, h.format(), h.last-h.first, h.bytes)
 		}
 	}
@@ -269,7 +269,7 @@ func playingNow() []any {
 		}
 	}
 	for _, h := range hlsRows {
-		if now-h.last <= 30 {
+		if now-h.last <= h.keep() {
 			out = append(out, map[string]any{"device": h.who})
 		}
 	}

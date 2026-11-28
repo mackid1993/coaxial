@@ -200,14 +200,14 @@ func TestCatchUpHLSCountsAsPlaying(t *testing.T) {
 	if started() != 1 || stopped() != 0 {
 		t.Errorf("9 pieces read: %d line(s) for the start and %d for the end, want 1 and 0", started(), stopped())
 	}
-	// The player stops. Half a minute later the catch-up is off the list, and the log says so once.
+	// The player stops. Once catchUpRowFor has gone by the catch-up is off the list, and the log says so once.
 	mu.Lock()
 	for _, row := range hlsRows {
-		row.last -= 31
+		row.last -= catchUpRowFor + 1
 	}
 	mu.Unlock()
 	if rows := listed(dev); len(rows) != 0 {
-		t.Errorf("31 s after the last piece the status list still has %v", rows)
+		t.Errorf("%.0f s after the last piece the status list still has %v", catchUpRowFor+1, rows)
 	}
 	for end := time.Now().Add(5 * time.Second); stopped() == 0 && time.Now().Before(end); {
 		time.Sleep(50 * time.Millisecond)
